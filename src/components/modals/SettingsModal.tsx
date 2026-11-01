@@ -13,35 +13,79 @@ import {
   MessageSquare, 
   Calendar,
   ExternalLink,
-  AlertCircle
+  AlertCircle,
+  Loader2,
+  Download,
+  RefreshCw,
+  CheckCircle2,
+  AlertTriangle,
+  Layers,
+  Search
 } from 'lucide-react';
-import { UserProfile } from '../../types';
+import { UserProfile, AnimeItem } from '../../types';
+import {
+  fetchAniListUser,
+  fetchAniListAnimeList,
+  calculateAniListImportPreview,
+  mergeAniListImport,
+  STATUS_LABELS_PT,
+  type AniListUser,
+  type AniListAnimeEntry,
+  type AniListImportPreview
+} from '../../services/anilistService';
+import {
+  fetchMALServerStatus,
+  fetchMALAuthUrl,
+  fetchMALAnimeList,
+  disconnectMALServer,
+  calculateMALImportPreview,
+  mergeMALImport,
+  MAL_STATUS_LABELS_PT,
+  type MALAnimeEntry,
+  type MALImportPreview,
+  type MALServerStatus,
+} from '../../services/malService';
+import { useAuth } from '../../contexts/AuthContext';
 
 interface SettingsModalProps {
   isOpen: boolean;
   initialTab?: 'profile' | 'privacy' | 'connected' | 'security';
   profile: UserProfile;
+  currentAnimes?: AnimeItem[];
   onClose: () => void;
   onSaveProfile: (updated: Partial<UserProfile>) => void;
   onUpdateAvatar: (url: string) => void;
   onUpdateBanner: (url: string) => void;
   onRemoveAvatar: () => void;
   onRemoveBanner: () => void;
+  onSyncAniList?: (
+    mergedAnimes: AnimeItem[],
+    anilistAccount: UserProfile['externalAccounts']['anilist']
+  ) => void;
+  onSyncMAL?: (
+    mergedAnimes: AnimeItem[],
+    malAccount: UserProfile['externalAccounts']['mal']
+  ) => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   initialTab = 'profile',
   profile,
+  currentAnimes = [],
   onClose,
   onSaveProfile,
   onUpdateAvatar,
   onUpdateBanner,
   onRemoveAvatar,
-  onRemoveBanner
+  onRemoveBanner,
+  onSyncAniList,
+  onSyncMAL
 }) => {
   const [prevInitialTab, setPrevInitialTab] = useState(initialTab);
   const [activeTab, setActiveTab] = useState<'profile' | 'privacy' | 'connected' | 'security'>(initialTab);
+
+  const { user } = useAuth();
 
   // Synchronously update activeTab whenever initialTab prop changes (no render delay or flash)
   if (prevInitialTab !== initialTab) {
@@ -65,8 +109,238 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   // Connected accounts state
   const [anilistConnected, setAnilistConnected] = useState(profile.externalAccounts.anilist.connected);
+  const [anilistUsername, setAnilistUsername] = useState(profile.externalAccounts.anilist.username || '');
+  const [anilistAvatarUrl, setAnilistAvatarUrl] = useState(profile.externalAccounts.anilist.avatarUrl || '');
+  const [anilistLastSync, setAnilistLastSync] = useState(profile.externalAccounts.anilist.lastSync || '');
+
   const [malConnected, setMalConnected] = useState(profile.externalAccounts.mal.connected);
+  const [malUsername, setMalUsername] = useState(profile.externalAccounts.mal.username || '');
+  const [malAvatarUrl, setMalAvatarUrl] = useState(profile.externalAccounts.mal.avatarUrl || '');
+  const [malLastSync, setMalLastSync] = useState(profile.externalAccounts.mal.lastSync || '');
+
+  // MAL Server status & connection state
+  const [malStatus, setMalStatus] = useState<MALServerStatus | null>(null);
+  const [isStartingMALAuth, setIsStartingMALAuth] = useState(false);
+  const [malAuthError, setMalAuthError] = useState<string | null>(null);
+  const [isConfirmingDisconnectMAL, setIsConfirmingDisconnectMAL] = useState(false);
+
+  // MAL Collection Query, Preview and Import state
+  const [isFetchingMALList, setIsFetchingMALList] = useState(false);
+  const [malListError, setMalListError] = useState<string | null>(null);
+  const [rawMALEntries, setRawMALEntries] = useState<MALAnimeEntry[] | null>(null);
+  const [malPreview, setMalPreview] = useState<MALImportPreview | null>(null);
+  const [updateExistingProgressMAL, setUpdateExistingProgressMAL] = useState(true);
+  const [isImportingMAL, setIsImportingMAL] = useState(false);
+  const [malSuccessMsg, setMalSuccessMsg] = useState<string | null>(null);
+
+  // Check MAL server status on mount
+  useEffect(() => {
+    let isMounted = true;
+    fetchMALServerStatus()
+      .then((status) => {
+        if (isMounted) setMalStatus(status);
+      })
+      .catch(() => {});
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Listen for MAL OAuth popup callback postMessage
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      if (!event.data || typeof event.data !== 'object') return;
+      if (typeof window !== 'undefined' && event.origin !== window.location.origin) return;
+      if (event.data.type === 'MAL_AUTH_SUCCESS') {
+        const payload = event.data.payload || event.data;
+        const username = payload.username;
+        const picture = payload.picture || payload.avatarUrl || '';
+        if (username) {
+          setMalConnected(true);
+          setMalUsername(username);
+          setMalAvatarUrl(picture);
+          setMalAuthError(null);
+          setIsStartingMALAuth(false);
+          setMalSuccessMsg(`Conta @${username} do MyAnimeList conectada com sucesso!`);
+          onSaveProfile({
+            externalAccounts: {
+              ...profile.externalAccounts,
+              mal: {
+                connected: true,
+                username,
+                avatarUrl: picture,
+              },
+            },
+          });
+        }
+      } else if (event.data.type === 'MAL_AUTH_ERROR') {
+        setMalAuthError(event.data.message || 'Falha na autorização com o MyAnimeList.');
+        setIsStartingMALAuth(false);
+      }
+    };
+
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, [profile.externalAccounts, onSaveProfile]);
+
+  const handleConnectMAL = async () => {
+    setIsStartingMALAuth(true);
+    setMalAuthError(null);
+    setMalSuccessMsg(null);
+    try {
+      if (!user) {
+        setMalAuthError(
+          'É necessário estar autenticado com uma conta Hikari para autorizar a sincronização com o MyAnimeList.'
+        );
+        setIsStartingMALAuth(false);
+        return;
+      }
+
+      const status = await fetchMALServerStatus();
+      setMalStatus(status);
+      if (!status.configured) {
+        setMalAuthError(
+          'O Client ID do MyAnimeList ainda não foi configurado no servidor. Defina a variável de ambiente MAL_CLIENT_ID.'
+        );
+        setIsStartingMALAuth(false);
+        return;
+      }
+
+      const idToken = await user.getIdToken();
+      const { url } = await fetchMALAuthUrl(idToken);
+      const width = 600;
+      const height = 750;
+      const left = window.screenX + (window.outerWidth - width) / 2;
+      const top = window.screenY + (window.outerHeight - height) / 2;
+      const popup = window.open(
+        url,
+        'mal_oauth_popup',
+        `width=${width},height=${height},left=${left},top=${top},status=no,menubar=no,toolbar=no`
+      );
+
+      if (!popup) {
+        setMalAuthError('O navegador bloqueou a janela pop-up. Por favor, permita pop-ups para conectar ao MyAnimeList.');
+        setIsStartingMALAuth(false);
+        return;
+      }
+
+      const checkTimer = setInterval(() => {
+        if (popup.closed) {
+          clearInterval(checkTimer);
+          setIsStartingMALAuth(false);
+        }
+      }, 1000);
+    } catch (err) {
+      setMalAuthError(err instanceof Error ? err.message : 'Falha ao iniciar autenticação com o MyAnimeList.');
+      setIsStartingMALAuth(false);
+    }
+  };
+
+  const handleDisconnectMAL = async () => {
+    if (user) {
+      try {
+        const idToken = await user.getIdToken();
+        await disconnectMALServer(idToken);
+      } catch {
+        // offline/demo fallback
+      }
+    }
+    setMalConnected(false);
+    setMalUsername('');
+    setMalAvatarUrl('');
+    setMalLastSync('');
+    setMalPreview(null);
+    setRawMALEntries(null);
+    setIsConfirmingDisconnectMAL(false);
+    onSaveProfile({
+      externalAccounts: {
+        ...profile.externalAccounts,
+        mal: { connected: false },
+      },
+    });
+    setMalSuccessMsg('Conta MyAnimeList desconectada. Sua lista de animes e animes manuais foram preservados.');
+  };
+
+  const handleFetchMALList = async () => {
+    setIsFetchingMALList(true);
+    setMalListError(null);
+    setMalPreview(null);
+    setMalSuccessMsg(null);
+    try {
+      if (!user) {
+        setMalListError(
+          'É necessário estar autenticado com uma conta Hikari para consultar a lista do MyAnimeList.'
+        );
+        return;
+      }
+      const idToken = await user.getIdToken();
+      const entries = await fetchMALAnimeList(idToken);
+      setRawMALEntries(entries);
+      const preview = calculateMALImportPreview(entries, currentAnimes, malUsername);
+      setMalPreview(preview);
+    } catch (err) {
+      setMalListError(
+        err instanceof Error ? err.message : 'Falha ao buscar a lista do MyAnimeList.'
+      );
+    } finally {
+      setIsFetchingMALList(false);
+    }
+  };
+
+  const handleConfirmMALImport = () => {
+    if (!rawMALEntries || !malPreview) return;
+    setIsImportingMAL(true);
+    const { mergedList, addedCount, updatedCount } = mergeMALImport(
+      rawMALEntries,
+      currentAnimes,
+      updateExistingProgressMAL
+    );
+
+    const now = new Date();
+    const formattedDate = `${now.toLocaleDateString('pt-BR', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+    })} às ${now.toLocaleTimeString('pt-BR', {
+      hour: '2-digit',
+      minute: '2-digit',
+    })}`;
+
+    setMalLastSync(formattedDate);
+
+    if (onSyncMAL) {
+      onSyncMAL(mergedList, {
+        connected: true,
+        username: malUsername,
+        avatarUrl: malAvatarUrl,
+        lastSync: formattedDate,
+      });
+    }
+
+    setMalSuccessMsg(
+      `Importação do MyAnimeList concluída com sucesso! ${addedCount} novos animes adicionados e ${updatedCount} animes atualizados na sua lista.`
+    );
+    setMalPreview(null);
+    setRawMALEntries(null);
+    setIsImportingMAL(false);
+  };
   
+  // AniList Connection form state
+  const [inputAniListUsername, setInputAniListUsername] = useState('');
+  const [isCheckingAniListUser, setIsCheckingAniListUser] = useState(false);
+  const [aniListUserError, setAniListUserError] = useState<string | null>(null);
+  const [verifiedAniListUser, setVerifiedAniListUser] = useState<AniListUser | null>(null);
+  const [isConfirmingDisconnect, setIsConfirmingDisconnect] = useState(false);
+
+  // AniList Collection Query, Preview and Import state
+  const [isFetchingCollection, setIsFetchingCollection] = useState(false);
+  const [collectionError, setCollectionError] = useState<string | null>(null);
+  const [rawIncomingEntries, setRawIncomingEntries] = useState<AniListAnimeEntry[] | null>(null);
+  const [aniListPreview, setAniListPreview] = useState<AniListImportPreview | null>(null);
+  const [updateExistingProgress, setUpdateExistingProgress] = useState(true);
+  const [isImporting, setIsImporting] = useState(false);
+  const [importSuccessMsg, setImportSuccessMsg] = useState<string | null>(null);
+
   // Avatar selection source ('custom' | 'anilist' | 'mal')
   const [avatarSource, setAvatarSource] = useState<'custom' | 'anilist' | 'mal'>('custom');
 
@@ -91,13 +365,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       externalAccounts: {
         anilist: { 
           connected: anilistConnected, 
-          username: anilistConnected ? (profile.externalAccounts.anilist.username || username || profile.username) : undefined,
-          avatarUrl: anilistConnected ? profile.externalAccounts.anilist.avatarUrl : undefined
+          username: anilistConnected ? anilistUsername : undefined,
+          avatarUrl: anilistConnected ? anilistAvatarUrl : undefined,
+          lastSync: anilistConnected ? anilistLastSync : undefined
         },
         mal: { 
           connected: malConnected, 
-          username: malConnected ? (profile.externalAccounts.mal.username || username || profile.username) : undefined,
-          avatarUrl: malConnected ? profile.externalAccounts.mal.avatarUrl : undefined
+          username: malConnected ? malUsername : undefined,
+          avatarUrl: malConnected ? malAvatarUrl : undefined,
+          lastSync: malConnected ? malLastSync : undefined
         }
       }
     });
@@ -592,70 +868,1053 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div>
                   <h3 className="text-sm font-bold text-white">Contas Conectadas</h3>
                   <p className="mt-1 text-xs text-purple-300/70">
-                    Prepare a sincronização das suas listas e notas com plataformas externas parceiras.
+                    Vincule suas contas de plataformas parceiras para consultar e importar sua lista de animes e foto de perfil.
                   </p>
                 </div>
 
-                {/* AniList Card */}
-                <div className="flex items-center justify-between gap-4 rounded-xl border border-purple-900/30 bg-[#0A0713] p-4">
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#02A9FF]/10 text-[#02A9FF] border border-[#02A9FF]/30 font-bold">
-                      AL
+                {/* Success Banners */}
+                {importSuccessMsg && (
+                  <div
+                    role="alert"
+                    className="flex items-start justify-between gap-3 rounded-xl border border-emerald-500/40 bg-emerald-950/40 p-3.5 text-xs text-emerald-200 animate-in fade-in"
+                  >
+                    <div className="flex items-start gap-2.5">
+                      <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
+                      <span className="leading-relaxed">{importSuccessMsg}</span>
                     </div>
-                    <div>
-                      <div className="text-xs font-bold text-white">AniList</div>
-                      <p className="text-[11px] text-purple-300/60">
-                        {anilistConnected ? 'Conta conectada com sucesso' : 'Importação e sincronização de progresso'}
-                      </p>
+                    <button
+                      type="button"
+                      onClick={() => setImportSuccessMsg(null)}
+                      className="text-emerald-400 hover:text-white cursor-pointer shrink-0"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                )}
+
+                {malSuccessMsg && (
+                  <div
+                    role="alert"
+                    className="flex items-start justify-between gap-3 rounded-xl border border-emerald-500/40 bg-emerald-950/40 p-3.5 text-xs text-emerald-200 animate-in fade-in"
+                  >
+                    <div className="flex items-start gap-2.5">
+                      <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
+                      <span className="leading-relaxed">{malSuccessMsg}</span>
                     </div>
+                    <button
+                      type="button"
+                      onClick={() => setMalSuccessMsg(null)}
+                      className="text-emerald-400 hover:text-white cursor-pointer shrink-0"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                )}
+
+                {/* AniList Card & Management */}
+                <div className="rounded-xl border border-purple-900/40 bg-[#0A0713] p-4 space-y-4">
+                  {/* AniList Top Header */}
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#02A9FF]/15 text-[#02A9FF] border border-[#02A9FF]/30 font-bold shrink-0 text-base shadow-sm">
+                        AL
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-bold text-white">AniList</span>
+                          {anilistConnected ? (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-950/80 border border-emerald-500/40 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                              <Check className="h-2.5 w-2.5" /> Conectado
+                            </span>
+                          ) : (
+                            <span className="rounded bg-neutral-900/80 border border-neutral-700/50 px-2 py-0.5 text-[10px] font-medium text-neutral-400">
+                              Não conectado
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-purple-300/60 mt-0.5">
+                          {anilistConnected
+                            ? `Conta vinculada: @${anilistUsername}`
+                            : 'Vincule seu nome de usuário público para importar sua coleção de animes.'}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Quick status button when connected */}
+                    {anilistConnected && !isConfirmingDisconnect && (
+                      <button
+                        type="button"
+                        onClick={() => setIsConfirmingDisconnect(true)}
+                        className="rounded-lg border border-rose-900/50 bg-rose-950/40 hover:bg-rose-900/50 text-rose-300 hover:text-rose-100 px-3 py-1.5 text-xs font-semibold transition-colors cursor-pointer self-start sm:self-auto shrink-0"
+                      >
+                        Desconectar
+                      </button>
+                    )}
                   </div>
 
-                  <button
-                    onClick={() => {
-                      setAnilistConnected(!anilistConnected);
-                    }}
-                    className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
-                      anilistConnected
-                        ? 'bg-neutral-800 text-neutral-300 hover:bg-neutral-700'
-                        : 'bg-purple-600 text-white hover:bg-purple-500'
-                    }`}
-                  >
-                    {anilistConnected ? 'Desconectar' : 'Conectar via OAuth'}
-                  </button>
+                  {/* Disconnect Confirmation Alert */}
+                  {anilistConnected && isConfirmingDisconnect && (
+                    <div className="rounded-xl border border-amber-500/40 bg-amber-950/30 p-3.5 space-y-2.5">
+                      <div className="flex items-start gap-2 text-amber-200 text-xs">
+                        <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400 mt-0.5" />
+                        <div>
+                          <p className="font-semibold text-white">
+                            Desconectar @{anilistUsername}?
+                          </p>
+                          <p className="text-[11px] text-amber-200/80 mt-0.5">
+                            Sua lista de animes já importada permanecerá 100% intacta no Hikari. Somente o vínculo do nome de usuário será desfeito.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 justify-end pt-1">
+                        <button
+                          type="button"
+                          onClick={() => setIsConfirmingDisconnect(false)}
+                          className="rounded-lg px-3 py-1.5 text-xs font-medium text-purple-300 hover:text-white transition-colors cursor-pointer"
+                        >
+                          Cancelar
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAnilistConnected(false);
+                            setAnilistUsername('');
+                            setAnilistAvatarUrl('');
+                            setAnilistLastSync('');
+                            setAniListPreview(null);
+                            setRawIncomingEntries(null);
+                            setIsConfirmingDisconnect(false);
+                            onSaveProfile({
+                              externalAccounts: {
+                                ...profile.externalAccounts,
+                                anilist: { connected: false },
+                              },
+                            });
+                            setImportSuccessMsg('Conta AniList desconectada. Sua lista de animes foi preservada.');
+                          }}
+                          className="rounded-lg bg-rose-700 hover:bg-rose-600 px-3.5 py-1.5 text-xs font-semibold text-white transition-colors cursor-pointer"
+                        >
+                          Confirmar Desconexão
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Connected Account Details & Primary Actions */}
+                  {anilistConnected && (
+                    <div className="rounded-xl border border-purple-900/30 bg-[#120d22] p-3.5 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                          {anilistAvatarUrl ? (
+                            <img
+                              src={anilistAvatarUrl}
+                              alt={`Avatar AniList de ${anilistUsername}`}
+                              className="h-10 w-10 rounded-full object-cover border border-purple-500/40 shrink-0"
+                            />
+                          ) : (
+                            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-purple-950 border border-purple-700 text-xs font-bold text-white shrink-0">
+                              {anilistUsername.charAt(0).toUpperCase()}
+                            </div>
+                          )}
+                          <div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-xs font-bold text-white">@{anilistUsername}</span>
+                              <a
+                                href={`https://anilist.co/user/${encodeURIComponent(anilistUsername)}`}
+                                target="_blank"
+                                rel="noreferrer noopener"
+                                className="text-purple-400 hover:text-purple-200 transition-colors"
+                                title="Abrir perfil no AniList"
+                              >
+                                <ExternalLink className="h-3 w-3" />
+                              </a>
+                            </div>
+                            <span className="text-[11px] text-purple-400/70 block mt-0.5">
+                              {anilistLastSync
+                                ? `Última sincronização: ${anilistLastSync}`
+                                : 'Nenhuma importação realizada ainda nesta sessão.'}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Action Buttons: Import & Sync Avatar */}
+                        <div className="flex flex-wrap items-center gap-2">
+                          {anilistAvatarUrl && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                onUpdateAvatar(anilistAvatarUrl);
+                                setImportSuccessMsg('Foto de perfil do Hikari atualizada com o avatar do AniList!');
+                              }}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-purple-800/40 bg-purple-950/60 hover:bg-purple-900/60 px-3 py-1.5 text-xs font-medium text-purple-200 transition-colors cursor-pointer"
+                              title="Aplicar avatar do AniList como sua foto de perfil no Hikari"
+                            >
+                              <Camera className="h-3.5 w-3.5 text-purple-400" />
+                              <span>Usar como foto de perfil</span>
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            disabled={isFetchingCollection || isImporting}
+                            onClick={async () => {
+                              setIsFetchingCollection(true);
+                              setCollectionError(null);
+                              setAniListPreview(null);
+                              setImportSuccessMsg(null);
+                              try {
+                                const entries = await fetchAniListAnimeList(anilistUsername);
+                                setRawIncomingEntries(entries);
+                                const preview = calculateAniListImportPreview(
+                                  entries,
+                                  currentAnimes,
+                                  anilistUsername
+                                );
+                                setAniListPreview(preview);
+                              } catch (err) {
+                                setCollectionError(
+                                  err instanceof Error ? err.message : 'Falha ao buscar a lista do AniList.'
+                                );
+                              } finally {
+                                setIsFetchingCollection(false);
+                              }
+                            }}
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 disabled:opacity-50 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors cursor-pointer disabled:cursor-not-allowed"
+                          >
+                            {isFetchingCollection ? (
+                              <>
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                <span>Buscando lista...</span>
+                              </>
+                            ) : (
+                              <>
+                                <Download className="h-3.5 w-3.5" />
+                                <span>Consultar e Importar Lista</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Error Banner when fetching collection */}
+                      {collectionError && (
+                        <div
+                          role="alert"
+                          className="flex items-start gap-2.5 rounded-xl border border-rose-500/40 bg-rose-950/40 p-3 text-xs text-rose-200"
+                        >
+                          <AlertCircle className="h-4 w-4 shrink-0 text-rose-400 mt-0.5" />
+                          <div className="flex-1">
+                            <span className="leading-relaxed">{collectionError}</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Disconnected State: Form to Enter Username & Validate via GraphQL */}
+                  {!anilistConnected && (
+                    <div className="space-y-3 pt-1">
+                      <div className="space-y-1.5">
+                        <label
+                          htmlFor="anilist-username-input"
+                          className="block text-xs font-medium text-purple-200"
+                        >
+                          Nome de usuário público no AniList
+                        </label>
+                        <div className="flex flex-col sm:flex-row gap-2">
+                          <div className="relative flex-1 flex items-center">
+                            <Search className="pointer-events-none absolute left-3.5 h-4 w-4 text-purple-400/70" />
+                            <input
+                              id="anilist-username-input"
+                              type="text"
+                              value={inputAniListUsername}
+                              disabled={isCheckingAniListUser}
+                              onChange={(e) => {
+                                setInputAniListUsername(e.target.value);
+                                setAniListUserError(null);
+                                setVerifiedAniListUser(null);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  if (inputAniListUsername.trim() && !isCheckingAniListUser) {
+                                    // Trigger check
+                                    const cleanName = inputAniListUsername.trim();
+                                    setIsCheckingAniListUser(true);
+                                    setAniListUserError(null);
+                                    setVerifiedAniListUser(null);
+                                    fetchAniListUser(cleanName)
+                                      .then((user) => setVerifiedAniListUser(user))
+                                      .catch((err) =>
+                                        setAniListUserError(
+                                          err instanceof Error ? err.message : 'Erro ao buscar usuário.'
+                                        )
+                                      )
+                                      .finally(() => setIsCheckingAniListUser(false));
+                                  }
+                                }
+                              }}
+                              placeholder="Ex: Test, seu_usuario_anilist"
+                              className="w-full rounded-xl border border-purple-900/40 bg-[#120d22] py-2 pl-10 pr-3 text-xs text-white placeholder:text-purple-400/40 focus:border-purple-500 focus:outline-none transition-colors"
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            disabled={!inputAniListUsername.trim() || isCheckingAniListUser}
+                            onClick={async () => {
+                              const cleanName = inputAniListUsername.trim();
+                              if (!cleanName) return;
+                              setIsCheckingAniListUser(true);
+                              setAniListUserError(null);
+                              setVerifiedAniListUser(null);
+                              try {
+                                const user = await fetchAniListUser(cleanName);
+                                setVerifiedAniListUser(user);
+                              } catch (err) {
+                                setAniListUserError(
+                                  err instanceof Error ? err.message : 'Erro ao validar conta no AniList.'
+                                );
+                              } finally {
+                                setIsCheckingAniListUser(false);
+                              }
+                            }}
+                            className="flex items-center justify-center gap-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:opacity-50 px-4 py-2 text-xs font-semibold text-white shadow-sm transition-colors whitespace-nowrap cursor-pointer disabled:cursor-not-allowed"
+                          >
+                            {isCheckingAniListUser ? (
+                              <>
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                <span>Verificando...</span>
+                              </>
+                            ) : (
+                              <span>Verificar Usuário</span>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Error feedback */}
+                      {aniListUserError && (
+                        <div
+                          role="alert"
+                          className="flex items-start gap-2.5 rounded-xl border border-rose-500/40 bg-rose-950/40 p-3 text-xs text-rose-200"
+                        >
+                          <AlertCircle className="h-4 w-4 shrink-0 text-rose-400 mt-0.5" />
+                          <span className="leading-relaxed">{aniListUserError}</span>
+                        </div>
+                      )}
+
+                      {/* Verified User Confirmation Card */}
+                      {verifiedAniListUser && (
+                        <div className="rounded-xl border border-purple-700/50 bg-[#16102b] p-3.5 space-y-3 animate-in fade-in">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-3">
+                              {verifiedAniListUser.avatarUrl ? (
+                                <img
+                                  src={verifiedAniListUser.avatarUrl}
+                                  alt={verifiedAniListUser.name}
+                                  className="h-10 w-10 rounded-full object-cover border border-purple-500/40 shrink-0"
+                                />
+                              ) : (
+                                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-purple-900 text-xs font-bold text-white shrink-0">
+                                  {verifiedAniListUser.name.charAt(0).toUpperCase()}
+                                </div>
+                              )}
+                              <div>
+                                <div className="text-xs font-bold text-white">
+                                  {verifiedAniListUser.name}
+                                </div>
+                                <div className="text-[11px] text-purple-300/70">
+                                  Perfil verificado com sucesso no AniList
+                                  {typeof verifiedAniListUser.animeCount === 'number' &&
+                                    ` (${verifiedAniListUser.animeCount} animes na lista)`}
+                                </div>
+                              </div>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setAnilistConnected(true);
+                                setAnilistUsername(verifiedAniListUser.name);
+                                setAnilistAvatarUrl(verifiedAniListUser.avatarUrl);
+                                onSaveProfile({
+                                  externalAccounts: {
+                                    ...profile.externalAccounts,
+                                    anilist: {
+                                      connected: true,
+                                      username: verifiedAniListUser.name,
+                                      avatarUrl: verifiedAniListUser.avatarUrl,
+                                    },
+                                  },
+                                });
+                                setImportSuccessMsg(
+                                  `Conta @${verifiedAniListUser.name} conectada com sucesso! Você já pode consultar e importar sua lista de animes.`
+                                );
+                                setVerifiedAniListUser(null);
+                                setInputAniListUsername('');
+                              }}
+                              className="flex items-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors cursor-pointer shrink-0"
+                            >
+                              <Check className="h-3.5 w-3.5" />
+                              <span>Conectar Esta Conta</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* PREVIEW & CONFIRMATION PANEL (Triggered upon fetching anime list) */}
+                  {aniListPreview && rawIncomingEntries && (
+                    <div className="rounded-xl border border-purple-700/60 bg-[#16102c] p-4 space-y-4 animate-in fade-in">
+                      <div className="flex items-center justify-between border-b border-purple-900/40 pb-3">
+                        <div>
+                          <h4 className="text-xs font-bold uppercase tracking-wider text-purple-300 flex items-center gap-1.5">
+                            <Layers className="h-4 w-4 text-purple-400" />
+                            <span>Prévia de Importação: @{aniListPreview.username}</span>
+                          </h4>
+                          <p className="text-[11px] text-purple-300/70 mt-0.5">
+                            Revise os dados antes de confirmar a importação para o seu perfil.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setAniListPreview(null)}
+                          className="rounded-lg p-1 text-purple-400 hover:bg-purple-900/40 hover:text-white transition-colors cursor-pointer"
+                        >
+                          <X className="h-4 w-4" />
+                        </button>
+                      </div>
+
+                      {/* Summary Metrics Pills */}
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        <div className="rounded-lg bg-[#0e0a1c] border border-purple-900/40 p-2.5 text-center">
+                          <span className="text-base font-bold text-white block">
+                            {aniListPreview.totalIncoming}
+                          </span>
+                          <span className="text-[10px] text-purple-300/60 uppercase font-medium">
+                            Total no AniList
+                          </span>
+                        </div>
+
+                        <div className="rounded-lg bg-emerald-950/40 border border-emerald-500/30 p-2.5 text-center">
+                          <span className="text-base font-bold text-emerald-300 block">
+                            +{aniListPreview.newItems.length}
+                          </span>
+                          <span className="text-[10px] text-emerald-400/80 uppercase font-medium">
+                            Novos para adicionar
+                          </span>
+                        </div>
+
+                        <div className="rounded-lg bg-purple-950/60 border border-purple-700/40 p-2.5 text-center">
+                          <span className="text-base font-bold text-purple-200 block">
+                            {aniListPreview.matchedItems.length}
+                          </span>
+                          <span className="text-[10px] text-purple-300/70 uppercase font-medium">
+                            Já no seu perfil
+                          </span>
+                        </div>
+
+                        <div className="rounded-lg bg-indigo-950/40 border border-indigo-500/30 p-2.5 text-center">
+                          <span className="text-base font-bold text-indigo-300 block">
+                            {aniListPreview.itemsWithUpdates.length}
+                          </span>
+                          <span className="text-[10px] text-indigo-300/70 uppercase font-medium">
+                            Com atualizações
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Merge Preferences Toggle */}
+                      <div className="rounded-xl border border-purple-900/40 bg-[#0e0a1c] p-3 space-y-2">
+                        <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={updateExistingProgress}
+                            onChange={(e) => setUpdateExistingProgress(e.target.checked)}
+                            className="mt-0.5 h-4 w-4 rounded border-purple-700 text-purple-600 focus:ring-purple-500 focus:ring-offset-0 bg-[#120d22] cursor-pointer"
+                          />
+                          <div className="text-xs">
+                            <span className="font-semibold text-white block">
+                              Atualizar progresso e notas dos animes já existentes
+                            </span>
+                            <span className="text-[11px] text-purple-300/70 block mt-0.5">
+                              Seus animes favoritos e registros manuais do Hikari nunca serão removidos ou desmarcados.
+                            </span>
+                          </div>
+                        </label>
+                      </div>
+
+                      {/* Scrollable Sample Preview of Incoming Items */}
+                      <div className="space-y-2">
+                        <span className="text-[11px] font-semibold text-purple-300 uppercase tracking-wider block">
+                          Amostra da Lista a ser Importada ({rawIncomingEntries.length} animes):
+                        </span>
+                        <div className="max-h-52 overflow-y-auto space-y-1.5 pr-1 divide-y divide-purple-900/20">
+                          {rawIncomingEntries.slice(0, 30).map((entry) => {
+                            const isNew = !aniListPreview.matchedItems.some(
+                              (m) => m.incoming.anilistId === entry.anilistId
+                            );
+                            const matched = aniListPreview.matchedItems.find(
+                              (m) => m.incoming.anilistId === entry.anilistId
+                            );
+                            const hasChanges = Boolean(matched && matched.hasChanges);
+
+                            return (
+                              <div
+                                key={entry.anilistId}
+                                className="flex items-center justify-between gap-3 py-1.5 text-xs"
+                              >
+                                <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                                  {entry.posterUrl ? (
+                                    <img
+                                      src={entry.posterUrl}
+                                      alt={entry.title}
+                                      className="h-9 w-6 rounded object-cover border border-purple-900/50 shrink-0"
+                                    />
+                                  ) : (
+                                    <div className="h-9 w-6 rounded bg-purple-950 border border-purple-800 shrink-0" />
+                                  )}
+                                  <div className="min-w-0 flex-1">
+                                    <div className="truncate font-medium text-white">{entry.title}</div>
+                                    <div className="text-[10px] text-purple-300/60 truncate">
+                                      {STATUS_LABELS_PT[entry.status]} · Ep. {entry.currentEpisode}/{entry.totalEpisodes || '?'}
+                                      {entry.rating > 0 && ` · Nota ${entry.rating}/10`}
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="shrink-0 text-right">
+                                  {isNew ? (
+                                    <span className="rounded bg-emerald-950/80 border border-emerald-500/40 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                                      Novo
+                                    </span>
+                                  ) : hasChanges ? (
+                                    <span className="rounded bg-indigo-950/80 border border-indigo-500/40 px-2 py-0.5 text-[10px] font-semibold text-indigo-300">
+                                      Atualizar
+                                    </span>
+                                  ) : (
+                                    <span className="rounded bg-neutral-900 border border-neutral-700/40 px-2 py-0.5 text-[10px] text-neutral-400">
+                                      Sem alterações
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        {rawIncomingEntries.length > 30 && (
+                          <div className="text-[10px] text-purple-400/60 text-center pt-1">
+                            ... e mais {rawIncomingEntries.length - 30} animes na lista.
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Confirmation Action Bar */}
+                      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2 border-t border-purple-900/40">
+                        <span className="text-[11px] text-purple-300/70">
+                          {aniListPreview.newItems.length} novos animes serão adicionados
+                          {updateExistingProgress &&
+                            aniListPreview.itemsWithUpdates.length > 0 &&
+                            ` e ${aniListPreview.itemsWithUpdates.length} animes atualizados`}
+                          .
+                        </span>
+
+                        <div className="flex items-center gap-2 self-end sm:self-auto">
+                          <button
+                            type="button"
+                            disabled={isImporting}
+                            onClick={() => setAniListPreview(null)}
+                            className="rounded-lg px-3 py-1.5 text-xs font-semibold text-purple-300 hover:text-white transition-colors cursor-pointer"
+                          >
+                            Cancelar
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={isImporting}
+                            onClick={() => {
+                              setIsImporting(true);
+                              const { mergedList, addedCount, updatedCount } = mergeAniListImport(
+                                rawIncomingEntries,
+                                currentAnimes,
+                                updateExistingProgress
+                              );
+
+                              const now = new Date();
+                              const formattedDate = `${now.toLocaleDateString('pt-BR', {
+                                day: '2-digit',
+                                month: '2-digit',
+                                year: 'numeric',
+                              })} às ${now.toLocaleTimeString('pt-BR', {
+                                hour: '2-digit',
+                                minute: '2-digit',
+                              })}`;
+
+                              setAnilistLastSync(formattedDate);
+
+                              if (onSyncAniList) {
+                                onSyncAniList(mergedList, {
+                                  connected: true,
+                                  username: anilistUsername,
+                                  avatarUrl: anilistAvatarUrl,
+                                  lastSync: formattedDate,
+                                });
+                              }
+
+                              setImportSuccessMsg(
+                                `Importação concluída com sucesso! ${addedCount} novos animes adicionados e ${updatedCount} animes atualizados na sua lista.`
+                              );
+                              setAniListPreview(null);
+                              setRawIncomingEntries(null);
+                              setIsImporting(false);
+                            }}
+                            className="flex items-center gap-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 disabled:opacity-50 px-4 py-2 text-xs font-semibold text-white shadow-md shadow-purple-950 transition-all cursor-pointer"
+                          >
+                            {isImporting ? (
+                              <>
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                <span>Gravando animes...</span>
+                              </>
+                            ) : (
+                              <>
+                                <Check className="h-3.5 w-3.5" />
+                                <span>Confirmar e Importar</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
-                {/* MyAnimeList Card */}
-                <div className="flex items-center justify-between gap-4 rounded-xl border border-purple-900/30 bg-[#0A0713] p-4">
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#2E51A2]/10 text-[#2E51A2] border border-[#2E51A2]/30 font-bold">
-                      MAL
+                {/* MyAnimeList Section */}
+                <div className="space-y-4 rounded-xl border border-purple-900/40 bg-[#0A0713] p-4">
+                  {/* Top Header Row */}
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#2E51A2]/20 text-[#4e74ca] border border-[#2E51A2]/40 font-bold shrink-0 text-base shadow-sm">
+                        MAL
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-bold text-white">MyAnimeList</span>
+                          {malConnected ? (
+                            <span className="rounded bg-emerald-950/80 border border-emerald-500/40 px-2 py-0.5 text-[10px] text-emerald-300 font-semibold flex items-center gap-1">
+                              <CheckCircle2 className="h-3 w-3" />
+                              Conectado
+                            </span>
+                          ) : (
+                            <span className="rounded bg-purple-950/70 border border-purple-800/40 px-1.5 py-0.2 text-[10px] text-purple-300/70 font-medium">
+                              OAuth 2.0 PKCE
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-purple-300/60 mt-0.5">
+                          {malConnected
+                            ? `Sincronizado com @${malUsername}`
+                            : 'Conecte sua conta MyAnimeList oficial via autorização segura OAuth 2.0 com PKCE.'}
+                        </p>
+                      </div>
                     </div>
-                    <div>
-                      <div className="text-xs font-bold text-white">MyAnimeList</div>
-                      <p className="text-[11px] text-purple-300/60">
-                        {malConnected ? 'Conta conectada com sucesso' : 'Sincronizar notas e episódios assistidos'}
-                      </p>
-                    </div>
+
+                    {/* Disconnect button in header if connected */}
+                    {malConnected && (
+                      <button
+                        type="button"
+                        onClick={() => setIsConfirmingDisconnectMAL(true)}
+                        className="rounded-lg border border-purple-800/40 bg-purple-950/40 hover:bg-rose-950/50 hover:border-rose-700/60 hover:text-rose-200 px-3 py-1.5 text-xs font-medium text-purple-300 transition-colors cursor-pointer self-start sm:self-auto"
+                      >
+                        Desconectar
+                      </button>
+                    )}
                   </div>
 
-                  <button
-                    onClick={() => {
-                      setMalConnected(!malConnected);
-                    }}
-                    className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
-                      malConnected
-                        ? 'bg-neutral-800 text-neutral-300 hover:bg-neutral-700'
-                        : 'bg-purple-600 text-white hover:bg-purple-500'
-                    }`}
-                  >
-                    {malConnected ? 'Desconectar' : 'Conectar via OAuth'}
-                  </button>
+                  {/* Disconnect Confirmation Alert */}
+                  {malConnected && isConfirmingDisconnectMAL && (
+                    <div className="rounded-xl border border-amber-500/40 bg-amber-950/30 p-3.5 space-y-2.5">
+                      <div className="flex items-start gap-2 text-amber-200 text-xs">
+                        <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400 mt-0.5" />
+                        <div>
+                          <p className="font-semibold text-white">
+                            Desconectar @{malUsername} do MyAnimeList?
+                          </p>
+                          <p className="text-[11px] text-amber-200/80 mt-0.5">
+                            Sua lista de animes já importada permanecerá 100% intacta no Hikari. Somente o vínculo do token com a sessão será desfeito.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 justify-end pt-1">
+                        <button
+                          type="button"
+                          onClick={() => setIsConfirmingDisconnectMAL(false)}
+                          className="rounded-lg px-3 py-1.5 text-xs font-medium text-purple-300 hover:text-white transition-colors cursor-pointer"
+                        >
+                          Cancelar
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleDisconnectMAL}
+                          className="rounded-lg bg-rose-700 hover:bg-rose-600 px-3.5 py-1.5 text-xs font-semibold text-white transition-colors cursor-pointer"
+                        >
+                          Confirmar Desconexão
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Connected Account Details & Primary Actions */}
+                  {malConnected && (
+                    <div className="rounded-xl border border-purple-900/30 bg-[#120d22] p-3.5 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                          {malAvatarUrl ? (
+                            <img
+                              src={malAvatarUrl}
+                              alt={`Avatar MyAnimeList de ${malUsername}`}
+                              className="h-10 w-10 rounded-full object-cover border border-[#2E51A2]/50 shrink-0"
+                            />
+                          ) : (
+                            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#1b2b52] border border-[#2E51A2] text-xs font-bold text-white shrink-0">
+                              {malUsername.charAt(0).toUpperCase()}
+                            </div>
+                          )}
+                          <div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-xs font-bold text-white">@{malUsername}</span>
+                              <a
+                                href={`https://myanimelist.net/profile/${encodeURIComponent(malUsername)}`}
+                                target="_blank"
+                                rel="noreferrer noopener"
+                                className="text-purple-400 hover:text-purple-200 transition-colors"
+                                title="Abrir perfil no MyAnimeList"
+                              >
+                                <ExternalLink className="h-3 w-3" />
+                              </a>
+                            </div>
+                            <span className="text-[11px] text-purple-400/70 block mt-0.5">
+                              {malLastSync
+                                ? `Última sincronização: ${malLastSync}`
+                                : 'Nenhuma importação realizada ainda nesta sessão.'}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Action Buttons: Import & Sync Avatar */}
+                        <div className="flex flex-wrap items-center gap-2">
+                          {malAvatarUrl && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                onUpdateAvatar(malAvatarUrl);
+                                setMalSuccessMsg('Foto de perfil do Hikari atualizada com o avatar do MyAnimeList!');
+                              }}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-[#2E51A2]/40 bg-[#16213f]/60 hover:bg-[#1f2e56]/60 px-3 py-1.5 text-xs font-medium text-blue-200 transition-colors cursor-pointer"
+                              title="Aplicar avatar do MyAnimeList como sua foto de perfil no Hikari"
+                            >
+                              <Camera className="h-3.5 w-3.5 text-blue-400" />
+                              <span>Usar como foto de perfil</span>
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            disabled={isFetchingMALList || isImportingMAL}
+                            onClick={handleFetchMALList}
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-[#2E51A2] hover:bg-[#254388] disabled:opacity-50 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors cursor-pointer disabled:cursor-not-allowed"
+                          >
+                            {isFetchingMALList ? (
+                              <>
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                <span>Buscando lista MAL...</span>
+                              </>
+                            ) : (
+                              <>
+                                <Download className="h-3.5 w-3.5" />
+                                <span>Consultar e Importar Lista</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Error Banner when fetching MAL list */}
+                      {malListError && (
+                        <div
+                          role="alert"
+                          className="flex items-start gap-2.5 rounded-xl border border-rose-500/40 bg-rose-950/40 p-3 text-xs text-rose-200"
+                        >
+                          <AlertCircle className="h-4 w-4 shrink-0 text-rose-400 mt-0.5" />
+                          <div className="flex-1">
+                            <span className="leading-relaxed">{malListError}</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Disconnected State: Connect via OAuth PKCE or show missing config guidance */}
+                  {!malConnected && (
+                    <div className="space-y-3 pt-1">
+                      {/* Configuration notice if server has no MAL_CLIENT_ID */}
+                      {malStatus && !malStatus.configured && (
+                        <div className="rounded-xl border border-amber-500/40 bg-amber-950/30 p-3.5 space-y-2">
+                          <div className="flex items-start gap-2 text-xs text-amber-200">
+                            <AlertCircle className="h-4 w-4 shrink-0 text-amber-400 mt-0.5" />
+                            <div>
+                              <p className="font-semibold text-white">
+                                Configuração necessária para MyAnimeList OAuth 2.0 PKCE
+                              </p>
+                              <p className="text-[11px] text-amber-200/80 mt-1 leading-relaxed">
+                                Para autenticar contas reais via MyAnimeList API v2 oficial, defina a credencial <code className="bg-black/50 px-1 py-0.5 rounded text-amber-300 font-mono">MAL_CLIENT_ID</code> no arquivo de ambiente do servidor.
+                              </p>
+                              <div className="mt-2 text-[11px] text-amber-200/90 space-y-1">
+                                <div><strong>URI de Redirecionamento oficial a cadastrar no MAL:</strong></div>
+                                <code className="block bg-black/60 border border-amber-500/30 px-2.5 py-1.5 rounded text-purple-200 break-all select-all font-mono text-[11px]">
+                                  {malStatus.redirectUri || `${typeof window !== 'undefined' ? window.location.origin : ''}/api/mal/callback`}
+                                </code>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Connect button */}
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
+                        <p className="text-xs text-purple-300/80">
+                          {malStatus?.configured
+                            ? 'Clique abaixo para abrir a janela oficial de autorização do MyAnimeList.'
+                            : 'O fluxo OAuth 2.0 PKCE com code_verifier/code_challenge seguro e rotas de backend estão totalmente implementados.'}
+                        </p>
+                        <button
+                          type="button"
+                          disabled={isStartingMALAuth}
+                          onClick={handleConnectMAL}
+                          className="flex items-center justify-center gap-2 rounded-xl bg-[#2E51A2] hover:bg-[#254388] disabled:opacity-50 px-4 py-2 text-xs font-semibold text-white shadow-sm transition-colors whitespace-nowrap cursor-pointer disabled:cursor-not-allowed shrink-0"
+                        >
+                          {isStartingMALAuth ? (
+                            <>
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              <span>Conectando...</span>
+                            </>
+                          ) : (
+                            <>
+                              <ExternalLink className="h-3.5 w-3.5" />
+                              <span>Conectar com MyAnimeList</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+
+                      {/* Error feedback */}
+                      {malAuthError && (
+                        <div
+                          role="alert"
+                          className="flex items-start gap-2.5 rounded-xl border border-rose-500/40 bg-rose-950/40 p-3 text-xs text-rose-200"
+                        >
+                          <AlertCircle className="h-4 w-4 shrink-0 text-rose-400 mt-0.5" />
+                          <span className="leading-relaxed">{malAuthError}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* MAL PREVIEW & CONFIRMATION PANEL */}
+                  {malPreview && rawMALEntries && (
+                    <div className="rounded-xl border border-[#2E51A2]/60 bg-[#111628] p-4 space-y-4 animate-in fade-in">
+                      <div className="flex items-center justify-between border-b border-[#2E51A2]/30 pb-3">
+                        <div>
+                          <h4 className="text-xs font-bold uppercase tracking-wider text-blue-300 flex items-center gap-1.5">
+                            <Layers className="h-4 w-4 text-blue-400" />
+                            <span>Prévia de Importação: @{malPreview.username} (MyAnimeList)</span>
+                          </h4>
+                          <p className="text-[11px] text-blue-200/70 mt-0.5">
+                            Revise os dados antes de confirmar a importação para o seu perfil.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setMalPreview(null)}
+                          className="rounded-lg p-1 text-purple-400 hover:bg-purple-900/40 hover:text-white transition-colors cursor-pointer"
+                        >
+                          <X className="h-4 w-4" />
+                        </button>
+                      </div>
+
+                      {/* Summary Metrics Pills */}
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        <div className="rounded-lg bg-[#0a0d17] border border-[#2E51A2]/30 p-2.5 text-center">
+                          <span className="text-base font-bold text-white block">
+                            {malPreview.totalIncoming}
+                          </span>
+                          <span className="text-[10px] text-blue-300/60 uppercase font-medium">
+                            Total no MAL
+                          </span>
+                        </div>
+
+                        <div className="rounded-lg bg-emerald-950/40 border border-emerald-500/30 p-2.5 text-center">
+                          <span className="text-base font-bold text-emerald-300 block">
+                            +{malPreview.newItems.length}
+                          </span>
+                          <span className="text-[10px] text-emerald-400/80 uppercase font-medium">
+                            Novos para adicionar
+                          </span>
+                        </div>
+
+                        <div className="rounded-lg bg-purple-950/60 border border-purple-700/40 p-2.5 text-center">
+                          <span className="text-base font-bold text-purple-200 block">
+                            {malPreview.matchedItems.length}
+                          </span>
+                          <span className="text-[10px] text-purple-300/70 uppercase font-medium">
+                            Já no seu perfil
+                          </span>
+                        </div>
+
+                        <div className="rounded-lg bg-indigo-950/40 border border-indigo-500/30 p-2.5 text-center">
+                          <span className="text-base font-bold text-indigo-300 block">
+                            {malPreview.itemsWithUpdates.length}
+                          </span>
+                          <span className="text-[10px] text-indigo-300/70 uppercase font-medium">
+                            Com atualizações
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Merge Preferences Toggle */}
+                      <div className="rounded-xl border border-[#2E51A2]/30 bg-[#0a0d17] p-3 space-y-2">
+                        <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={updateExistingProgressMAL}
+                            onChange={(e) => setUpdateExistingProgressMAL(e.target.checked)}
+                            className="mt-0.5 h-4 w-4 rounded border-purple-700 text-[#2E51A2] focus:ring-[#2E51A2] focus:ring-offset-0 bg-[#120d22] cursor-pointer"
+                          />
+                          <div className="text-xs">
+                            <span className="font-semibold text-white block">
+                              Atualizar progresso e notas dos animes já existentes
+                            </span>
+                            <span className="text-[11px] text-purple-300/70 block mt-0.5">
+                              Seus animes favoritos e registros manuais do Hikari nunca serão removidos ou desmarcados.
+                            </span>
+                          </div>
+                        </label>
+                      </div>
+
+                      {/* Scrollable Sample Preview of Incoming MAL Items */}
+                      <div className="space-y-2">
+                        <span className="text-[11px] font-semibold text-blue-300 uppercase tracking-wider block">
+                          Amostra da Lista a ser Importada ({rawMALEntries.length} animes):
+                        </span>
+                        <div className="max-h-52 overflow-y-auto space-y-1.5 pr-1 divide-y border-t border-b border-[#2E51A2]/20 divide-[#2E51A2]/20">
+                          {rawMALEntries.slice(0, 30).map((entry) => {
+                            const isNew = !malPreview.matchedItems.some(
+                              (m) => m.incoming.malId === entry.malId
+                            );
+                            const matched = malPreview.matchedItems.find(
+                              (m) => m.incoming.malId === entry.malId
+                            );
+                            const hasChanges = Boolean(matched && matched.hasChanges);
+
+                            return (
+                              <div
+                                key={entry.malId}
+                                className="flex items-center justify-between gap-3 py-1.5 text-xs"
+                              >
+                                <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                                  {entry.posterUrl ? (
+                                    <img
+                                      src={entry.posterUrl}
+                                      alt={entry.title}
+                                      className="h-9 w-6 rounded object-cover border border-[#2E51A2]/50 shrink-0"
+                                    />
+                                  ) : (
+                                    <div className="h-9 w-6 rounded bg-[#101931] border border-[#2E51A2]/40 shrink-0" />
+                                  )}
+                                  <div className="min-w-0 flex-1">
+                                    <div className="truncate font-medium text-white">{entry.title}</div>
+                                    <div className="text-[10px] text-blue-200/70 truncate">
+                                      {MAL_STATUS_LABELS_PT[entry.status]} · Ep. {entry.currentEpisode}/{entry.totalEpisodes || '?'}
+                                      {entry.rating > 0 && ` · Nota ${entry.rating}/10`}
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="shrink-0 text-right">
+                                  {isNew ? (
+                                    <span className="rounded bg-emerald-950/80 border border-emerald-500/40 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                                      Novo
+                                    </span>
+                                  ) : hasChanges ? (
+                                    <span className="rounded bg-indigo-950/80 border border-indigo-500/40 px-2 py-0.5 text-[10px] font-semibold text-indigo-300">
+                                      Atualizar
+                                    </span>
+                                  ) : (
+                                    <span className="rounded bg-neutral-900 border border-neutral-700/40 px-2 py-0.5 text-[10px] text-neutral-400">
+                                      Sem alterações
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        {rawMALEntries.length > 30 && (
+                          <div className="text-[10px] text-blue-300/60 text-center pt-1">
+                            ... e mais {rawMALEntries.length - 30} animes na lista.
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Confirmation Action Bar */}
+                      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2 border-t border-[#2E51A2]/30">
+                        <span className="text-[11px] text-blue-200/80">
+                          {malPreview.newItems.length} novos animes serão adicionados
+                          {updateExistingProgressMAL &&
+                            malPreview.itemsWithUpdates.length > 0 &&
+                            ` e ${malPreview.itemsWithUpdates.length} animes atualizados`}
+                          .
+                        </span>
+
+                        <div className="flex items-center gap-2 self-end sm:self-auto">
+                          <button
+                            type="button"
+                            disabled={isImportingMAL}
+                            onClick={() => setMalPreview(null)}
+                            className="rounded-lg px-3 py-1.5 text-xs font-semibold text-purple-300 hover:text-white transition-colors cursor-pointer"
+                          >
+                            Cancelar
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={isImportingMAL}
+                            onClick={handleConfirmMALImport}
+                            className="flex items-center gap-1.5 rounded-lg bg-[#2E51A2] hover:bg-[#254388] disabled:opacity-50 px-4 py-2 text-xs font-semibold text-white shadow-md transition-all cursor-pointer"
+                          >
+                            {isImportingMAL ? (
+                              <>
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                <span>Gravando animes...</span>
+                              </>
+                            ) : (
+                              <>
+                                <Check className="h-3.5 w-3.5" />
+                                <span>Confirmar e Importar</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
-                <div className="flex items-start gap-2 rounded-xl bg-purple-950/40 p-3 text-[11px] text-purple-300/80 border border-purple-900/30">
-                  <AlertCircle className="h-4 w-4 shrink-0 text-purple-400 mt-0.5" />
+                {/* Privacy & Security Footnote */}
+                <div className="flex items-start gap-2.5 rounded-xl bg-purple-950/40 p-3.5 text-[11px] text-purple-300/80 border border-purple-900/30">
+                  <ShieldCheck className="h-4 w-4 shrink-0 text-purple-400 mt-0.5" />
                   <span>
-                    <strong>Segurança:</strong> O Hikari nunca solicita nem armazena suas senhas de plataformas externas. A autenticação utiliza o protocolo seguro OAuth 2.0 PKCE.
+                    <strong>Segurança e Privacidade:</strong> As integrações com o AniList e o MyAnimeList utilizam as APIs oficiais (GraphQL e OAuth 2.0 com PKCE). Não solicitamos senhas nem expomos credenciais externas ou tokens no frontend.
                   </span>
                 </div>
               </div>
@@ -685,19 +1944,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </p>
                   </div>
 
-                  {/* Future Firebase Auth Integration Preview */}
-                  <div className="rounded-xl border border-purple-900/30 bg-[#0A0713] p-4 space-y-3">
-                    <span className="text-[11px] text-purple-400 font-semibold uppercase tracking-wider">
-                      Método de Autenticação (Etapa 2)
-                    </span>
-                    <div className="flex items-center justify-between text-xs text-white">
-                      <span>Login com Conta Google & E-mail</span>
-                      <span className="text-purple-400 font-medium">Firebase Auth</span>
-                    </div>
-                    <p className="text-[10px] text-purple-300/60">
-                      Na Etapa 2 deste projeto, ativaremos a persistência em tempo real no Firestore e o fluxo de login oficial com Google.
-                    </p>
-                  </div>
+
                 </div>
               </div>
             )}

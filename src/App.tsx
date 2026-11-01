@@ -1397,6 +1397,160 @@ export default function App() {
     }
   };
 
+  // Handler: Sync imported anime list from AniList
+  const handleSyncAniList = useCallback(
+    (
+      mergedAnimes: AnimeItem[],
+      anilistPatch: UserProfile['externalAccounts']['anilist']
+    ) => {
+      const actionNow = Date.now();
+      const syncActivity: UserActivity = {
+        id: `act_${actionNow}_anilist_sync`,
+        type: 'added_anime',
+        title: `Sincronizou a lista com o AniList (@${anilistPatch.username || ''})`,
+        description: `Lista atualizada com ${mergedAnimes.length} animes no perfil`,
+        timestamp: 'Agora',
+        createdAtTimestamp: actionNow,
+      };
+
+      if (isAuthenticated) {
+        updateAuthWorkspace((prev) => {
+          const prevAccounts = prev.profileOverrides.externalAccounts ?? {
+            anilist: { connected: false },
+            mal: { connected: false },
+          };
+          const nextExternalAccounts: UserProfile['externalAccounts'] = {
+            ...prevAccounts,
+            anilist: anilistPatch,
+          };
+          const nextProfileOverrides = {
+            ...prev.profileOverrides,
+            externalAccounts: nextExternalAccounts,
+          };
+          return {
+            ...prev,
+            animes: mergedAnimes,
+            profileOverrides: nextProfileOverrides,
+            activities: [syncActivity, ...prev.activities],
+          };
+        });
+        return;
+      }
+
+      // Modo demonstração
+      const prevDemoAccounts = demoProfile.externalAccounts ?? {
+        anilist: { connected: false },
+        mal: { connected: false },
+      };
+      const nextDemoProfile: UserProfile = {
+        ...demoProfile,
+        externalAccounts: {
+          ...prevDemoAccounts,
+          anilist: anilistPatch,
+        },
+      };
+      setDemoProfile(nextDemoProfile);
+      setDemoAnimes(mergedAnimes);
+      setDemoActivities((prev) => [syncActivity, ...prev]);
+      if (isDemoPreview) {
+        try {
+          window.localStorage.setItem(
+            DEMO_PROFILE_STORAGE_KEY,
+            JSON.stringify({
+              profileOverrides: {
+                ...nextDemoProfile,
+              },
+              animes: mergedAnimes,
+              comments: demoComments,
+              activities: [syncActivity, ...demoActivities],
+              notifications: demoNotifications,
+            })
+          );
+        } catch {
+          // Fallback
+        }
+      }
+    },
+    [isAuthenticated, demoProfile, demoActivities, isDemoPreview, demoComments, demoNotifications]
+  );
+
+  // Handler: Sync imported anime list from MyAnimeList
+  const handleSyncMAL = useCallback(
+    (
+      mergedAnimes: AnimeItem[],
+      malPatch: UserProfile['externalAccounts']['mal']
+    ) => {
+      const actionNow = Date.now();
+      const syncActivity: UserActivity = {
+        id: `act_${actionNow}_mal_sync`,
+        type: 'added_anime',
+        title: `Sincronizou a lista com o MyAnimeList (@${malPatch.username || ''})`,
+        description: `Lista atualizada com ${mergedAnimes.length} animes no perfil`,
+        timestamp: 'Agora',
+        createdAtTimestamp: actionNow,
+      };
+
+      if (isAuthenticated) {
+        updateAuthWorkspace((prev) => {
+          const prevAccounts = prev.profileOverrides.externalAccounts ?? {
+            anilist: { connected: false },
+            mal: { connected: false },
+          };
+          const nextExternalAccounts: UserProfile['externalAccounts'] = {
+            ...prevAccounts,
+            mal: malPatch,
+          };
+          const nextProfileOverrides = {
+            ...prev.profileOverrides,
+            externalAccounts: nextExternalAccounts,
+          };
+          return {
+            ...prev,
+            animes: mergedAnimes,
+            profileOverrides: nextProfileOverrides,
+            activities: [syncActivity, ...prev.activities],
+          };
+        });
+        return;
+      }
+
+      // Modo demonstração
+      const prevDemoAccounts = demoProfile.externalAccounts ?? {
+        anilist: { connected: false },
+        mal: { connected: false },
+      };
+      const nextDemoProfile: UserProfile = {
+        ...demoProfile,
+        externalAccounts: {
+          ...prevDemoAccounts,
+          mal: malPatch,
+        },
+      };
+      setDemoProfile(nextDemoProfile);
+      setDemoAnimes(mergedAnimes);
+      setDemoActivities((prev) => [syncActivity, ...prev]);
+      if (isDemoPreview) {
+        try {
+          window.localStorage.setItem(
+            DEMO_PROFILE_STORAGE_KEY,
+            JSON.stringify({
+              profileOverrides: {
+                ...nextDemoProfile,
+              },
+              animes: mergedAnimes,
+              comments: demoComments,
+              activities: [syncActivity, ...demoActivities],
+              notifications: demoNotifications,
+            })
+          );
+        } catch {
+          // Fallback
+        }
+      }
+    },
+    [isAuthenticated, demoProfile, demoActivities, isDemoPreview, demoComments, demoNotifications]
+  );
+
   // Real Logout handler: wipes personal memory immediately, terminates Firebase Auth session and returns to login screen
   const handleLogout = useCallback(async () => {
     setIsSettingsOpen(false);
@@ -1940,6 +2094,9 @@ export default function App() {
           isOpen={isSettingsOpen}
           initialTab={settingsInitialTab}
           profile={currentUser}
+          currentAnimes={animes}
+          onSyncAniList={handleSyncAniList}
+          onSyncMAL={handleSyncMAL}
           onClose={() => setIsSettingsOpen(false)}
           onSaveProfile={handleSaveProfile}
           onUpdateAvatar={handleUpdateAvatar}

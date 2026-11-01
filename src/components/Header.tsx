@@ -341,35 +341,19 @@ export const Header: React.FC<HeaderProps> = ({
                     onClick={(e) => e.stopPropagation()}
                   >
                     {/* Popover Header (sticky/pinned via shrink-0 while list scrolls) */}
-                    <div className="flex shrink-0 items-center justify-between gap-2 border-b border-purple-900/40 pb-3 px-1">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span className="text-sm font-bold text-white">Notificações</span>
-                        {unreadCount > 0 && (
-                          <span className="inline-flex items-center gap-1 rounded-full bg-purple-950/90 border border-purple-700/50 px-2 py-0.5 text-[11px] font-medium text-purple-300 shrink-0">
-                            <span className="font-mono tabular-nums font-semibold text-purple-200">{unreadCount}</span>
-                            <span>{unreadCount === 1 ? 'nova' : 'novas'}</span>
-                          </span>
-                        )}
-                      </div>
+                    <div className="flex shrink-0 flex-col gap-2 border-b border-purple-900/40 pb-2.5 px-1">
+                      {/* Primeira linha: Título e botão X lado a lado */}
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="text-sm font-bold text-white">Notificações</span>
+                          {unreadCount > 0 && (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-purple-950/90 border border-purple-700/50 px-2 py-0.5 text-[11px] font-medium text-purple-300 shrink-0">
+                              <span className="font-mono tabular-nums font-semibold text-purple-200">{unreadCount}</span>
+                              <span>{unreadCount === 1 ? 'nova' : 'novas'}</span>
+                            </span>
+                          )}
+                        </div>
 
-                      <div className="flex items-center gap-2 shrink-0">
-                        {notifications.length > 0 && (
-                          <button
-                            type="button"
-                            disabled={unreadCount === 0}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onMarkAllNotificationsAsRead();
-                            }}
-                            className={`shrink-0 text-[11px] sm:text-xs font-medium transition-colors whitespace-nowrap ${
-                              unreadCount > 0
-                                ? 'text-purple-400 hover:text-purple-200 cursor-pointer'
-                                : 'text-purple-400/40 cursor-default'
-                            }`}
-                          >
-                            Marcar todas como lidas
-                          </button>
-                        )}
                         <button
                           type="button"
                           onClick={(e) => {
@@ -383,6 +367,27 @@ export const Header: React.FC<HeaderProps> = ({
                           <X className="h-4 w-4" />
                         </button>
                       </div>
+
+                      {/* Linha imediatamente abaixo: Marcar todas como lidas */}
+                      {notifications.length > 0 && (
+                        <div className="flex items-center justify-between">
+                          <button
+                            type="button"
+                            disabled={unreadCount === 0}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onMarkAllNotificationsAsRead();
+                            }}
+                            className={`text-[11px] sm:text-xs font-medium transition-colors whitespace-nowrap ${
+                              unreadCount > 0
+                                ? 'text-purple-400 hover:text-purple-200 cursor-pointer'
+                                : 'text-purple-400/40 cursor-default'
+                            }`}
+                          >
+                            Marcar todas como lidas
+                          </button>
+                        </div>
+                      )}
                     </div>
 
                     {/* Notifications List with internal-only vertical scroll */}

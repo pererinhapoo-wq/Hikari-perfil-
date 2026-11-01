@@ -66,6 +66,8 @@ export interface AnimeItem {
   genres: string[];
   episodeDurationMinutes?: number;
   rewatchCount?: number;
+  anilistId?: number;
+  malId?: number;
 }
 
 export interface HikariComment {

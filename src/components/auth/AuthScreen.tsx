@@ -450,21 +450,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                 </button>
               </form>
 
-              {/* Demo Profile Access (explicitly marked as unauthenticated local preview) */}
-              <div className="mt-6 border-t border-purple-900/30 pt-4 text-center space-y-2">
-                <button
-                  type="button"
-                  disabled={isSubmitting}
-                  onClick={onEnterDemoMode}
-                  className="inline-flex items-center gap-1.5 text-xs font-medium text-purple-300/80 hover:text-purple-200 transition-colors cursor-pointer"
-                >
-                  <span>Explorar perfil de demonstração (sem login)</span>
-                  <ArrowRight className="h-3.5 w-3.5" />
-                </button>
-                <p className="text-[11px] text-purple-400/50">
-                  O modo demonstração exibe apenas dados locais de exemplo e não inicia sessão autenticada.
-                </p>
-              </div>
+
             </>
           )}
         </div>
