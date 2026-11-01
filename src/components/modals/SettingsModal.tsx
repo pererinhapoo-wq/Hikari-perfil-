@@ -124,6 +124,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [malAuthError, setMalAuthError] = useState<string | null>(null);
   const [isConfirmingDisconnectMAL, setIsConfirmingDisconnectMAL] = useState(false);
 
+  // Referências para controle seguro do ciclo de vida e comunicação do popup OAuth do MAL
+  const malPopupRef = useRef<Window | null>(null);
+  const malAuthHandledRef = useRef<boolean>(false);
+  const malCheckTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // MAL Collection Query, Preview and Import state
   const [isFetchingMALList, setIsFetchingMALList] = useState(false);
   const [malListError, setMalListError] = useState<string | null>(null);
@@ -146,47 +151,125 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     };
   }, []);
 
-  // Listen for MAL OAuth popup callback postMessage
+  // Escuta estrita e segura do callback OAuth do MyAnimeList via postMessage
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
-      if (!event.data || typeof event.data !== 'object') return;
-      if (typeof window !== 'undefined' && event.origin !== window.location.origin) return;
-      if (event.data.type === 'MAL_AUTH_SUCCESS') {
-        const payload = event.data.payload || event.data;
-        const username = payload.username;
-        const picture = payload.picture || payload.avatarUrl || '';
-        if (username) {
-          setMalConnected(true);
-          setMalUsername(username);
-          setMalAvatarUrl(picture);
-          setMalAuthError(null);
-          setIsStartingMALAuth(false);
-          setMalSuccessMsg(`Conta @${username} do MyAnimeList conectada com sucesso!`);
-          onSaveProfile({
-            externalAccounts: {
-              ...profile.externalAccounts,
-              mal: {
-                connected: true,
-                username,
-                avatarUrl: picture,
-              },
-            },
-          });
+      // 1. Validar origem confiável (deve ser estritamente igual à origem da aplicação principal)
+      if (typeof window === 'undefined') return;
+      if (event.origin !== window.location.origin) {
+        return;
+      }
+
+      // 2. Validar que a janela de origem é exatamente a janela do popup do MAL aberta nesta sessão
+      if (!malPopupRef.current || event.source !== malPopupRef.current) {
+        return;
+      }
+
+      // 3. Garantir processamento único da resposta do popup
+      if (malAuthHandledRef.current) {
+        return;
+      }
+
+      // 4. Validar se os dados recebidos formam um objeto válido
+      const data = event.data;
+      if (!data || typeof data !== 'object') {
+        return;
+      }
+
+      if (data.type === 'MAL_AUTH_SUCCESS') {
+        // Validação estrita da estrutura e tipos esperados
+        if (
+          typeof data.username !== 'string' ||
+          !data.username.trim() ||
+          typeof data.avatarUrl !== 'string'
+        ) {
+          return;
         }
-      } else if (event.data.type === 'MAL_AUTH_ERROR') {
-        setMalAuthError(event.data.message || 'Falha na autorização com o MyAnimeList.');
+
+        malAuthHandledRef.current = true;
+
+        if (malCheckTimerRef.current) {
+          clearInterval(malCheckTimerRef.current);
+          malCheckTimerRef.current = null;
+        }
+
+        // Encerra a janela de popup de forma segura (sem fechar a janela principal)
+        try {
+          if (malPopupRef.current && !malPopupRef.current.closed) {
+            malPopupRef.current.close();
+          }
+        } catch {
+          // ignore
+        }
+        malPopupRef.current = null;
+
+        const username = data.username.trim();
+        const avatarUrl = data.avatarUrl.trim();
+
+        setMalConnected(true);
+        setMalUsername(username);
+        setMalAvatarUrl(avatarUrl);
+        setMalAuthError(null);
+        setIsStartingMALAuth(false);
+        setMalSuccessMsg(`Conta @${username} do MyAnimeList conectada com sucesso!`);
+        onSaveProfile({
+          externalAccounts: {
+            ...profile.externalAccounts,
+            mal: {
+              connected: true,
+              username,
+              avatarUrl,
+            },
+          },
+        });
+      } else if (data.type === 'MAL_AUTH_ERROR') {
+        // Validação estrita do erro recebido
+        if (typeof data.message !== 'string' || !data.message.trim()) {
+          return;
+        }
+
+        malAuthHandledRef.current = true;
+
+        if (malCheckTimerRef.current) {
+          clearInterval(malCheckTimerRef.current);
+          malCheckTimerRef.current = null;
+        }
+
+        try {
+          if (malPopupRef.current && !malPopupRef.current.closed) {
+            malPopupRef.current.close();
+          }
+        } catch {
+          // ignore
+        }
+        malPopupRef.current = null;
+
+        setMalAuthError(data.message.trim());
         setIsStartingMALAuth(false);
       }
     };
 
     window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
+    return () => {
+      window.removeEventListener('message', handleMessage);
+      if (malCheckTimerRef.current) {
+        clearInterval(malCheckTimerRef.current);
+        malCheckTimerRef.current = null;
+      }
+    };
   }, [profile.externalAccounts, onSaveProfile]);
 
   const handleConnectMAL = async () => {
     setIsStartingMALAuth(true);
     setMalAuthError(null);
     setMalSuccessMsg(null);
+    malAuthHandledRef.current = false;
+
+    if (malCheckTimerRef.current) {
+      clearInterval(malCheckTimerRef.current);
+      malCheckTimerRef.current = null;
+    }
+
     try {
       if (!user) {
         setMalAuthError(
@@ -224,13 +307,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         return;
       }
 
-      const checkTimer = setInterval(() => {
+      malPopupRef.current = popup;
+
+      malCheckTimerRef.current = setInterval(() => {
         if (popup.closed) {
-          clearInterval(checkTimer);
-          setIsStartingMALAuth(false);
+          if (malCheckTimerRef.current) {
+            clearInterval(malCheckTimerRef.current);
+            malCheckTimerRef.current = null;
+          }
+          malPopupRef.current = null;
+          if (!malAuthHandledRef.current) {
+            setIsStartingMALAuth(false);
+          }
         }
-      }, 1000);
+      }, 500);
     } catch (err) {
+      malPopupRef.current = null;
+      if (malCheckTimerRef.current) {
+        clearInterval(malCheckTimerRef.current);
+        malCheckTimerRef.current = null;
+      }
       setMalAuthError(err instanceof Error ? err.message : 'Falha ao iniciar autenticação com o MyAnimeList.');
       setIsStartingMALAuth(false);
     }
