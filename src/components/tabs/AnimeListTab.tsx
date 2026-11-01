@@ -129,22 +129,36 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
 
       {/* Animes Grid - Always 3 columns on mobile and larger screens */}
       {filteredAnimes.length === 0 ? (
-        <div className="rounded-2xl border border-purple-900/30 bg-[#130E24]/60 p-12 text-center">
-          <Tv className="mx-auto h-10 w-10 text-purple-400/40" />
-          <h3 className="mt-3 text-base font-bold text-white">Nenhum anime encontrado</h3>
-          <p className="mt-1 text-xs text-purple-300/60 max-w-sm mx-auto">
-            Não foram encontrados animes correspondentes ao filtro ou termo de pesquisa selecionado.
-          </p>
-          <button
-            onClick={() => {
-              setActiveFilter('all');
-              setSearchQuery('');
-            }}
-            className="mt-4 rounded-lg bg-purple-600 px-4 py-2 text-xs font-semibold text-white hover:bg-purple-500 transition-colors"
-          >
-            Limpar Filtros
-          </button>
-        </div>
+        animes.length === 0 && activeFilter === 'all' && !searchQuery.trim() ? (
+          <div className="rounded-2xl border border-purple-900/30 bg-[#130E24]/60 p-12 text-center">
+            <Tv className="mx-auto h-10 w-10 text-purple-400/40" />
+            <h3 className="mt-3 text-base font-bold text-white">
+              {isOwnProfile ? 'Sua lista de animes está vazia' : 'Nenhum anime na lista'}
+            </h3>
+            <p className="mt-1 text-xs text-purple-300/60 max-w-sm mx-auto">
+              {isOwnProfile
+                ? 'Você ainda não adicionou nenhum anime à sua lista pessoal.'
+                : 'Este usuário ainda não possui animes registrados na lista.'}
+            </p>
+          </div>
+        ) : (
+          <div className="rounded-2xl border border-purple-900/30 bg-[#130E24]/60 p-12 text-center">
+            <Tv className="mx-auto h-10 w-10 text-purple-400/40" />
+            <h3 className="mt-3 text-base font-bold text-white">Nenhum anime encontrado</h3>
+            <p className="mt-1 text-xs text-purple-300/60 max-w-sm mx-auto">
+              Não foram encontrados animes correspondentes ao filtro ou termo de pesquisa selecionado.
+            </p>
+            <button
+              onClick={() => {
+                setActiveFilter('all');
+                setSearchQuery('');
+              }}
+              className="mt-4 rounded-lg bg-purple-600 px-4 py-2 text-xs font-semibold text-white hover:bg-purple-500 transition-colors"
+            >
+              Limpar Filtros
+            </button>
+          </div>
+        )
       ) : (
         <>
           <div 

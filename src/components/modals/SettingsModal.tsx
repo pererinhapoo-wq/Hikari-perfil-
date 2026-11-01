@@ -53,7 +53,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [displayName, setDisplayName] = useState(profile.displayName);
   const [username, setUsername] = useState(profile.username);
   const [bio, setBio] = useState(profile.bio);
-  const [isPrivate] = useState(true);
+  const [isPrivate] = useState(profile.isPrivate);
   
   // Category-level privacy settings state
   const [showAnimeList, setShowAnimeList] = useState(profile.privacySettings?.showAnimeList ?? true);
@@ -91,13 +91,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       externalAccounts: {
         anilist: { 
           connected: anilistConnected, 
-          username: anilistConnected ? (profile.externalAccounts.anilist.username || 'ren_otaku') : undefined,
-          avatarUrl: anilistConnected ? 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200&auto=format&fit=crop&q=80' : undefined
+          username: anilistConnected ? (profile.externalAccounts.anilist.username || username || profile.username) : undefined,
+          avatarUrl: anilistConnected ? profile.externalAccounts.anilist.avatarUrl : undefined
         },
         mal: { 
           connected: malConnected, 
-          username: malConnected ? (profile.externalAccounts.mal.username || 'ren_hikari') : undefined,
-          avatarUrl: malConnected ? 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=200&auto=format&fit=crop&q=80' : undefined
+          username: malConnected ? (profile.externalAccounts.mal.username || username || profile.username) : undefined,
+          avatarUrl: malConnected ? profile.externalAccounts.mal.avatarUrl : undefined
         }
       }
     });

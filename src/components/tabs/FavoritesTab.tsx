@@ -3,12 +3,9 @@ import {
   Tv, 
   Sparkles, 
   Building2, 
-  Users, 
-  Heart,
-  Film
+  Users
 } from 'lucide-react';
 import { AnimeItem, FavoriteCharacter, FavoriteCompany, FavoritePerson } from '../../types';
-import { FAVORITE_CHARACTERS, FAVORITE_COMPANIES, FAVORITE_PEOPLE } from '../../data/mockData';
 
 interface FavoritesTabProps {
   favorites: AnimeItem[];
@@ -22,11 +19,11 @@ interface FavoritesTabProps {
 
 export const FavoritesTab: React.FC<FavoritesTabProps> = ({
   favorites,
-  characters = FAVORITE_CHARACTERS,
-  companies = FAVORITE_COMPANIES,
-  people = FAVORITE_PEOPLE,
+  characters = [],
+  companies = [],
+  people = [],
   isOwnProfile,
-  onToggleFavorite,
+  onToggleFavorite: _onToggleFavorite,
   onNavigateToAnimes
 }) => {
   // Sliced to maximum 10 items strictly as demanded by specification
@@ -124,37 +121,49 @@ export const FavoritesTab: React.FC<FavoritesTabProps> = ({
           </div>
         </div>
 
-        <div className="flex gap-3 overflow-x-auto pb-3 pt-1 overscroll-x-contain no-scrollbar">
-          {characterFavorites.map((char) => (
-            <div
-              key={char.id}
-              className="group flex-shrink-0 w-32 sm:w-36 rounded-xl border border-purple-900/40 bg-[#130E24] p-2 transition-all hover:border-purple-500/50 hover:bg-[#18112e]"
-            >
-              <div className="relative aspect-4/5 w-full overflow-hidden rounded-lg bg-purple-950/40">
-                <img
-                  src={char.imageUrl}
-                  alt={char.name}
-                  referrerPolicy="no-referrer"
-                  className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-                />
-              </div>
+        {characterFavorites.length === 0 ? (
+          <div className="rounded-2xl border border-purple-900/30 bg-[#130E24]/60 p-6 text-center">
+            <Sparkles className="mx-auto h-7 w-7 text-purple-400/40" />
+            <h3 className="mt-2 text-sm font-bold text-white">Nenhum personagem favoritado</h3>
+            <p className="mt-1 text-xs text-purple-300/60 max-w-sm mx-auto">
+              {isOwnProfile
+                ? 'Você ainda não adicionou personagens favoritos ao seu perfil.'
+                : 'Este usuário ainda não destacou personagens favoritos.'}
+            </p>
+          </div>
+        ) : (
+          <div className="flex gap-3 overflow-x-auto pb-3 pt-1 overscroll-x-contain no-scrollbar">
+            {characterFavorites.map((char) => (
+              <div
+                key={char.id}
+                className="group flex-shrink-0 w-32 sm:w-36 rounded-xl border border-purple-900/40 bg-[#130E24] p-2 transition-all hover:border-purple-500/50 hover:bg-[#18112e]"
+              >
+                <div className="relative aspect-4/5 w-full overflow-hidden rounded-lg bg-purple-950/40">
+                  <img
+                    src={char.imageUrl}
+                    alt={char.name}
+                    referrerPolicy="no-referrer"
+                    className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                  />
+                </div>
 
-              <div className="mt-2 px-0.5">
-                <h4 className="text-xs font-bold text-white truncate group-hover:text-purple-300 transition-colors">
-                  {char.name}
-                </h4>
-                {char.originalName && (
-                  <span className="text-[10px] text-purple-400/60 block truncate">
-                    {char.originalName}
+                <div className="mt-2 px-0.5">
+                  <h4 className="text-xs font-bold text-white truncate group-hover:text-purple-300 transition-colors">
+                    {char.name}
+                  </h4>
+                  {char.originalName && (
+                    <span className="text-[10px] text-purple-400/60 block truncate">
+                      {char.originalName}
+                    </span>
+                  )}
+                  <span className="text-[10px] text-purple-300/70 block truncate mt-0.5 font-medium">
+                    {char.animeName}
                   </span>
-                )}
-                <span className="text-[10px] text-purple-300/70 block truncate mt-0.5 font-medium">
-                  {char.animeName}
-                </span>
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </section>
 
       {/* SECTION 3: Favoritos - Empresas & Estúdios (Horizontal Scroll, Max 10, NO 'Ver todos') */}
@@ -166,40 +175,52 @@ export const FavoritesTab: React.FC<FavoritesTabProps> = ({
           </div>
         </div>
 
-        <div className="flex gap-3 overflow-x-auto pb-3 pt-1 overscroll-x-contain no-scrollbar">
-          {companyFavorites.map((company) => (
-            <div
-              key={company.id}
-              className="group flex-shrink-0 w-48 sm:w-56 rounded-xl border border-purple-900/40 bg-[#130E24] p-3 transition-all hover:border-purple-500/50 hover:bg-[#18112e]"
-            >
-              <div className="flex items-center gap-3">
-                <img
-                  src={company.logoUrl}
-                  alt={company.name}
-                  referrerPolicy="no-referrer"
-                  className="h-12 w-12 rounded-lg object-cover border border-purple-900/40 shrink-0"
-                />
-                <div className="min-w-0 flex-1">
-                  <h4 className="text-xs sm:text-sm font-bold text-white truncate group-hover:text-purple-300 transition-colors">
-                    {company.name}
-                  </h4>
-                  <span className="text-[10px] text-purple-400/70 block truncate">
-                    {company.type}
+        {companyFavorites.length === 0 ? (
+          <div className="rounded-2xl border border-purple-900/30 bg-[#130E24]/60 p-6 text-center">
+            <Building2 className="mx-auto h-7 w-7 text-purple-400/40" />
+            <h3 className="mt-2 text-sm font-bold text-white">Nenhum estúdio ou empresa favoritado</h3>
+            <p className="mt-1 text-xs text-purple-300/60 max-w-sm mx-auto">
+              {isOwnProfile
+                ? 'Você ainda não adicionou estúdios ou produtoras favoritas ao seu perfil.'
+                : 'Este usuário ainda não destacou estúdios ou empresas favoritas.'}
+            </p>
+          </div>
+        ) : (
+          <div className="flex gap-3 overflow-x-auto pb-3 pt-1 overscroll-x-contain no-scrollbar">
+            {companyFavorites.map((company) => (
+              <div
+                key={company.id}
+                className="group flex-shrink-0 w-48 sm:w-56 rounded-xl border border-purple-900/40 bg-[#130E24] p-3 transition-all hover:border-purple-500/50 hover:bg-[#18112e]"
+              >
+                <div className="flex items-center gap-3">
+                  <img
+                    src={company.logoUrl}
+                    alt={company.name}
+                    referrerPolicy="no-referrer"
+                    className="h-12 w-12 rounded-lg object-cover border border-purple-900/40 shrink-0"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <h4 className="text-xs sm:text-sm font-bold text-white truncate group-hover:text-purple-300 transition-colors">
+                      {company.name}
+                    </h4>
+                    <span className="text-[10px] text-purple-400/70 block truncate">
+                      {company.type}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="mt-2.5 border-t border-purple-900/30 pt-2">
+                  <span className="text-[9px] text-purple-400/60 uppercase font-semibold block">
+                    Obras notáveis
                   </span>
+                  <p className="text-[11px] text-purple-200/90 truncate mt-0.5" title={company.notableWorks}>
+                    {company.notableWorks}
+                  </p>
                 </div>
               </div>
-
-              <div className="mt-2.5 border-t border-purple-900/30 pt-2">
-                <span className="text-[9px] text-purple-400/60 uppercase font-semibold block">
-                  Obras notáveis
-                </span>
-                <p className="text-[11px] text-purple-200/90 truncate mt-0.5" title={company.notableWorks}>
-                  {company.notableWorks}
-                </p>
-              </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </section>
 
       {/* SECTION 4: Favoritos - Pessoas (Horizontal Scroll, Max 10, NO 'Ver todos') */}
@@ -211,35 +232,47 @@ export const FavoritesTab: React.FC<FavoritesTabProps> = ({
           </div>
         </div>
 
-        <div className="flex gap-3 overflow-x-auto pb-3 pt-1 overscroll-x-contain no-scrollbar">
-          {personFavorites.map((person) => (
-            <div
-              key={person.id}
-              className="group flex-shrink-0 w-36 sm:w-40 rounded-xl border border-purple-900/40 bg-[#130E24] p-2.5 transition-all hover:border-purple-500/50 hover:bg-[#18112e]"
-            >
-              <div className="relative aspect-square w-full overflow-hidden rounded-lg bg-purple-950/40">
-                <img
-                  src={person.imageUrl}
-                  alt={person.name}
-                  referrerPolicy="no-referrer"
-                  className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-                />
-              </div>
+        {personFavorites.length === 0 ? (
+          <div className="rounded-2xl border border-purple-900/30 bg-[#130E24]/60 p-6 text-center">
+            <Users className="mx-auto h-7 w-7 text-purple-400/40" />
+            <h3 className="mt-2 text-sm font-bold text-white">Nenhuma pessoa favoritada</h3>
+            <p className="mt-1 text-xs text-purple-300/60 max-w-sm mx-auto">
+              {isOwnProfile
+                ? 'Você ainda não adicionou criadores, diretores ou dubladores favoritos ao seu perfil.'
+                : 'Este usuário ainda não destacou pessoas favoritas.'}
+            </p>
+          </div>
+        ) : (
+          <div className="flex gap-3 overflow-x-auto pb-3 pt-1 overscroll-x-contain no-scrollbar">
+            {personFavorites.map((person) => (
+              <div
+                key={person.id}
+                className="group flex-shrink-0 w-36 sm:w-40 rounded-xl border border-purple-900/40 bg-[#130E24] p-2.5 transition-all hover:border-purple-500/50 hover:bg-[#18112e]"
+              >
+                <div className="relative aspect-square w-full overflow-hidden rounded-lg bg-purple-950/40">
+                  <img
+                    src={person.imageUrl}
+                    alt={person.name}
+                    referrerPolicy="no-referrer"
+                    className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                  />
+                </div>
 
-              <div className="mt-2 px-0.5">
-                <h4 className="text-xs font-bold text-white truncate group-hover:text-purple-300 transition-colors">
-                  {person.name}
-                </h4>
-                <span className="inline-block mt-0.5 rounded bg-purple-950/80 border border-purple-800/40 px-1.5 py-0.2 text-[9px] font-medium text-purple-300 truncate max-w-full">
-                  {person.role}
-                </span>
-                <span className="text-[10px] text-purple-300/60 block truncate mt-1" title={person.notableWork}>
-                  {person.notableWork}
-                </span>
+                <div className="mt-2 px-0.5">
+                  <h4 className="text-xs font-bold text-white truncate group-hover:text-purple-300 transition-colors">
+                    {person.name}
+                  </h4>
+                  <span className="inline-block mt-0.5 rounded bg-purple-950/80 border border-purple-800/40 px-1.5 py-0.2 text-[9px] font-medium text-purple-300 truncate max-w-full">
+                    {person.role}
+                  </span>
+                  <span className="text-[10px] text-purple-300/60 block truncate mt-1" title={person.notableWork}>
+                    {person.notableWork}
+                  </span>
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </section>
     </div>
   );

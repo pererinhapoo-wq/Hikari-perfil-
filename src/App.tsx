@@ -1,4 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { Loader2 } from 'lucide-react';
+import { updateProfile } from 'firebase/auth';
 import { Header } from './components/Header';
 import { ProfileHeader } from './components/ProfileHeader';
 import { TabsNavigation } from './components/TabsNavigation';
@@ -10,6 +12,7 @@ import { ActivityTab } from './components/tabs/ActivityTab';
 import { PrivateProfileNotice } from './components/PrivateProfileNotice';
 import { FollowersModal } from './components/modals/FollowersModal';
 import { SettingsModal } from './components/modals/SettingsModal';
+import { AuthScreen } from './components/auth/AuthScreen';
 import { 
   UserProfile, 
   ProfileTab, 
@@ -24,6 +27,9 @@ import {
   CURRENT_USER, 
   OTHER_USERS, 
   INITIAL_ANIMES, 
+  FAVORITE_CHARACTERS,
+  FAVORITE_COMPANIES,
+  FAVORITE_PEOPLE,
   INITIAL_COMMENTS, 
   INITIAL_ACTIVITIES, 
   INITIAL_FOLLOWERS, 
@@ -32,15 +38,59 @@ import {
   INITIAL_NOTIFICATIONS 
 } from './data/mockData';
 import { inferOffsetMsFromLabel } from './utils/relativeTime';
+import { useAuth } from './contexts/AuthContext';
+import {
+  buildProfileFromFirebaseUser,
+  createEmptyUserWorkspace,
+  getUserWorkspaceStorageKey,
+  loadUserWorkspaceFromFirestore,
+  readLocalUserWorkspace,
+  saveUserWorkspaceToFirestore,
+  writeLocalUserWorkspace,
+  type FirestoreSyncStatus,
+  type UserPersonalWorkspace,
+  type UserProfileOverrides,
+} from './lib/userWorkspaceStorage';
 
-const PROFILE_STORAGE_KEY = 'hikari_profile_user_data_v1';
+const DEMO_PROFILE_STORAGE_KEY = 'hikari_profile_user_data_v1';
 
-interface PersistedProfileData {
+interface PersistedDemoProfileData {
   animes: AnimeItem[];
   comments: HikariComment[];
   activities: UserActivity[];
   notifications: NotificationItem[];
 }
+
+interface AuthSessionState {
+  uid: string;
+  workspace: UserPersonalWorkspace;
+  firestoreStatus: FirestoreSyncStatus;
+}
+
+const NEUTRAL_LOADING_PROFILE: UserProfile = {
+  id: '',
+  username: 'usuario',
+  displayName: 'Usuário',
+  avatarUrl: '',
+  bannerUrl: '',
+  bio: '',
+  createdAt: '',
+  createdAtTimestamp: 0,
+  followersCount: 0,
+  followingCount: 0,
+  isPrivate: false,
+  showCommentsOnProfile: true,
+  privacySettings: {
+    showAnimeList: true,
+    showFavorites: true,
+    showActivity: true,
+    showCommentsOnProfile: true,
+  },
+  externalAccounts: {
+    anilist: { connected: false },
+    mal: { connected: false },
+  },
+};
 
 const STATUS_ACTIVITY_LABEL: Record<AnimeItem['status'], string> = {
   watching: 'Assistindo',
@@ -62,11 +112,11 @@ function mergeNotificationsWithSeed(
   return [...newFromSeed, ...persisted];
 }
 
-function loadInitialProfileData(): PersistedProfileData {
+function loadInitialDemoProfileData(): PersistedDemoProfileData {
   try {
-    const raw = window.localStorage.getItem(PROFILE_STORAGE_KEY);
+    const raw = window.localStorage.getItem(DEMO_PROFILE_STORAGE_KEY);
     if (raw) {
-      const parsed = JSON.parse(raw) as Partial<PersistedProfileData>;
+      const parsed = JSON.parse(raw) as Partial<PersistedDemoProfileData>;
       if (
         Array.isArray(parsed.animes) &&
         Array.isArray(parsed.comments) &&
@@ -85,7 +135,7 @@ function loadInitialProfileData(): PersistedProfileData {
       }
     }
   } catch {
-    // Fallback to initial seed if localStorage is inaccessible or corrupted
+    // Fallback to initial demo seed in memory if localStorage is inaccessible or corrupted
   }
 
   const seedTimestamp = Date.now();
@@ -101,76 +151,57 @@ function loadInitialProfileData(): PersistedProfileData {
       act.createdAtTimestamp ?? seedTimestamp - inferOffsetMsFromLabel(act.timestamp) - idx * 1000
   }));
 
-  const seeded: PersistedProfileData = {
+  return {
     animes: INITIAL_ANIMES,
     comments: seededComments,
     activities: seededActivities,
     notifications: INITIAL_NOTIFICATIONS
   };
-
-  try {
-    window.localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(seeded));
-  } catch {
-    // Ignore storage write errors in restricted contexts
-  }
-
-  return seeded;
 }
 
 export default function App() {
-  // Hydrate persisted profile records once on mount
-  const [initialData] = useState<PersistedProfileData>(() => loadInitialProfileData());
+  const {
+    user,
+    userRevision,
+    isLoading,
+    isAuthenticated,
+    signOutUser,
+    refreshUserProfile,
+  } = useAuth();
 
-  // Session & Profiles
-  const [currentUser, setCurrentUser] = useState<UserProfile>(CURRENT_USER);
-  const [otherProfiles, setOtherProfiles] = useState<Record<string, UserProfile>>(OTHER_USERS);
+  // Explicit demo preview opt-in when unauthenticated (never treated as an authenticated session)
+  const [isDemoPreview, setIsDemoPreview] = useState(false);
+  const [authInitialMode, setAuthInitialMode] = useState<'login' | 'signup'>('login');
+
+  // Hydrate persisted demo profile records in memory without overwriting localStorage during real auth sessions
+  const [initialDemoData] = useState<PersistedDemoProfileData>(() => loadInitialDemoProfileData());
+
+  // Demo Mode State (strictly isolated to !isAuthenticated && isDemoPreview)
+  const [demoProfile, setDemoProfile] = useState<UserProfile>(CURRENT_USER);
+  const [demoAnimes, setDemoAnimes] = useState<AnimeItem[]>(initialDemoData.animes);
+  const [demoComments, setDemoComments] = useState<HikariComment[]>(initialDemoData.comments);
+  const [demoActivities, setDemoActivities] = useState<UserActivity[]>(initialDemoData.activities);
+  const [demoFollowers, setDemoFollowers] = useState<FollowUser[]>(INITIAL_FOLLOWERS);
+  const [demoFollowing, setDemoFollowing] = useState<FollowUser[]>(INITIAL_FOLLOWING);
+  const [demoFollowRequests, setDemoFollowRequests] = useState<FollowRequest[]>(INITIAL_FOLLOW_REQUESTS);
+  const [demoNotifications, setDemoNotifications] = useState<NotificationItem[]>(initialDemoData.notifications);
+  const [demoFollowingIds, setDemoFollowingIds] = useState<Set<string>>(
+    () => new Set(['usr_kuroha', 'usr_shinji'])
+  );
+  const [demoRequestedIds, setDemoRequestedIds] = useState<Set<string>>(() => new Set());
+  const [demoBlockedIds, setDemoBlockedIds] = useState<Set<string>>(() => new Set());
+  const [demoOtherProfiles, setDemoOtherProfiles] = useState<Record<string, UserProfile>>(() => ({
+    ...OTHER_USERS,
+    [CURRENT_USER.id]: CURRENT_USER,
+  }));
+
+  // UID-isolated personal state for real Firebase accounts (keyed strictly by user.uid)
+  const [authSession, setAuthSession] = useState<AuthSessionState | null>(null);
+
   const [activeProfileId, setActiveProfileId] = useState<string>(CURRENT_USER.id);
 
   // Tab State
   const [activeTab, setActiveTab] = useState<ProfileTab>('overview');
-
-  // Persisted Social & Data State
-  const [animes, setAnimes] = useState<AnimeItem[]>(initialData.animes);
-  const [comments, setComments] = useState<HikariComment[]>(initialData.comments);
-  const [activities, setActivities] = useState<UserActivity[]>(initialData.activities);
-  const [followers, setFollowers] = useState<FollowUser[]>(INITIAL_FOLLOWERS);
-  const [following, setFollowing] = useState<FollowUser[]>(INITIAL_FOLLOWING);
-  const [followRequests, setFollowRequests] = useState<FollowRequest[]>(INITIAL_FOLLOW_REQUESTS);
-  const [notifications, setNotifications] = useState<NotificationItem[]>(initialData.notifications);
-
-  // Keep localStorage synchronized whenever animes, comments, activities, or notifications change
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(
-        PROFILE_STORAGE_KEY,
-        JSON.stringify({ animes, comments, activities, notifications })
-      );
-    } catch {
-      // Ignore storage write errors gracefully
-    }
-  }, [animes, comments, activities, notifications]);
-
-  // Synchronize notifications if updated from another tab or external Hikari event in the same storage
-  useEffect(() => {
-    function handleStorageSync(event: StorageEvent) {
-      if (event.key !== PROFILE_STORAGE_KEY || !event.newValue) return;
-      try {
-        const parsed = JSON.parse(event.newValue) as Partial<PersistedProfileData>;
-        if (Array.isArray(parsed.notifications)) {
-          setNotifications(parsed.notifications);
-        }
-      } catch {
-        // Ignore malformed external storage payloads
-      }
-    }
-    window.addEventListener('storage', handleStorageSync);
-    return () => window.removeEventListener('storage', handleStorageSync);
-  }, []);
-
-  // Relational follow state for other users
-  const [followingIds, setFollowingIds] = useState<Set<string>>(new Set(['usr_kuroha', 'usr_shinji']));
-  const [requestedIds, setRequestedIds] = useState<Set<string>>(new Set());
-  const [blockedIds, setBlockedIds] = useState<Set<string>>(new Set());
 
   // Modal States
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -182,9 +213,216 @@ export default function App() {
   // Highlight state for direct notification navigation
   const [highlightedCommentId, setHighlightedCommentId] = useState<string | undefined>(undefined);
 
+  // Hydrate or wipe authenticated workspace strictly by Firebase UID on every auth change
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!user?.uid) {
+      setAuthSession(null);
+      setActiveProfileId(CURRENT_USER.id);
+      setActiveTab('overview');
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const targetUid = user.uid;
+    const localWorkspace =
+      readLocalUserWorkspace(targetUid) ?? createEmptyUserWorkspace(targetUid);
+
+    setIsDemoPreview(false);
+    setIsSettingsOpen(false);
+    setIsFollowersOpen(false);
+    setIsNotifOpen(false);
+    setActiveProfileId(targetUid);
+    setActiveTab('overview');
+    setAuthSession({
+      uid: targetUid,
+      workspace: localWorkspace,
+      firestoreStatus: 'idle',
+    });
+
+    void loadUserWorkspaceFromFirestore(targetUid).then((remote) => {
+      if (cancelled) return;
+      setAuthSession((prev) => {
+        if (!prev || prev.uid !== targetUid) return prev;
+        if (
+          remote.workspace &&
+          remote.workspace.uid === targetUid &&
+          remote.workspace.updatedAtMs >= prev.workspace.updatedAtMs
+        ) {
+          const persisted = writeLocalUserWorkspace(targetUid, remote.workspace);
+          return {
+            uid: targetUid,
+            workspace: persisted,
+            firestoreStatus: remote.status,
+          };
+        }
+        return {
+          ...prev,
+          firestoreStatus: remote.status,
+        };
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.uid]);
+
+  // Keep demo localStorage synchronized ONLY while actively inside Demo Mode
+  useEffect(() => {
+    if (isAuthenticated || !isDemoPreview) return;
+    try {
+      window.localStorage.setItem(
+        DEMO_PROFILE_STORAGE_KEY,
+        JSON.stringify({
+          animes: demoAnimes,
+          comments: demoComments,
+          activities: demoActivities,
+          notifications: demoNotifications,
+        })
+      );
+    } catch {
+      // Ignore storage write errors gracefully
+    }
+  }, [isAuthenticated, isDemoPreview, demoAnimes, demoComments, demoActivities, demoNotifications]);
+
+  // Cross-tab storage synchronization strictly scoped to either current UID or Demo Mode
+  useEffect(() => {
+    function handleStorageSync(event: StorageEvent) {
+      if (!event.newValue) return;
+
+      if (isAuthenticated && user?.uid) {
+        const expectedKey = getUserWorkspaceStorageKey(user.uid);
+        if (event.key !== expectedKey) return;
+        const syncedWorkspace = readLocalUserWorkspace(user.uid);
+        if (syncedWorkspace && syncedWorkspace.uid === user.uid) {
+          setAuthSession((prev) =>
+            prev && prev.uid === user.uid ? { ...prev, workspace: syncedWorkspace } : prev
+          );
+        }
+        return;
+      }
+
+      if (!isAuthenticated && isDemoPreview && event.key === DEMO_PROFILE_STORAGE_KEY) {
+        try {
+          const parsed = JSON.parse(event.newValue) as Partial<PersistedDemoProfileData>;
+          if (Array.isArray(parsed.notifications)) {
+            setDemoNotifications(parsed.notifications);
+          }
+        } catch {
+          // Ignore malformed external storage payloads
+        }
+      }
+    }
+    window.addEventListener('storage', handleStorageSync);
+    return () => window.removeEventListener('storage', handleStorageSync);
+  }, [isAuthenticated, isDemoPreview, user?.uid]);
+
+  const isAuthWorkspaceReady = Boolean(
+    isAuthenticated && user && authSession !== null && authSession.uid === user.uid
+  );
+
+  const activeAuthWorkspace =
+    isAuthWorkspaceReady && authSession ? authSession.workspace : null;
+
+  const updateAuthWorkspace = useCallback(
+    (updater: (prev: UserPersonalWorkspace) => UserPersonalWorkspace) => {
+      if (!isAuthenticated || !user) return;
+      const targetUid = user.uid;
+      setAuthSession((prev) => {
+        const baseWorkspace =
+          prev && prev.uid === targetUid
+            ? prev.workspace
+            : readLocalUserWorkspace(targetUid) ?? createEmptyUserWorkspace(targetUid);
+        const updated = updater(baseWorkspace);
+        const stamped = writeLocalUserWorkspace(targetUid, {
+          ...updated,
+          uid: targetUid,
+          updatedAtMs: Date.now(),
+        });
+        const resolvedProfile = buildProfileFromFirebaseUser(user, stamped.profileOverrides);
+        void saveUserWorkspaceToFirestore(targetUid, resolvedProfile, stamped).then(
+          (syncStatus) => {
+            setAuthSession((curr) =>
+              curr && curr.uid === targetUid ? { ...curr, firestoreStatus: syncStatus } : curr
+            );
+          }
+        );
+        return {
+          uid: targetUid,
+          workspace: stamped,
+          firestoreStatus: prev && prev.uid === targetUid ? prev.firestoreStatus : 'idle',
+        };
+      });
+    },
+    [isAuthenticated, user]
+  );
+
+  const authenticatedProfile = useMemo(() => {
+    if (!isAuthenticated || !user || !activeAuthWorkspace) return null;
+    void userRevision;
+    return buildProfileFromFirebaseUser(user, activeAuthWorkspace.profileOverrides);
+  }, [isAuthenticated, user, userRevision, activeAuthWorkspace]);
+
+  const authFollowingIds = useMemo(
+    () => new Set(activeAuthWorkspace?.followingIds ?? []),
+    [activeAuthWorkspace?.followingIds]
+  );
+  const authRequestedIds = useMemo(
+    () => new Set(activeAuthWorkspace?.requestedIds ?? []),
+    [activeAuthWorkspace?.requestedIds]
+  );
+  const authBlockedIds = useMemo(
+    () => new Set(activeAuthWorkspace?.blockedIds ?? []),
+    [activeAuthWorkspace?.blockedIds]
+  );
+
+  const currentUser: UserProfile = isAuthenticated
+    ? authenticatedProfile ?? NEUTRAL_LOADING_PROFILE
+    : demoProfile;
+  const animes = isAuthenticated ? activeAuthWorkspace?.animes ?? [] : demoAnimes;
+  const comments = isAuthenticated ? activeAuthWorkspace?.comments ?? [] : demoComments;
+  const activities = isAuthenticated ? activeAuthWorkspace?.activities ?? [] : demoActivities;
+  const followers = isAuthenticated ? activeAuthWorkspace?.followers ?? [] : demoFollowers;
+  const following = isAuthenticated ? activeAuthWorkspace?.following ?? [] : demoFollowing;
+  const followRequests = isAuthenticated
+    ? activeAuthWorkspace?.followRequests ?? []
+    : demoFollowRequests;
+  const notifications = isAuthenticated
+    ? activeAuthWorkspace?.notifications ?? []
+    : demoNotifications;
+  const followingIds = isAuthenticated ? authFollowingIds : demoFollowingIds;
+  const requestedIds = isAuthenticated ? authRequestedIds : demoRequestedIds;
+  const blockedIds = isAuthenticated ? authBlockedIds : demoBlockedIds;
+
+  const applyProfilePatch = useCallback(
+    (patch: UserProfileOverrides) => {
+      if (isAuthenticated) {
+        updateAuthWorkspace((prev) => ({
+          ...prev,
+          profileOverrides: {
+            ...prev.profileOverrides,
+            ...patch,
+          },
+        }));
+      } else {
+        setDemoProfile((prev) => ({
+          ...prev,
+          ...patch,
+        }));
+      }
+    },
+    [isAuthenticated, updateAuthWorkspace]
+  );
+
+  const isViewingAppShell =
+    !isLoading && ((isAuthenticated && isAuthWorkspaceReady) || (!isAuthenticated && isDemoPreview));
+
   // Global background scroll lock for all open modals (preserves exact page position, zero jumping, no position:fixed hack, no scrollTo)
   useEffect(() => {
-    const isAnyModalOpen = isSettingsOpen || isFollowersOpen || isNotifOpen;
+    const isAnyModalOpen = isViewingAppShell && (isSettingsOpen || isFollowersOpen || isNotifOpen);
     if (isAnyModalOpen) {
       const scrollBarWidth = window.innerWidth - document.documentElement.clientWidth;
       const prevBodyOverflow = document.body.style.overflow;
@@ -200,11 +438,28 @@ export default function App() {
         document.body.style.paddingRight = prevPaddingRight;
       };
     }
-  }, [isSettingsOpen, isFollowersOpen, isNotifOpen]);
+  }, [isViewingAppShell, isSettingsOpen, isFollowersOpen, isNotifOpen]);
 
-  // Current active profile
-  const isOwnProfile = activeProfileId === currentUser.id;
-  const activeProfile = isOwnProfile ? currentUser : otherProfiles[activeProfileId] || currentUser;
+  // Strictly separate authenticated user profile from Demo Mode profiles
+  const isOwnProfile = isAuthenticated ? true : activeProfileId === CURRENT_USER.id;
+  const activeProfile: UserProfile = isAuthenticated
+    ? currentUser
+    : isOwnProfile
+    ? demoProfile
+    : demoOtherProfiles[activeProfileId] || demoProfile;
+
+  const displayedAnimes = animes;
+  const displayedFavoriteCharacters = isAuthenticated
+    ? activeAuthWorkspace?.favoriteCharacters ?? []
+    : FAVORITE_CHARACTERS;
+  const displayedFavoriteCompanies = isAuthenticated
+    ? activeAuthWorkspace?.favoriteCompanies ?? []
+    : FAVORITE_COMPANIES;
+  const displayedFavoritePeople = isAuthenticated
+    ? activeAuthWorkspace?.favoritePeople ?? []
+    : FAVORITE_PEOPLE;
+  const displayedComments = comments;
+  const displayedActivities = activities;
 
   const isFollowingActive = followingIds.has(activeProfile.id);
   const isRequestedActive = requestedIds.has(activeProfile.id);
@@ -215,90 +470,105 @@ export default function App() {
 
   // Handler: Select Profile (switch view)
   const handleSelectProfile = (userId: string) => {
+    if (isAuthenticated && user) {
+      setActiveProfileId(user.uid);
+      setActiveTab('overview');
+      return;
+    }
     setActiveProfileId(userId);
     setActiveTab('overview');
   };
 
-  // Handler: Follow / Request toggle
+  // Handler: Follow / Request toggle (Demo Mode multi-profile interaction)
   const handleFollowToggle = () => {
-    if (isOwnProfile) return;
+    if (isOwnProfile || isAuthenticated) return;
 
     if (isFollowingActive) {
-      // Unfollow
-      setFollowingIds(prev => {
+      setDemoFollowingIds((prev) => {
         const next = new Set(prev);
         next.delete(activeProfile.id);
         return next;
       });
-      // Decrement counts
-      setOtherProfiles(prev => ({
+      setDemoOtherProfiles((prev) => ({
         ...prev,
         [activeProfile.id]: {
           ...prev[activeProfile.id],
-          followersCount: Math.max(0, prev[activeProfile.id].followersCount - 1)
-        }
+          followersCount: Math.max(0, prev[activeProfile.id].followersCount - 1),
+        },
       }));
-      setCurrentUser(prev => ({
+      setDemoProfile((prev) => ({
         ...prev,
-        followingCount: Math.max(0, prev.followingCount - 1)
+        followingCount: Math.max(0, prev.followingCount - 1),
       }));
-      setFollowing(prev => prev.filter(u => u.id !== activeProfile.id));
+      setDemoFollowing((prev) => prev.filter((u) => u.id !== activeProfile.id));
     } else if (isRequestedActive) {
-      // Cancel request
-      setRequestedIds(prev => {
+      setDemoRequestedIds((prev) => {
         const next = new Set(prev);
         next.delete(activeProfile.id);
         return next;
       });
+    } else if (activeProfile.isPrivate) {
+      setDemoRequestedIds((prev) => new Set(prev).add(activeProfile.id));
     } else {
-      // If target profile is private, send request
-      if (activeProfile.isPrivate) {
-        setRequestedIds(prev => new Set(prev).add(activeProfile.id));
-      } else {
-        // Immediate follow
-        setFollowingIds(prev => new Set(prev).add(activeProfile.id));
-        setOtherProfiles(prev => ({
-          ...prev,
-          [activeProfile.id]: {
-            ...prev[activeProfile.id],
-            followersCount: prev[activeProfile.id].followersCount + 1
-          }
-        }));
-        setCurrentUser(prev => ({
-          ...prev,
-          followingCount: prev.followingCount + 1
-        }));
-        // Add to following list
-        setFollowing(prev => [
-          {
-            id: activeProfile.id,
-            username: activeProfile.username,
-            displayName: activeProfile.displayName,
-            avatarUrl: activeProfile.avatarUrl,
-            bio: activeProfile.bio,
-            isFollowing: true,
-            isRequested: false,
-            isFollower: false,
-            isBlocked: false,
-            createdAt: activeProfile.createdAt
-          },
-          ...prev
-        ]);
-      }
+      setDemoFollowingIds((prev) => new Set(prev).add(activeProfile.id));
+      setDemoOtherProfiles((prev) => ({
+        ...prev,
+        [activeProfile.id]: {
+          ...prev[activeProfile.id],
+          followersCount: prev[activeProfile.id].followersCount + 1,
+        },
+      }));
+      setDemoProfile((prev) => ({
+        ...prev,
+        followingCount: prev.followingCount + 1,
+      }));
+      setDemoFollowing((prev) => [
+        {
+          id: activeProfile.id,
+          username: activeProfile.username,
+          displayName: activeProfile.displayName,
+          avatarUrl: activeProfile.avatarUrl,
+          bio: activeProfile.bio,
+          isFollowing: true,
+          isRequested: false,
+          isFollower: false,
+          isBlocked: false,
+          createdAt: activeProfile.createdAt,
+        },
+        ...prev,
+      ]);
     }
   };
 
   // Handler: Block toggle
   const handleBlockToggle = () => {
     if (isOwnProfile) return;
-    setBlockedIds(prev => {
+    if (isAuthenticated) {
+      updateAuthWorkspace((prev) => {
+        const blockedSet = new Set(prev.blockedIds);
+        const followingSet = new Set(prev.followingIds);
+        if (blockedSet.has(activeProfile.id)) {
+          blockedSet.delete(activeProfile.id);
+        } else {
+          blockedSet.add(activeProfile.id);
+          followingSet.delete(activeProfile.id);
+        }
+        return {
+          ...prev,
+          blockedIds: Array.from(blockedSet),
+          followingIds: Array.from(followingSet),
+        };
+      });
+      return;
+    }
+
+    setDemoBlockedIds((prev) => {
       const next = new Set(prev);
       if (next.has(activeProfile.id)) {
         next.delete(activeProfile.id);
       } else {
         next.add(activeProfile.id);
-        // If blocking, remove from following
-        setFollowingIds(f => {
+        setDemoFollowingIds((f) => {
           const fNext = new Set(f);
           fNext.delete(activeProfile.id);
           return fNext;
@@ -310,65 +580,143 @@ export default function App() {
 
   // Handler: Accept follow request
   const handleAcceptRequest = (requestId: string, notifId?: string) => {
-    const req = followRequests.find(r => r.id === requestId);
+    if (isAuthenticated) {
+      updateAuthWorkspace((prev) => {
+        const req = prev.followRequests.find((r) => r.id === requestId);
+        const nextFollowRequests = prev.followRequests.filter((r) => r.id !== requestId);
+        const nextFollowers = req ? [req.user, ...prev.followers] : prev.followers;
+        const currentFollowersCount = prev.profileOverrides.followersCount ?? 0;
+        const nextNotifications = prev.notifications.map((n) => {
+          if (n.id === notifId || n.contextData?.requestId === requestId) {
+            return {
+              ...n,
+              isRead: true,
+              handled: 'accepted' as const,
+              message: 'começou a seguir o seu perfil (solicitação aceita).',
+            };
+          }
+          return n;
+        });
+        return {
+          ...prev,
+          followRequests: nextFollowRequests,
+          followers: nextFollowers,
+          notifications: nextNotifications,
+          profileOverrides: req
+            ? { ...prev.profileOverrides, followersCount: currentFollowersCount + 1 }
+            : prev.profileOverrides,
+        };
+      });
+      return;
+    }
+
+    const req = demoFollowRequests.find((r) => r.id === requestId);
     if (req) {
-      setFollowRequests(prev => prev.filter(r => r.id !== requestId));
-      setFollowers(prev => [req.user, ...prev]);
-      setCurrentUser(prev => ({
+      setDemoFollowRequests((prev) => prev.filter((r) => r.id !== requestId));
+      setDemoFollowers((prev) => [req.user, ...prev]);
+      setDemoProfile((prev) => ({
         ...prev,
-        followersCount: prev.followersCount + 1
+        followersCount: prev.followersCount + 1,
       }));
     }
 
-    setNotifications(prev => prev.map(n => {
-      if (n.id === notifId || n.contextData?.requestId === requestId) {
-        return {
-          ...n,
-          isRead: true,
-          handled: 'accepted' as const,
-          message: 'começou a seguir o seu perfil (solicitação aceita).'
-        };
-      }
-      return n;
-    }));
+    setDemoNotifications((prev) =>
+      prev.map((n) => {
+        if (n.id === notifId || n.contextData?.requestId === requestId) {
+          return {
+            ...n,
+            isRead: true,
+            handled: 'accepted' as const,
+            message: 'começou a seguir o seu perfil (solicitação aceita).',
+          };
+        }
+        return n;
+      })
+    );
   };
 
   // Handler: Reject follow request
   const handleRejectRequest = (requestId: string, notifId?: string) => {
-    setFollowRequests(prev => prev.filter(r => r.id !== requestId));
-    setNotifications(prev => prev.map(n => {
-      if (n.id === notifId || n.contextData?.requestId === requestId) {
-        return {
-          ...n,
-          isRead: true,
-          handled: 'rejected' as const,
-          message: 'solicitação para seguir recusada.'
-        };
-      }
-      return n;
-    }));
+    if (isAuthenticated) {
+      updateAuthWorkspace((prev) => ({
+        ...prev,
+        followRequests: prev.followRequests.filter((r) => r.id !== requestId),
+        notifications: prev.notifications.map((n) => {
+          if (n.id === notifId || n.contextData?.requestId === requestId) {
+            return {
+              ...n,
+              isRead: true,
+              handled: 'rejected' as const,
+              message: 'solicitação para seguir recusada.',
+            };
+          }
+          return n;
+        }),
+      }));
+      return;
+    }
+
+    setDemoFollowRequests((prev) => prev.filter((r) => r.id !== requestId));
+    setDemoNotifications((prev) =>
+      prev.map((n) => {
+        if (n.id === notifId || n.contextData?.requestId === requestId) {
+          return {
+            ...n,
+            isRead: true,
+            handled: 'rejected' as const,
+            message: 'solicitação para seguir recusada.',
+          };
+        }
+        return n;
+      })
+    );
   };
 
   // Handler: Remove follower
   const handleRemoveFollower = (userId: string) => {
-    setFollowers(prev => prev.filter(u => u.id !== userId));
-    setCurrentUser(prev => ({
+    if (isAuthenticated) {
+      updateAuthWorkspace((prev) => ({
+        ...prev,
+        followers: prev.followers.filter((u) => u.id !== userId),
+        profileOverrides: {
+          ...prev.profileOverrides,
+          followersCount: Math.max(0, (prev.profileOverrides.followersCount ?? 0) - 1),
+        },
+      }));
+      return;
+    }
+
+    setDemoFollowers((prev) => prev.filter((u) => u.id !== userId));
+    setDemoProfile((prev) => ({
       ...prev,
-      followersCount: Math.max(0, prev.followersCount - 1)
+      followersCount: Math.max(0, prev.followersCount - 1),
     }));
   };
 
   // Handler: Unfollow from modal
   const handleUnfollowFromModal = (userId: string) => {
-    setFollowing(prev => prev.filter(u => u.id !== userId));
-    setFollowingIds(prev => {
+    if (isAuthenticated) {
+      updateAuthWorkspace((prev) => ({
+        ...prev,
+        following: prev.following.filter((u) => u.id !== userId),
+        followingIds: prev.followingIds.filter((id) => id !== userId),
+        profileOverrides: {
+          ...prev.profileOverrides,
+          followingCount: Math.max(0, (prev.profileOverrides.followingCount ?? 0) - 1),
+        },
+      }));
+      return;
+    }
+
+    setDemoFollowing((prev) => prev.filter((u) => u.id !== userId));
+    setDemoFollowingIds((prev) => {
       const next = new Set(prev);
       next.delete(userId);
       return next;
     });
-    setCurrentUser(prev => ({
+    setDemoProfile((prev) => ({
       ...prev,
-      followingCount: Math.max(0, prev.followingCount - 1)
+      followingCount: Math.max(0, prev.followingCount - 1),
     }));
   };
 
@@ -377,26 +725,38 @@ export default function App() {
     newActivity: UserActivity | null,
     nextComments: HikariComment[] = comments
   ) => {
-    const nextActivities = newActivity ? [newActivity, ...activities] : activities;
-    try {
-      window.localStorage.setItem(
-        PROFILE_STORAGE_KEY,
-        JSON.stringify({
-          animes: nextAnimes,
-          comments: nextComments,
-          activities: nextActivities,
-          notifications
-        })
-      );
-    } catch {
-      // Fallback to state if browser storage is restricted
+    if (isAuthenticated) {
+      updateAuthWorkspace((prev) => ({
+        ...prev,
+        animes: nextAnimes,
+        comments: nextComments !== comments ? nextComments : prev.comments,
+        activities: newActivity ? [newActivity, ...prev.activities] : prev.activities,
+      }));
+      return;
     }
-    setAnimes(nextAnimes);
-    if (nextComments !== comments) {
-      setComments(nextComments);
+
+    const nextActivities = newActivity ? [newActivity, ...demoActivities] : demoActivities;
+    if (isDemoPreview) {
+      try {
+        window.localStorage.setItem(
+          DEMO_PROFILE_STORAGE_KEY,
+          JSON.stringify({
+            animes: nextAnimes,
+            comments: nextComments,
+            activities: nextActivities,
+            notifications: demoNotifications,
+          })
+        );
+      } catch {
+        // Fallback to state if browser storage is restricted
+      }
+    }
+    setDemoAnimes(nextAnimes);
+    if (nextComments !== demoComments) {
+      setDemoComments(nextComments);
     }
     if (newActivity) {
-      setActivities(nextActivities);
+      setDemoActivities(nextActivities);
     }
   };
 
@@ -620,54 +980,127 @@ export default function App() {
 
   // Image updates
   const handleUpdateAvatar = (url: string) => {
-    setCurrentUser(prev => ({ ...prev, avatarUrl: url }));
+    applyProfilePatch({ avatarUrl: url });
   };
 
   const handleUpdateBanner = (url: string) => {
-    setCurrentUser(prev => ({ ...prev, bannerUrl: url }));
+    applyProfilePatch({ bannerUrl: url });
   };
 
   const handleRemoveAvatar = () => {
-    setCurrentUser(prev => ({ ...prev, avatarUrl: '' }));
+    applyProfilePatch({ avatarUrl: '' });
   };
 
   const handleRemoveBanner = () => {
-    setCurrentUser(prev => ({ ...prev, bannerUrl: '' }));
+    applyProfilePatch({ bannerUrl: '' });
   };
 
   // Profile save
   const handleSaveProfile = (updated: Partial<UserProfile>) => {
-    setCurrentUser(prev => ({ ...prev, ...updated }));
+    const patch: UserProfileOverrides = {};
+    if (typeof updated.displayName === 'string') patch.displayName = updated.displayName;
+    if (typeof updated.username === 'string') patch.username = updated.username;
+    if (typeof updated.bio === 'string') patch.bio = updated.bio;
+    if (typeof updated.avatarUrl === 'string') patch.avatarUrl = updated.avatarUrl;
+    if (typeof updated.bannerUrl === 'string') patch.bannerUrl = updated.bannerUrl;
+    if (typeof updated.isPrivate === 'boolean') patch.isPrivate = updated.isPrivate;
+    if (typeof updated.showCommentsOnProfile === 'boolean') {
+      patch.showCommentsOnProfile = updated.showCommentsOnProfile;
+    }
+    if (updated.privacySettings) {
+      patch.privacySettings = updated.privacySettings;
+    }
+    if (updated.externalAccounts) {
+      patch.externalAccounts = updated.externalAccounts;
+    }
+
+    applyProfilePatch(patch);
+
+    if (isAuthenticated && user && typeof updated.displayName === 'string' && updated.displayName.trim()) {
+      updateProfile(user, { displayName: updated.displayName.trim() })
+        .then(() => refreshUserProfile())
+        .catch(() => {
+          // Per-UID persisted override remains active even if network sync fails
+        });
+    }
   };
 
-  // Notification handlers
-  const handleMarkNotificationsAsRead = useCallback((ids: string[]) => {
-    if (ids.length === 0) return;
-    const idSet = new Set(ids);
-    setNotifications((prev) => {
-      let hasChanges = false;
-      const next = prev.map((n) => {
-        if (idSet.has(n.id) && !n.isRead) {
-          hasChanges = true;
-          return { ...n, isRead: true };
-        }
-        return n;
-      });
-      return hasChanges ? next : prev;
-    });
-  }, []);
+  // Real Logout handler: wipes personal memory immediately, terminates Firebase Auth session and returns to login screen
+  const handleLogout = useCallback(async () => {
+    setIsSettingsOpen(false);
+    setIsFollowersOpen(false);
+    setIsNotifOpen(false);
+    setIsDemoPreview(false);
+    setAuthInitialMode('login');
+    setActiveTab('overview');
+    setAuthSession(null);
+    await signOutUser();
+  }, [signOutUser]);
 
-  const handleMarkNotificationAsRead = useCallback((id: string) => {
-    handleMarkNotificationsAsRead([id]);
-  }, [handleMarkNotificationsAsRead]);
+  // Notification handlers
+  const handleMarkNotificationsAsRead = useCallback(
+    (ids: string[]) => {
+      if (ids.length === 0) return;
+      const idSet = new Set(ids);
+
+      if (isAuthenticated) {
+        updateAuthWorkspace((prev) => {
+          let hasChanges = false;
+          const next = prev.notifications.map((n) => {
+            if (idSet.has(n.id) && !n.isRead) {
+              hasChanges = true;
+              return { ...n, isRead: true };
+            }
+            return n;
+          });
+          return hasChanges ? { ...prev, notifications: next } : prev;
+        });
+        return;
+      }
+
+      setDemoNotifications((prev) => {
+        let hasChanges = false;
+        const next = prev.map((n) => {
+          if (idSet.has(n.id) && !n.isRead) {
+            hasChanges = true;
+            return { ...n, isRead: true };
+          }
+          return n;
+        });
+        return hasChanges ? next : prev;
+      });
+    },
+    [isAuthenticated, updateAuthWorkspace]
+  );
+
+  const handleMarkNotificationAsRead = useCallback(
+    (id: string) => {
+      handleMarkNotificationsAsRead([id]);
+    },
+    [handleMarkNotificationsAsRead]
+  );
 
   const handleMarkAllNotificationsAsRead = useCallback(() => {
-    setNotifications((prev) => {
+    if (isAuthenticated) {
+      updateAuthWorkspace((prev) => {
+        const hasUnread = prev.notifications.some((n) => !n.isRead);
+        if (!hasUnread) return prev;
+        return {
+          ...prev,
+          notifications: prev.notifications.map((n) =>
+            n.isRead ? n : { ...n, isRead: true }
+          ),
+        };
+      });
+      return;
+    }
+
+    setDemoNotifications((prev) => {
       const hasUnread = prev.some((n) => !n.isRead);
       if (!hasUnread) return prev;
       return prev.map((n) => (n.isRead ? n : { ...n, isRead: true }));
     });
-  }, []);
+  }, [isAuthenticated, updateAuthWorkspace]);
 
   // Notification navigation to relevant content
   const handleSelectNotification = (notif: NotificationItem) => {
@@ -689,11 +1122,43 @@ export default function App() {
     } else if (notif.contextData?.modal === 'followers') {
       setFollowersInitialTab(notif.contextData.modalTab || 'followers');
       setIsFollowersOpen(true);
-    } else if (notif.contextData?.userId) {
+    } else if (!isAuthenticated && notif.contextData?.userId) {
       setActiveProfileId(notif.contextData.userId);
       setActiveTab('overview');
     }
   };
+
+  // Synchronous render gate: never render a profile shell while auth is loading OR while authSession.uid hasn't matched user.uid
+  if (isLoading || (isAuthenticated && (!user || !isAuthWorkspaceReady || !authenticatedProfile))) {
+    return (
+      <div
+        data-testid="auth-loading-state"
+        className="min-h-screen bg-[#0A0713] text-[#EDE8F5] flex flex-col items-center justify-center gap-4 px-4"
+      >
+        <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-tr from-purple-700 via-purple-600 to-indigo-500 shadow-lg shadow-purple-950/60 ring-1 ring-purple-400/30">
+          <span className="text-xl font-black tracking-tighter text-white">光</span>
+        </div>
+        <div className="flex items-center gap-2.5 text-sm font-medium text-purple-200">
+          <Loader2 className="h-4 w-4 animate-spin text-purple-400" />
+          <span>Verificando sessão...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated && !isDemoPreview) {
+    return (
+      <AuthScreen
+        key={authInitialMode}
+        initialMode={authInitialMode}
+        onEnterDemoMode={() => {
+          setActiveProfileId(CURRENT_USER.id);
+          setActiveTab('overview');
+          setIsDemoPreview(true);
+        }}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#0A0713] text-[#EDE8F5]">
@@ -701,6 +1166,7 @@ export default function App() {
       <Header
         currentUser={currentUser}
         activeProfile={activeProfile}
+        animes={displayedAnimes}
         notifications={notifications}
         isNotifOpen={isNotifOpen}
         onToggleNotif={setIsNotifOpen}
@@ -720,6 +1186,17 @@ export default function App() {
         onNavigateTab={(tab) => setActiveTab(tab)}
         onAcceptRequest={handleAcceptRequest}
         onRejectRequest={handleRejectRequest}
+        isAuthenticated={isAuthenticated}
+        authenticatedEmail={isAuthenticated ? user?.email ?? null : null}
+        onLogout={isAuthenticated ? handleLogout : undefined}
+        onOpenAuth={
+          !isAuthenticated
+            ? (mode = 'login') => {
+                setAuthInitialMode(mode);
+                setIsDemoPreview(false);
+              }
+            : undefined
+        }
       />
 
       {/* Main Container */}
@@ -751,9 +1228,9 @@ export default function App() {
         <TabsNavigation
           activeTab={activeTab}
           onTabChange={setActiveTab}
-          animeCount={animes.length}
-          commentsCount={comments.length}
-          favoritesCount={animes.filter(a => a.isFavorite).length}
+          animeCount={displayedAnimes.length}
+          commentsCount={displayedComments.length}
+          favoritesCount={displayedAnimes.filter(a => a.isFavorite).length}
           isPrivateLocked={isPrivateLocked}
         />
 
@@ -770,9 +1247,12 @@ export default function App() {
               {(activeTab === 'overview' || activeTab === 'favorites') && (
                 <OverviewTab
                   profile={activeProfile}
-                  animes={animes}
-                  comments={comments}
-                  activities={activities}
+                  animes={displayedAnimes}
+                  favoriteCharacters={displayedFavoriteCharacters}
+                  favoriteCompanies={displayedFavoriteCompanies}
+                  favoritePeople={displayedFavoritePeople}
+                  comments={displayedComments}
+                  activities={displayedActivities}
                   isOwnProfile={isOwnProfile}
                   onNavigateTab={setActiveTab}
                   onToggleFavorite={handleToggleFavorite}
@@ -789,7 +1269,7 @@ export default function App() {
                   </div>
                 ) : (
                   <AnimeListTab
-                    animes={animes}
+                    animes={displayedAnimes}
                     isOwnProfile={isOwnProfile}
                     onUpdateEpisode={handleUpdateEpisode}
                     onToggleFavorite={handleToggleFavorite}
@@ -809,7 +1289,7 @@ export default function App() {
                   </div>
                 ) : (
                   <CommentsTab
-                    comments={comments}
+                    comments={displayedComments}
                     showCommentsOnProfile={activeProfile.showCommentsOnProfile}
                     isOwnProfile={isOwnProfile}
                     userName={activeProfile.displayName}
@@ -831,7 +1311,7 @@ export default function App() {
                     </p>
                   </div>
                 ) : (
-                  <ActivityTab activities={activities} />
+                  <ActivityTab activities={displayedActivities} />
                 )
               )}
             </>
@@ -853,7 +1333,24 @@ export default function App() {
         onAcceptRequest={handleAcceptRequest}
         onRejectRequest={handleRejectRequest}
         onBlockUser={(userId) => {
-          setBlockedIds(prev => new Set(prev).add(userId));
+          if (isAuthenticated) {
+            updateAuthWorkspace((prev) => {
+              const nextBlocked = prev.blockedIds.includes(userId)
+                ? prev.blockedIds
+                : [...prev.blockedIds, userId];
+              return {
+                ...prev,
+                blockedIds: nextBlocked,
+                followers: prev.followers.filter((u) => u.id !== userId),
+                profileOverrides: {
+                  ...prev.profileOverrides,
+                  followersCount: Math.max(0, (prev.profileOverrides.followersCount ?? 0) - 1),
+                },
+              };
+            });
+            return;
+          }
+          setDemoBlockedIds((prev) => new Set(prev).add(userId));
           handleRemoveFollower(userId);
         }}
       />

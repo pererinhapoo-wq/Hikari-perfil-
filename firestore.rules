@@ -1,0 +1,443 @@
+rules_version = '2';
+
+// Regras restritivas para o projeto Firebase "hikari-user-profiles" (Hikari — Perfis de Usuários).
+// IMPORTANTE: Arquivo preparado localmente no repositório; requer publicação explícita no Console/CLI do Firebase.
+// Nenhum acesso público irrestrito ("if true") é permitido.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Bloqueio global por padrão (Zero-Trust)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helpers reutilizáveis
+    function isSignedIn() {
+      return request.auth != null
+        && (!('firebase' in request.auth.token) || request.auth.token.firebase.sign_in_provider != 'anonymous');
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidPrivacySettings(settings) {
+      return settings is map
+        && settings.keys().hasAll([
+          'showAnimeList',
+          'showFavorites',
+          'showActivity',
+          'showCommentsOnProfile'
+        ])
+        && settings.keys().hasOnly([
+          'showAnimeList',
+          'showFavorites',
+          'showActivity',
+          'showCommentsOnProfile'
+        ])
+        && settings.showAnimeList is bool
+        && settings.showFavorites is bool
+        && settings.showActivity is bool
+        && settings.showCommentsOnProfile is bool;
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll([
+          'uid',
+          'username',
+          'displayName',
+          'avatarUrl',
+          'bannerUrl',
+          'bio',
+          'isPrivate',
+          'showCommentsOnProfile',
+          'privacySettings',
+          'followersCount',
+          'followingCount',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'username',
+          'displayName',
+          'avatarUrl',
+          'bannerUrl',
+          'bio',
+          'isPrivate',
+          'showCommentsOnProfile',
+          'privacySettings',
+          'followersCount',
+          'followingCount',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.uid is string
+        && data.uid == userId
+        && data.username is string
+        && data.username.size() >= 3
+        && data.username.size() <= 32
+        && data.username.matches('^[a-zA-Z0-9_]+$')
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 60
+        && data.avatarUrl is string
+        && data.avatarUrl.size() <= 2048
+        && data.bannerUrl is string
+        && data.bannerUrl.size() <= 2048
+        && data.bio is string
+        && data.bio.size() <= 500
+        && data.isPrivate is bool
+        && data.showCommentsOnProfile is bool
+        && isValidPrivacySettings(data.privacySettings)
+        && data.followersCount is int
+        && data.followersCount >= 0
+        && data.followingCount is int
+        && data.followingCount >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // 2. Documento principal do perfil público/controlado do usuário (sem PII como e-mail)
+    match /users/{userId} {
+      // Apenas o próprio dono lê perfis privados; perfis marcados como públicos exigem sessão autenticada
+      allow get: if isValidId(userId) && (
+        isOwner(userId) || (isSignedIn() && existing().isPrivate == false)
+      );
+
+      allow list: if isSignedIn() && (
+        existing().uid == request.auth.uid || existing().isPrivate == false
+      );
+
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().followersCount == 0
+        && incoming().followingCount == 0
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isOwner(userId)
+        && isValidId(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().followersCount == existing().followersCount
+        && incoming().followingCount == existing().followingCount
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'username',
+          'displayName',
+          'avatarUrl',
+          'bannerUrl',
+          'bio',
+          'isPrivate',
+          'showCommentsOnProfile',
+          'privacySettings',
+          'updatedAt'
+        ]);
+
+      allow delete: if false;
+
+      // 3. Subcoleção estritamente privada para dados sensíveis (PII, ex.: e-mail)
+      match /private/{docId} {
+        allow get: if isOwner(userId) && isValidId(userId) && docId == 'account';
+        allow list: if false;
+        allow create: if isOwner(userId)
+          && isValidId(userId)
+          && docId == 'account'
+          && incoming().keys().hasAll(['uid', 'email', 'createdAt', 'updatedAt'])
+          && incoming().keys().hasOnly(['uid', 'email', 'createdAt', 'updatedAt'])
+          && incoming().uid == userId
+          && incoming().email is string
+          && incoming().email.size() <= 254
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isOwner(userId)
+          && isValidId(userId)
+          && docId == 'account'
+          && incoming().keys().hasAll(['uid', 'email', 'createdAt', 'updatedAt'])
+          && incoming().keys().hasOnly(['uid', 'email', 'createdAt', 'updatedAt'])
+          && incoming().uid == existing().uid
+          && incoming().createdAt == existing().createdAt
+          && incoming().email is string
+          && incoming().email.size() <= 254
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'updatedAt']);
+        allow delete: if false;
+      }
+
+      // 4. Subcoleção da lista de animes do usuário (escrita exclusiva do dono)
+      match /animeList/{animeId} {
+        allow get: if isValidId(userId) && isValidId(animeId) && (
+          isOwner(userId) || (
+            isSignedIn()
+            && get(/databases/$(database)/documents/users/$(userId)).data.isPrivate == false
+            && get(/databases/$(database)/documents/users/$(userId)).data.privacySettings.showAnimeList == true
+          )
+        );
+        allow list: if isOwner(userId);
+        allow create, update: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(animeId)
+          && incoming().keys().hasAll([
+            'id',
+            'ownerUid',
+            'title',
+            'posterUrl',
+            'status',
+            'currentEpisode',
+            'totalEpisodes',
+            'rating',
+            'isFavorite',
+            'year',
+            'genres',
+            'updatedAt'
+          ])
+          && incoming().keys().hasOnly([
+            'id',
+            'ownerUid',
+            'title',
+            'titleRomaji',
+            'posterUrl',
+            'status',
+            'currentEpisode',
+            'totalEpisodes',
+            'rating',
+            'isFavorite',
+            'year',
+            'genres',
+            'episodeDurationMinutes',
+            'rewatchCount',
+            'updatedAt'
+          ])
+          && incoming().id == animeId
+          && incoming().ownerUid == userId
+          && incoming().title is string
+          && incoming().title.size() >= 1
+          && incoming().title.size() <= 200
+          && incoming().posterUrl is string
+          && incoming().posterUrl.size() <= 2048
+          && incoming().status in ['watching', 'completed', 'planned', 'on_hold', 'dropped']
+          && incoming().currentEpisode is int
+          && incoming().currentEpisode >= 0
+          && incoming().totalEpisodes is int
+          && incoming().totalEpisodes >= 0
+          && incoming().rating is number
+          && incoming().rating >= 0
+          && incoming().rating <= 10
+          && incoming().isFavorite is bool
+          && incoming().year is int
+          && incoming().genres is list
+          && incoming().genres.size() <= 15
+          && incoming().updatedAt == request.time;
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(animeId);
+      }
+
+      // 5. Subcoleção de atividades recentes do usuário (escrita exclusiva do dono)
+      match /activities/{activityId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(activityId)
+          && incoming().keys().hasAll(['id', 'ownerUid', 'type', 'title', 'description', 'createdAt'])
+          && incoming().keys().hasOnly(['id', 'ownerUid', 'type', 'title', 'description', 'score', 'episode', 'createdAt'])
+          && incoming().id == activityId
+          && incoming().ownerUid == userId
+          && incoming().type in ['watched_ep', 'completed_anime', 'rated', 'commented', 'added_favorite', 'status_changed', 'added_anime']
+          && incoming().title is string
+          && incoming().title.size() >= 1
+          && incoming().title.size() <= 240
+          && incoming().description is string
+          && incoming().description.size() <= 300
+          && incoming().createdAt == request.time;
+        allow update, delete: if false;
+      }
+
+      // 6. Subcoleção de notificações do usuário (leitura e atualização apenas de isRead pelo destinatário)
+      match /notifications/{notifId} {
+        allow get, list: if isOwner(userId);
+        allow update: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(notifId)
+          && incoming().recipientUid == existing().recipientUid
+          && incoming().recipientUid == userId
+          && incoming().isRead is bool
+          && incoming().diff(existing()).affectedKeys().hasOnly(['isRead', 'handled']);
+        allow create, delete: if false;
+      }
+
+      // 7. Espaço pessoal isolado por UID (/users/{userId}/workspace/personal — leitura e escrita exclusivas do próprio dono)
+      match /workspace/{docId} {
+        allow get: if isOwner(userId) && isValidId(userId) && docId == 'personal';
+        allow list: if false;
+        allow create: if isOwner(userId)
+          && isValidId(userId)
+          && docId == 'personal'
+          && incoming().keys().hasAll([
+            'uid',
+            'profileOverrides',
+            'animes',
+            'favoriteCharacters',
+            'favoriteCompanies',
+            'favoritePeople',
+            'comments',
+            'activities',
+            'notifications',
+            'followers',
+            'following',
+            'followRequests',
+            'followingIds',
+            'requestedIds',
+            'blockedIds',
+            'updatedAtMs',
+            'createdAt',
+            'updatedAt'
+          ])
+          && incoming().keys().hasOnly([
+            'uid',
+            'profileOverrides',
+            'animes',
+            'favoriteCharacters',
+            'favoriteCompanies',
+            'favoritePeople',
+            'comments',
+            'activities',
+            'notifications',
+            'followers',
+            'following',
+            'followRequests',
+            'followingIds',
+            'requestedIds',
+            'blockedIds',
+            'updatedAtMs',
+            'createdAt',
+            'updatedAt'
+          ])
+          && incoming().uid is string
+          && incoming().uid == userId
+          && incoming().profileOverrides is map
+          && incoming().animes is list
+          && incoming().animes.size() <= 2000
+          && incoming().favoriteCharacters is list
+          && incoming().favoriteCharacters.size() <= 50
+          && incoming().favoriteCompanies is list
+          && incoming().favoriteCompanies.size() <= 50
+          && incoming().favoritePeople is list
+          && incoming().favoritePeople.size() <= 50
+          && incoming().comments is list
+          && incoming().comments.size() <= 1000
+          && incoming().activities is list
+          && incoming().activities.size() <= 1000
+          && incoming().notifications is list
+          && incoming().notifications.size() <= 500
+          && incoming().followers is list
+          && incoming().followers.size() <= 2000
+          && incoming().following is list
+          && incoming().following.size() <= 2000
+          && incoming().followRequests is list
+          && incoming().followRequests.size() <= 500
+          && incoming().followingIds is list
+          && incoming().followingIds.size() <= 2000
+          && incoming().requestedIds is list
+          && incoming().requestedIds.size() <= 500
+          && incoming().blockedIds is list
+          && incoming().blockedIds.size() <= 500
+          && incoming().updatedAtMs is int
+          && incoming().updatedAtMs >= 0
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isOwner(userId)
+          && isValidId(userId)
+          && docId == 'personal'
+          && incoming().keys().hasAll([
+            'uid',
+            'profileOverrides',
+            'animes',
+            'favoriteCharacters',
+            'favoriteCompanies',
+            'favoritePeople',
+            'comments',
+            'activities',
+            'notifications',
+            'followers',
+            'following',
+            'followRequests',
+            'followingIds',
+            'requestedIds',
+            'blockedIds',
+            'updatedAtMs',
+            'createdAt',
+            'updatedAt'
+          ])
+          && incoming().keys().hasOnly([
+            'uid',
+            'profileOverrides',
+            'animes',
+            'favoriteCharacters',
+            'favoriteCompanies',
+            'favoritePeople',
+            'comments',
+            'activities',
+            'notifications',
+            'followers',
+            'following',
+            'followRequests',
+            'followingIds',
+            'requestedIds',
+            'blockedIds',
+            'updatedAtMs',
+            'createdAt',
+            'updatedAt'
+          ])
+          && incoming().uid == existing().uid
+          && incoming().uid == userId
+          && incoming().createdAt == existing().createdAt
+          && incoming().profileOverrides is map
+          && incoming().animes is list
+          && incoming().animes.size() <= 2000
+          && incoming().favoriteCharacters is list
+          && incoming().favoriteCharacters.size() <= 50
+          && incoming().favoriteCompanies is list
+          && incoming().favoriteCompanies.size() <= 50
+          && incoming().favoritePeople is list
+          && incoming().favoritePeople.size() <= 50
+          && incoming().comments is list
+          && incoming().comments.size() <= 1000
+          && incoming().activities is list
+          && incoming().activities.size() <= 1000
+          && incoming().notifications is list
+          && incoming().notifications.size() <= 500
+          && incoming().followers is list
+          && incoming().followers.size() <= 2000
+          && incoming().following is list
+          && incoming().following.size() <= 2000
+          && incoming().followRequests is list
+          && incoming().followRequests.size() <= 500
+          && incoming().followingIds is list
+          && incoming().followingIds.size() <= 2000
+          && incoming().requestedIds is list
+          && incoming().requestedIds.size() <= 500
+          && incoming().blockedIds is list
+          && incoming().blockedIds.size() <= 500
+          && incoming().updatedAtMs is int
+          && incoming().updatedAtMs >= 0
+          && incoming().updatedAt == request.time;
+        allow delete: if false;
+      }
+    }
+  }
+}

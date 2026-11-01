@@ -6,13 +6,24 @@ import {
   BarChart3,
   Lock
 } from 'lucide-react';
-import { UserProfile, AnimeItem, HikariComment, UserActivity } from '../../types';
+import {
+  UserProfile,
+  AnimeItem,
+  HikariComment,
+  UserActivity,
+  FavoriteCharacter,
+  FavoriteCompany,
+  FavoritePerson,
+} from '../../types';
 import { FavoritesTab } from './FavoritesTab';
 import { useCurrentTime, formatRelativeTime, formatExactDateTime } from '../../utils/relativeTime';
 
 interface OverviewTabProps {
   profile: UserProfile;
   animes: AnimeItem[];
+  favoriteCharacters?: FavoriteCharacter[];
+  favoriteCompanies?: FavoriteCompany[];
+  favoritePeople?: FavoritePerson[];
   comments: HikariComment[];
   activities: UserActivity[];
   isOwnProfile?: boolean;
@@ -23,6 +34,9 @@ interface OverviewTabProps {
 export const OverviewTab: React.FC<OverviewTabProps> = ({
   profile,
   animes,
+  favoriteCharacters = [],
+  favoriteCompanies = [],
+  favoritePeople = [],
   comments,
   activities,
   isOwnProfile = true,
@@ -317,6 +331,9 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
           ) : (
             <FavoritesTab
               favorites={favorites}
+              characters={favoriteCharacters}
+              companies={favoriteCompanies}
+              people={favoritePeople}
               isOwnProfile={!!isOwnProfile}
               onToggleFavorite={onToggleFavorite || (() => {})}
               onNavigateToAnimes={() => onNavigateTab('animes')}

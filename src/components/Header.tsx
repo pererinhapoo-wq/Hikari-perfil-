@@ -9,6 +9,7 @@ import {
   Link2, 
   ShieldCheck, 
   LogOut, 
+  LogIn,
   Check, 
   X,
   ExternalLink,
@@ -18,11 +19,12 @@ import {
   XCircle,
   MessageSquare
 } from 'lucide-react';
-import { UserProfile, NotificationItem } from '../types';
+import { UserProfile, NotificationItem, AnimeItem } from '../types';
 
 interface HeaderProps {
   currentUser: UserProfile;
   activeProfile: UserProfile;
+  animes?: AnimeItem[];
   notifications: NotificationItem[];
   isNotifOpen: boolean;
   onToggleNotif: (open: boolean) => void;
@@ -36,11 +38,16 @@ interface HeaderProps {
   onNavigateTab: (tab: 'overview' | 'animes' | 'comments' | 'about' | 'activity' | 'favorites') => void;
   onAcceptRequest: (requestId: string, notifId?: string) => void;
   onRejectRequest: (requestId: string, notifId?: string) => void;
+  isAuthenticated?: boolean;
+  authenticatedEmail?: string | null;
+  onLogout?: () => void;
+  onOpenAuth?: (mode?: 'login' | 'signup') => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   currentUser,
-  activeProfile,
+  activeProfile: _activeProfile,
+  animes = [],
   notifications,
   isNotifOpen,
   onToggleNotif,
@@ -53,7 +60,11 @@ export const Header: React.FC<HeaderProps> = ({
   onSelectNotification,
   onNavigateTab,
   onAcceptRequest,
-  onRejectRequest
+  onRejectRequest,
+  isAuthenticated = false,
+  authenticatedEmail = null,
+  onLogout,
+  onOpenAuth
 }) => {
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -205,13 +216,70 @@ export const Header: React.FC<HeaderProps> = ({
     };
   }, [isNotifOpen, notifications, onMarkNotificationAsRead, onMarkNotificationsAsRead]);
 
-  const searchResults = searchQuery.trim() ? [
-    { type: 'user', id: 'usr_hikari_001', name: 'Ren Amano', sub: '@ren_hikari (Meu Perfil)', avatar: currentUser.avatarUrl },
-    { type: 'user', id: 'usr_kuroha', name: 'Kuroha ✦', sub: '@kuroha_void (Perfil Privado)', avatar: '/src/assets/images/hikari_follower_avatar_1793518826589.jpg' },
-    { type: 'user', id: 'usr_shinji', name: 'Shinji Kazuki', sub: '@shinji_mecha (Perfil Público)', avatar: '/src/assets/images/hikari_user_avatar_1793518815544.jpg' },
-    { type: 'anime', id: 'anime_solo_leveling', name: 'Solo Leveling (Arise)', sub: 'Anime · Em Exibição', tab: 'animes' },
-    { type: 'anime', id: 'anime_frieren', name: 'Frieren: Beyond Journey\'s End', sub: 'Anime · Concluído', tab: 'animes' }
-  ].filter(item => item.name.toLowerCase().includes(searchQuery.toLowerCase()) || item.sub.toLowerCase().includes(searchQuery.toLowerCase())) : [];
+  const searchResults = searchQuery.trim()
+    ? (isAuthenticated
+        ? [
+            {
+              type: 'user' as const,
+              id: currentUser.id,
+              name: currentUser.displayName,
+              sub: `@${currentUser.username} (Meu Perfil)`,
+              avatar: currentUser.avatarUrl,
+            },
+            ...animes.map((anime) => ({
+              type: 'anime' as const,
+              id: anime.id,
+              name: anime.title,
+              sub: `Anime · ${anime.year}`,
+              avatar: anime.posterUrl,
+              tab: 'animes' as const,
+            })),
+          ]
+        : [
+            {
+              type: 'user' as const,
+              id: currentUser.id,
+              name: currentUser.displayName,
+              sub: `@${currentUser.username} (Perfil de Demonstração)`,
+              avatar: currentUser.avatarUrl,
+            },
+            {
+              type: 'user' as const,
+              id: 'usr_kuroha',
+              name: 'Kuroha ✦',
+              sub: '@kuroha_void (Perfil Privado)',
+              avatar: '/src/assets/images/hikari_follower_avatar_1793518826589.jpg',
+            },
+            {
+              type: 'user' as const,
+              id: 'usr_shinji',
+              name: 'Shinji Kazuki',
+              sub: '@shinji_mecha (Perfil Público)',
+              avatar: '/src/assets/images/hikari_user_avatar_1793518815544.jpg',
+            },
+            {
+              type: 'anime' as const,
+              id: 'anime_solo_leveling',
+              name: 'Solo Leveling (Arise)',
+              sub: 'Anime · Em Exibição',
+              avatar: '',
+              tab: 'animes' as const,
+            },
+            {
+              type: 'anime' as const,
+              id: 'anime_frieren',
+              name: "Frieren: Beyond Journey's End",
+              sub: 'Anime · Concluído',
+              avatar: '',
+              tab: 'animes' as const,
+            },
+          ]
+      ).filter(
+        (item) =>
+          item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          item.sub.toLowerCase().includes(searchQuery.toLowerCase())
+      )
+    : [];
 
   return (
     <header className="sticky top-0 z-40 w-full border-b border-purple-900/30 bg-[#0A0713]/90 backdrop-blur-md">
@@ -320,6 +388,22 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Zone 3: Actions & Connected User */}
         <div className="flex items-center gap-3">
+          {!isAuthenticated && onOpenAuth && (
+            <button
+              type="button"
+              onClick={() => {
+                setIsUserMenuOpen(false);
+                setIsSearchOpen(false);
+                onToggleNotif(false);
+                onOpenAuth('login');
+              }}
+              className="flex items-center gap-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 px-3.5 py-2 text-xs font-semibold text-white shadow-sm shadow-purple-950/60 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <LogIn className="h-3.5 w-3.5" />
+              <span>Entrar</span>
+            </button>
+          )}
+
           {/* Notifications Bell */}
           <div ref={notifRef} className="relative">
             <button
@@ -498,11 +582,18 @@ export const Header: React.FC<HeaderProps> = ({
               className="group flex items-center gap-2 rounded-full p-0.5 ring-2 ring-purple-600/40 hover:ring-purple-500 transition-all focus:outline-none cursor-pointer"
               aria-label="Menu do Usuário"
             >
-              <img
-                src={currentUser.avatarUrl}
-                alt={currentUser.displayName}
-                className="h-8 w-8 rounded-full object-cover"
-              />
+              {currentUser.avatarUrl ? (
+                <img
+                  src={currentUser.avatarUrl}
+                  alt={currentUser.displayName}
+                  referrerPolicy="no-referrer"
+                  className="h-8 w-8 rounded-full object-cover"
+                />
+              ) : (
+                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-purple-700 to-indigo-800 text-xs font-bold text-white select-none">
+                  {(currentUser.displayName || currentUser.username || 'U').charAt(0).toUpperCase()}
+                </div>
+              )}
             </button>
 
             {/* Menu da foto de perfil: EXACTLY the 7 items requested */}
@@ -512,6 +603,11 @@ export const Header: React.FC<HeaderProps> = ({
                 <div className="border-b border-purple-900/40 px-3 py-2.5 mb-1">
                   <div className="font-semibold text-sm text-white truncate">{currentUser.displayName}</div>
                   <div className="text-xs text-purple-400/80 truncate">@{currentUser.username}</div>
+                  {isAuthenticated && authenticatedEmail && (
+                    <div className="mt-0.5 text-[11px] text-purple-200/75 truncate">
+                      {authenticatedEmail}
+                    </div>
+                  )}
                   <div className="mt-1 text-[11px] text-purple-400/50">
                     Membro desde {currentUser.createdAt}
                   </div>
@@ -607,17 +703,53 @@ export const Header: React.FC<HeaderProps> = ({
                   <div className="my-1 border-t border-purple-900/40" />
 
                   {/* 7. Sair da conta */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsUserMenuOpen(false);
-                      alert('Sessão encerrada com sucesso (Simulação Etapa 1 - Auth Firebase será ativado na Etapa 2).');
-                    }}
-                    className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-rose-300 hover:bg-rose-950/40 hover:text-rose-200 transition-colors cursor-pointer"
-                  >
-                    <LogOut className="h-4 w-4 text-rose-400" />
-                    <span>Sair da conta</span>
-                  </button>
+                  {isAuthenticated && onLogout ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsUserMenuOpen(false);
+                        onLogout();
+                      }}
+                      className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-rose-300 hover:bg-rose-950/40 hover:text-rose-200 transition-colors cursor-pointer"
+                    >
+                      <LogOut className="h-4 w-4 text-rose-400" />
+                      <span>Sair da conta</span>
+                    </button>
+                  ) : (
+                    <div className="space-y-1 px-1 py-0.5">
+                      {onOpenAuth && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsUserMenuOpen(false);
+                            onOpenAuth('login');
+                          }}
+                          className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-purple-200 hover:bg-purple-900/30 hover:text-white transition-colors cursor-pointer"
+                        >
+                          <LogIn className="h-4 w-4 text-purple-400" />
+                          <span>Entrar ou criar conta</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        disabled
+                        aria-disabled="true"
+                        title="Nenhuma sessão autenticada ativa."
+                        className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-2 text-neutral-500 opacity-60 cursor-not-allowed select-none"
+                      >
+                        <span className="flex items-center gap-2.5">
+                          <LogOut className="h-4 w-4 text-neutral-500" />
+                          <span>Sair da conta</span>
+                        </span>
+                        <span className="rounded bg-purple-950/70 border border-purple-900/40 px-1.5 py-0.5 text-[10px] font-medium text-purple-300/60">
+                          Sem sessão
+                        </span>
+                      </button>
+                      <p className="px-2 pb-1 text-[10px] leading-snug text-purple-300/50">
+                        Modo demonstração sem sessão autenticada.
+                      </p>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
