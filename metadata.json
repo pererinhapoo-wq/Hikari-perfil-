@@ -1,0 +1,6 @@
+{
+  "name": "Hikari — Perfis de Usuários",
+  "description": "Plataforma social elegante e independente dedicada aos perfis dos usuários da comunidade de animes Hikari.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
