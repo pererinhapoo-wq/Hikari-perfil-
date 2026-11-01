@@ -397,65 +397,106 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div>
                   <h3 className="text-sm font-bold text-white">Configurações de Privacidade</h3>
                   <p className="mt-1 text-xs text-purple-300/70">
-                    Defina como outros membros do Hikari interagem com seu perfil e o que fica visível para seguidores autorizados.
+                    Defina como outros membros do Hikari visualizam seu perfil e a privacidade das suas listas de animes.
                   </p>
                 </div>
 
-                {/* Setting 1: Perfil Privado (Exclusivo e Permanente) */}
+                {/* Dedicated Anime Lists Privacy Setting (Public vs Private) */}
                 <div className="rounded-xl border border-purple-800/40 bg-[#0A0713] p-4 space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="space-y-0.5">
+                      <div className="flex items-center gap-2">
+                        {showAnimeList ? (
+                          <Globe className="h-4 w-4 text-purple-400 shrink-0" />
+                        ) : (
+                          <Lock className="h-4 w-4 text-amber-400 shrink-0" />
+                        )}
+                        <span className="text-xs font-bold text-white">Privacidade das Listas de Animes</span>
+                      </div>
+                      <p className="text-[11px] text-purple-300/70">
+                        Escolha se visitantes podem abrir e visualizar os animes das suas listas por status.
+                      </p>
+                    </div>
+
+                    {/* Segmented Public / Private Selector */}
+                    <div
+                      role="group"
+                      aria-label="Privacidade das listas de animes"
+                      className="inline-flex items-center gap-1 rounded-xl border border-purple-900/50 bg-[#130E24] p-1 shrink-0 self-start sm:self-auto"
+                    >
+                      <button
+                        type="button"
+                        data-testid="anime-list-privacy-public"
+                        aria-pressed={showAnimeList}
+                        onClick={() => setShowAnimeList(true)}
+                        className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                          showAnimeList
+                            ? 'bg-purple-600 text-white shadow-sm'
+                            : 'text-purple-300/70 hover:text-white'
+                        }`}
+                      >
+                        <Globe className="h-3.5 w-3.5" />
+                        <span>Públicas</span>
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="anime-list-privacy-private"
+                        aria-pressed={!showAnimeList}
+                        onClick={() => setShowAnimeList(false)}
+                        className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                          !showAnimeList
+                            ? 'bg-purple-600 text-white shadow-sm'
+                            : 'text-purple-300/70 hover:text-white'
+                        }`}
+                      >
+                        <Lock className="h-3.5 w-3.5" />
+                        <span>Privadas</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg bg-[#140e26] border border-purple-900/40 p-2.5 text-[11px] text-purple-200/80 leading-relaxed">
+                    {showAnimeList ? (
+                      <span>
+                        Suas listas estão <strong>públicas</strong>. Visitantes podem clicar nas estatísticas de status (Assistindo, Concluídos, Planejados, Em espera e Abandonados) e visualizar os animes correspondentes.
+                      </span>
+                    ) : (
+                      <span>
+                        Suas listas estão <strong>privadas</strong>. Os números do Anime Stats continuam visíveis no seu perfil, mas outras pessoas não podem abrir nem visualizar os animes das listas. Você continua tendo acesso normal às suas próprias listas.
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Setting: Visibilidade Geral do Perfil */}
+                <div className="rounded-xl border border-purple-900/30 bg-[#0A0713] p-4 space-y-2">
                   <div className="flex items-center justify-between gap-4">
                     <div className="flex items-center gap-2">
-                      <Lock className="h-4 w-4 text-purple-400" />
-                      <span className="text-xs font-bold text-white">Perfil Privado</span>
+                      {isPrivate ? (
+                        <Lock className="h-4 w-4 text-amber-400" />
+                      ) : (
+                        <Globe className="h-4 w-4 text-purple-400" />
+                      )}
+                      <span className="text-xs font-bold text-white">
+                        {isPrivate ? 'Perfil com Aprovação de Seguidores' : 'Perfil Aberto a Visitantes'}
+                      </span>
                     </div>
-                    <span className="inline-flex items-center gap-1.5 rounded-full bg-purple-950 px-2.5 py-0.5 text-[10px] font-semibold text-purple-300 border border-purple-700/50">
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                      Ativo por padrão
+                    <span className="text-[11px] font-medium text-purple-300/80 whitespace-nowrap">
+                      {isPrivate ? 'Restrito a seguidores' : 'Visível'}
                     </span>
                   </div>
-
-                  <p className="text-[11px] text-purple-200/80 leading-relaxed">
-                    Este perfil opera exclusivamente em modo privado. Suas listas de animes, avaliações, destaques e atividades recentes ficam visíveis apenas para seguidores autorizados.
+                  <p className="text-[11px] text-purple-300/70 leading-relaxed">
+                    {isPrivate
+                      ? 'Novos visitantes precisam ter a solicitação aprovada antes de visualizar as seções autorizadas do perfil.'
+                      : 'Seu perfil pode ser visitado normalmente, respeitando individualmente cada preferência de privacidade abaixo.'}
                   </p>
-
-                  <div className="rounded-lg bg-[#140e26] border border-purple-900/40 p-2.5 text-[11px] text-purple-300/80 space-y-1">
-                    <div className="font-semibold text-white text-[11px] flex items-center gap-1">
-                      <span>• Solicitações de seguir obrigatórias</span>
-                    </div>
-                    <p className="text-purple-300/70 text-[10px] pl-2">
-                      Novos usuários devem enviar uma solicitação para seguir seu perfil. Você pode aprovar ou recusar solicitações individualmente pela central de notificações ou na aba de seguidores.
-                    </p>
-                  </div>
                 </div>
 
                 {/* Fine-grained Category Privacy Controls */}
                 <div className="space-y-3">
                   <h4 className="text-xs font-semibold uppercase tracking-wider text-purple-400">
-                    Visibilidade por Categoria (Seguidores Autorizados)
+                    Outras Preferências de Visibilidade
                   </h4>
-
-                  {/* Toggle 1: Lista de Animes */}
-                  <div className="flex items-start justify-between gap-4 rounded-xl border border-purple-900/30 bg-[#0A0713] p-3.5">
-                    <div className="space-y-0.5">
-                      <span className="text-xs font-bold text-white">Lista de Animes</span>
-                      <p className="text-[11px] text-purple-300/70">
-                        Permitir que seguidores vejam suas obras assistidas, em andamento, concluídas e notas.
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setShowAnimeList(!showAnimeList)}
-                      className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                        showAnimeList ? 'bg-purple-600' : 'bg-neutral-800'
-                      }`}
-                    >
-                      <span
-                        className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                          showAnimeList ? 'translate-x-5' : 'translate-x-0'
-                        }`}
-                      />
-                    </button>
-                  </div>
 
                   {/* Toggle 2: Favoritos */}
                   <div className="flex items-start justify-between gap-4 rounded-xl border border-purple-900/30 bg-[#0A0713] p-3.5">
@@ -467,6 +508,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </div>
                     <button
                       type="button"
+                      role="switch"
+                      aria-checked={showFavorites}
+                      aria-label="Exibir seção de favoritos"
                       onClick={() => setShowFavorites(!showFavorites)}
                       className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
                         showFavorites ? 'bg-purple-600' : 'bg-neutral-800'
@@ -490,6 +534,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </div>
                     <button
                       type="button"
+                      role="switch"
+                      aria-checked={showActivity}
+                      aria-label="Exibir atividades recentes"
                       onClick={() => setShowActivity(!showActivity)}
                       className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
                         showActivity ? 'bg-purple-600' : 'bg-neutral-800'
@@ -513,6 +560,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </div>
                     <button
                       type="button"
+                      role="switch"
+                      aria-checked={showCommentsOnProfile}
+                      aria-label="Exibir histórico de comentários"
                       onClick={() => setShowCommentsOnProfile(!showCommentsOnProfile)}
                       className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
                         showCommentsOnProfile ? 'bg-purple-600' : 'bg-neutral-800'
@@ -527,11 +577,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </div>
                 </div>
 
-                {/* Transparency Notice regarding persistence */}
-                <div className="rounded-xl bg-purple-950/30 border border-purple-900/30 p-3 text-[11px] text-purple-400/80 flex items-start gap-2.5">
+                {/* Persistence Notice */}
+                <div className="rounded-xl bg-purple-950/30 border border-purple-900/30 p-3 text-[11px] text-purple-300/80 flex items-start gap-2.5">
                   <AlertCircle className="h-4 w-4 text-purple-400 shrink-0 mt-0.5" />
                   <span>
-                    <strong>Nota de transparência:</strong> As preferências são mantidas em memória local durante sua sessão. Na etapa de sincronização oficial com a base de dados central, esses estados serão persistidos no Firestore.
+                    Suas preferências de privacidade são salvas individualmente na sua conta e mantidas ao sair e entrar novamente, sem apagar nenhuma lista ou estatística existente.
                   </span>
                 </div>
               </div>

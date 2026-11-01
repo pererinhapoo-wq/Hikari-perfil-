@@ -116,6 +116,7 @@ export interface NotificationItem {
   id: string;
   type: 'new_follower' | 'follow_request' | 'request_accepted' | 'comment_like' | 'comment_reply';
   actor: {
+    id?: string;
     displayName: string;
     username: string;
     avatarUrl: string;
@@ -128,6 +129,7 @@ export interface NotificationItem {
   contextData?: {
     tab?: ProfileTab;
     commentId?: string;
+    activityId?: string;
     animeId?: string;
     requestId?: string;
     modal?: 'followers';

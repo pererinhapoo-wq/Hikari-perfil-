@@ -25,16 +25,19 @@ interface HeaderProps {
   currentUser: UserProfile;
   activeProfile: UserProfile;
   animes?: AnimeItem[];
+  searchableProfiles?: UserProfile[];
   notifications: NotificationItem[];
   isNotifOpen: boolean;
   onToggleNotif: (open: boolean) => void;
   onOpenSettings: (initialTab?: 'profile' | 'privacy' | 'connected' | 'security') => void;
   onOpenFollowers: (initialTab?: 'followers' | 'following' | 'requests') => void;
   onSelectProfile: (userId: string) => void;
+  onSelectAnime?: (animeId: string) => void;
   onMarkNotificationAsRead: (id: string) => void;
   onMarkNotificationsAsRead?: (ids: string[]) => void;
   onMarkAllNotificationsAsRead: () => void;
   onSelectNotification: (notif: NotificationItem) => void;
+  onSelectNotificationActor?: (notif: NotificationItem) => void;
   onNavigateTab: (tab: 'overview' | 'animes' | 'comments' | 'about' | 'activity' | 'favorites') => void;
   onAcceptRequest: (requestId: string, notifId?: string) => void;
   onRejectRequest: (requestId: string, notifId?: string) => void;
@@ -48,16 +51,18 @@ export const Header: React.FC<HeaderProps> = ({
   currentUser,
   activeProfile: _activeProfile,
   animes = [],
+  searchableProfiles = [],
   notifications,
   isNotifOpen,
   onToggleNotif,
   onOpenSettings,
   onOpenFollowers,
   onSelectProfile,
+  onSelectAnime,
   onMarkNotificationAsRead,
-  onMarkNotificationsAsRead,
   onMarkAllNotificationsAsRead,
   onSelectNotification,
+  onSelectNotificationActor,
   onNavigateTab,
   onAcceptRequest,
   onRejectRequest,
@@ -74,9 +79,6 @@ export const Header: React.FC<HeaderProps> = ({
   const notifRef = useRef<HTMLDivElement>(null);
   const notifPanelRef = useRef<HTMLDivElement>(null);
   const notifListRef = useRef<HTMLDivElement>(null);
-  const viewTimersRef = useRef<Map<string, number>>(new Map());
-  const pendingReadIdsRef = useRef<Set<string>>(new Set());
-  const flushScheduledRef = useRef(false);
   const searchRef = useRef<HTMLDivElement>(null);
 
   const unreadCount = notifications.filter(n => !n.isRead).length;
@@ -115,107 +117,6 @@ export const Header: React.FC<HeaderProps> = ({
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [isNotifOpen, onToggleNotif]);
 
-  // Clear pending view-tracking timers whenever the panel closes or unmounts
-  useEffect(() => {
-    if (!isNotifOpen) {
-      viewTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
-      viewTimersRef.current.clear();
-      pendingReadIdsRef.current.clear();
-      flushScheduledRef.current = false;
-    }
-    return () => {
-      viewTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
-      viewTimersRef.current.clear();
-      pendingReadIdsRef.current.clear();
-      flushScheduledRef.current = false;
-    };
-  }, [isNotifOpen]);
-
-  // Mark unread notifications as read once they are effectively viewed inside the panel viewport
-  useEffect(() => {
-    if (!isNotifOpen) return;
-    const listEl = notifListRef.current;
-    if (!listEl || typeof IntersectionObserver === 'undefined') return;
-
-    const timers = viewTimersRef.current;
-    const unreadIds = new Set(notifications.filter((n) => !n.isRead).map((n) => n.id));
-
-    timers.forEach((timerId, id) => {
-      if (!unreadIds.has(id)) {
-        window.clearTimeout(timerId);
-        timers.delete(id);
-      }
-    });
-
-    if (unreadIds.size === 0) return;
-
-    const scheduleFlush = () => {
-      if (flushScheduledRef.current) return;
-      flushScheduledRef.current = true;
-      queueMicrotask(() => {
-        flushScheduledRef.current = false;
-        if (pendingReadIdsRef.current.size === 0) return;
-        const batch = Array.from(pendingReadIdsRef.current);
-        pendingReadIdsRef.current.clear();
-        if (onMarkNotificationsAsRead) {
-          onMarkNotificationsAsRead(batch);
-        } else {
-          batch.forEach((id) => onMarkNotificationAsRead(id));
-        }
-      });
-    };
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((entry) => {
-          const id = (entry.target as HTMLElement).dataset.notifId;
-          if (!id || !unreadIds.has(id)) return;
-
-          const rect = entry.boundingClientRect;
-          const inScreenViewport =
-            rect.bottom > 0 && rect.top < window.innerHeight && rect.height > 0;
-          const minRatio =
-            listEl.clientHeight > 0 && rect.height > listEl.clientHeight * 0.7 ? 0.35 : 0.65;
-          const isEffectivelyVisible =
-            entry.isIntersecting && entry.intersectionRatio >= minRatio && inScreenViewport;
-
-          if (isEffectivelyVisible) {
-            if (!timers.has(id)) {
-              const timerId = window.setTimeout(() => {
-                timers.delete(id);
-                pendingReadIdsRef.current.add(id);
-                scheduleFlush();
-              }, 250);
-              timers.set(id, timerId);
-            }
-          } else {
-            const existingTimer = timers.get(id);
-            if (existingTimer !== undefined) {
-              window.clearTimeout(existingTimer);
-              timers.delete(id);
-            }
-          }
-        });
-      },
-      {
-        root: listEl,
-        threshold: [0, 0.35, 0.65, 0.95]
-      }
-    );
-
-    const itemNodes = listEl.querySelectorAll<HTMLElement>('[data-notif-id]');
-    itemNodes.forEach((node) => {
-      const id = node.dataset.notifId;
-      if (id && unreadIds.has(id)) {
-        observer.observe(node);
-      }
-    });
-
-    return () => {
-      observer.disconnect();
-    };
-  }, [isNotifOpen, notifications, onMarkNotificationAsRead, onMarkNotificationsAsRead]);
-
   const searchResults = searchQuery.trim()
     ? (isAuthenticated
         ? [
@@ -226,6 +127,15 @@ export const Header: React.FC<HeaderProps> = ({
               sub: `@${currentUser.username} (Meu Perfil)`,
               avatar: currentUser.avatarUrl,
             },
+            ...searchableProfiles
+              .filter((p) => p.id && p.id !== currentUser.id)
+              .map((p) => ({
+                type: 'user' as const,
+                id: p.id,
+                name: p.displayName,
+                sub: `@${p.username} (${p.isPrivate ? 'Perfil Privado' : 'Perfil Público'})`,
+                avatar: p.avatarUrl,
+              })),
             ...animes.map((anime) => ({
               type: 'anime' as const,
               id: anime.id,
@@ -257,22 +167,14 @@ export const Header: React.FC<HeaderProps> = ({
               sub: '@shinji_mecha (Perfil Público)',
               avatar: '/src/assets/images/hikari_user_avatar_1793518815544.jpg',
             },
-            {
+            ...animes.map((anime) => ({
               type: 'anime' as const,
-              id: 'anime_solo_leveling',
-              name: 'Solo Leveling (Arise)',
-              sub: 'Anime · Em Exibição',
-              avatar: '',
+              id: anime.id,
+              name: anime.title,
+              sub: `Anime · ${anime.year}`,
+              avatar: anime.posterUrl,
               tab: 'animes' as const,
-            },
-            {
-              type: 'anime' as const,
-              id: 'anime_frieren',
-              name: "Frieren: Beyond Journey's End",
-              sub: 'Anime · Concluído',
-              avatar: '',
-              tab: 'animes' as const,
-            },
+            })),
           ]
       ).filter(
         (item) =>
@@ -355,6 +257,8 @@ export const Header: React.FC<HeaderProps> = ({
                       onClick={() => {
                         if (item.type === 'user') {
                           onSelectProfile(item.id);
+                        } else if (onSelectAnime) {
+                          onSelectAnime(item.id);
                         } else {
                           onNavigateTab('animes');
                         }
@@ -425,40 +329,30 @@ export const Header: React.FC<HeaderProps> = ({
               )}
             </button>
 
-            {/* Notifications Panel rendered via Portal in document.body so backdrop-filter on <header> never traps position:fixed */}
+            {/* Notifications Popover anchored below the Bell button via Portal (zero page height growth, zero layout shift, sticky with header) */}
             {isNotifOpen && typeof document !== 'undefined' && createPortal(
-              <>
-                {/* Viewport-fixed backdrop overlay */}
-                <div
-                  className="fixed inset-0 z-40 bg-black/40 backdrop-blur-xs touch-none overscroll-contain transition-opacity"
-                  onWheel={(e) => e.preventDefault()}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onToggleNotif(false);
-                  }}
-                />
+              <div className="fixed inset-x-0 top-[4.25rem] z-50 pointer-events-none">
+                <div className="mx-auto flex max-w-7xl justify-end px-3 sm:px-6 lg:px-8">
+                  <div
+                    ref={notifPanelRef}
+                    role="dialog"
+                    aria-label="Notificações"
+                    className="pointer-events-auto sm:mr-12 flex w-full max-w-full sm:w-96 sm:max-w-sm max-h-[min(26rem,calc(100vh-5rem))] sm:max-h-[min(30rem,calc(100vh-5rem))] supports-[height:100dvh]:max-h-[min(26rem,calc(100dvh-5rem))] sm:supports-[height:100dvh]:max-h-[min(30rem,calc(100dvh-5rem))] flex-col overflow-hidden rounded-2xl border border-purple-800/30 bg-[#130E24] p-3.5 shadow-2xl shadow-black/90 backdrop-blur-xl animate-in fade-in zoom-in-95 duration-100"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {/* Popover Header (sticky/pinned via shrink-0 while list scrolls) */}
+                    <div className="flex shrink-0 items-center justify-between gap-2 border-b border-purple-900/40 pb-3 px-1">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-sm font-bold text-white">Notificações</span>
+                        {unreadCount > 0 && (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-purple-950/90 border border-purple-700/50 px-2 py-0.5 text-[11px] font-medium text-purple-300 shrink-0">
+                            <span className="font-mono tabular-nums font-semibold text-purple-200">{unreadCount}</span>
+                            <span>{unreadCount === 1 ? 'nova' : 'novas'}</span>
+                          </span>
+                        )}
+                      </div>
 
-                {/* Viewport-fixed panel wrapper aligned with header container */}
-                <div className="fixed inset-x-0 top-16 z-50 pointer-events-none">
-                  <div className="mx-auto flex max-w-7xl justify-end px-3 sm:px-6 lg:px-8">
-                    <div
-                      ref={notifPanelRef}
-                      role="dialog"
-                      aria-label="Notificações"
-                      className="pointer-events-auto flex w-full max-w-full sm:w-96 sm:max-w-sm max-h-[min(25rem,calc(100dvh-5rem))] sm:max-h-[min(28rem,calc(100dvh-5.5rem))] flex-col overflow-hidden rounded-2xl border border-purple-800/40 bg-[#130E24] p-3.5 shadow-2xl shadow-black/95 backdrop-blur-xl animate-in fade-in slide-in-from-top-2 duration-150"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      {/* Popover Header (sticky/pinned via shrink-0 while list scrolls) */}
-                      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-purple-900/40 pb-3 px-1">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <span className="text-sm font-bold text-white">Notificações</span>
-                          {unreadCount > 0 && (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-purple-950/90 border border-purple-700/50 px-2 py-0.5 text-[11px] font-medium text-purple-300 shrink-0">
-                              <span className="font-mono tabular-nums font-semibold text-purple-200">{unreadCount}</span>
-                              <span>{unreadCount === 1 ? 'nova' : 'novas'}</span>
-                            </span>
-                          )}
-                        </div>
+                      <div className="flex items-center gap-2 shrink-0">
                         {notifications.length > 0 && (
                           <button
                             type="button"
@@ -467,7 +361,7 @@ export const Header: React.FC<HeaderProps> = ({
                               e.stopPropagation();
                               onMarkAllNotificationsAsRead();
                             }}
-                            className={`shrink-0 text-xs font-medium transition-colors ${
+                            className={`shrink-0 text-[11px] sm:text-xs font-medium transition-colors whitespace-nowrap ${
                               unreadCount > 0
                                 ? 'text-purple-400 hover:text-purple-200 cursor-pointer'
                                 : 'text-purple-400/40 cursor-default'
@@ -476,56 +370,130 @@ export const Header: React.FC<HeaderProps> = ({
                             Marcar todas como lidas
                           </button>
                         )}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onToggleNotif(false);
+                          }}
+                          aria-label="Fechar notificações"
+                          title="Fechar"
+                          className="rounded-lg p-1 text-purple-400 hover:bg-purple-900/30 hover:text-white transition-colors cursor-pointer shrink-0"
+                        >
+                          <X className="h-4 w-4" />
+                        </button>
                       </div>
+                    </div>
 
-                      {/* Notifications List with preserved internal scroll */}
-                      <div
-                        ref={notifListRef}
-                        className="mt-2 min-h-0 flex-1 overflow-y-auto overscroll-contain space-y-2 pr-1"
-                      >
-                        {notifications.length === 0 ? (
-                          <div className="py-8 text-center text-xs text-purple-300/50">
-                            Nenhuma notificação por aqui.
-                          </div>
-                        ) : (
-                          notifications.map((notif) => (
+                    {/* Notifications List with internal-only vertical scroll */}
+                    <div
+                      ref={notifListRef}
+                      data-testid="notifications-scroll-list"
+                      className="mt-2 min-h-0 flex-1 overflow-y-auto overscroll-contain space-y-2 pr-1"
+                    >
+                      {notifications.length === 0 ? (
+                        <div className="py-8 text-center text-xs text-purple-300/50">
+                          Nenhuma notificação por aqui.
+                        </div>
+                      ) : (
+                        notifications.map((notif) => {
+                          const handleActorActivate = (e: React.MouseEvent) => {
+                            e.stopPropagation();
+                            onMarkNotificationAsRead(notif.id);
+                            onToggleNotif(false);
+                            if (onSelectNotificationActor) {
+                              onSelectNotificationActor(notif);
+                            } else {
+                              onSelectNotification(notif);
+                            }
+                          };
+
+                          const handleItemActivate = () => {
+                            onMarkNotificationAsRead(notif.id);
+                            onToggleNotif(false);
+                            onSelectNotification(notif);
+                          };
+
+                          return (
                             <div
                               key={notif.id}
                               data-notif-id={notif.id}
-                              onClick={() => {
-                                onMarkNotificationAsRead(notif.id);
-                                onToggleNotif(false);
-                                onSelectNotification(notif);
+                              role="button"
+                              tabIndex={0}
+                              onClick={handleItemActivate}
+                              onKeyDown={(e) => {
+                                if (e.target !== e.currentTarget) return;
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault();
+                                  handleItemActivate();
+                                }
                               }}
-                              className={`group relative flex flex-col gap-2 rounded-xl p-2.5 transition-all duration-150 active:scale-[0.985] cursor-pointer ${
+                              className={`group relative flex flex-col gap-2 rounded-xl p-2.5 transition-all duration-150 active:scale-[0.985] cursor-pointer focus:outline-none focus:ring-1 focus:ring-purple-500/50 ${
                                 notif.isRead 
                                   ? 'bg-[#18122c]/40 hover:bg-[#1c1533]' 
                                   : 'bg-purple-950/40 border border-purple-700/30 hover:bg-purple-900/40'
                               }`}
                             >
                               <div className="flex items-start gap-3">
-                                <img
-                                  src={notif.actor.avatarUrl}
-                                  alt={notif.actor.displayName}
-                                  className="h-8 w-8 rounded-full object-cover border border-purple-500/30 shrink-0 mt-0.5"
-                                />
+                                <button
+                                  type="button"
+                                  onClick={handleActorActivate}
+                                  aria-label={`Ver perfil de ${notif.actor.displayName}`}
+                                  title={`Ver perfil de ${notif.actor.displayName}`}
+                                  className="shrink-0 mt-0.5 rounded-full focus:outline-none focus:ring-2 focus:ring-purple-400/60 hover:ring-2 hover:ring-purple-400/60 transition-all cursor-pointer"
+                                >
+                                  {notif.actor.avatarUrl ? (
+                                    <img
+                                      src={notif.actor.avatarUrl}
+                                      alt={notif.actor.displayName}
+                                      referrerPolicy="no-referrer"
+                                      className="h-8 w-8 rounded-full object-cover border border-purple-500/30"
+                                    />
+                                  ) : (
+                                    <span className="flex h-8 w-8 items-center justify-center rounded-full border border-purple-500/30 bg-gradient-to-br from-purple-700 to-indigo-800 text-xs font-bold text-white select-none">
+                                      {(notif.actor.displayName || notif.actor.username || 'U').charAt(0).toUpperCase()}
+                                    </span>
+                                  )}
+                                </button>
+
                                 <div className="flex-1 min-w-0">
                                   <p className="text-xs text-purple-200 leading-snug">
-                                    <strong className="text-white font-medium">{notif.actor.displayName}</strong>{' '}
-                                    {notif.message}
+                                    <button
+                                      type="button"
+                                      onClick={handleActorActivate}
+                                      className="inline font-medium text-white hover:text-purple-300 hover:underline focus:outline-none focus:underline cursor-pointer text-left"
+                                    >
+                                      {notif.actor.displayName}
+                                    </button>{' '}
+                                    <span>{notif.message}</span>
                                   </p>
                                   <span className="text-[10px] text-purple-400/60 block mt-1">
                                     {notif.createdAt}
                                   </span>
                                 </div>
+
                                 {!notif.isRead && (
-                                  <div className="h-2 w-2 rounded-full bg-purple-500 shrink-0 mt-2" />
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onMarkNotificationAsRead(notif.id);
+                                    }}
+                                    aria-label="Marcar notificação como lida"
+                                    title="Marcar como lida"
+                                    className="shrink-0 mt-1.5 p-1 -m-1 rounded-full hover:bg-purple-800/40 focus:outline-none cursor-pointer"
+                                  >
+                                    <span className="block h-2 w-2 rounded-full bg-purple-500" />
+                                  </button>
                                 )}
                               </div>
 
                               {/* Interactive Accept / Reject controls for follow requests */}
                               {notif.type === 'follow_request' && (
-                                <div className="ml-11 flex items-center gap-2 pt-1">
+                                <div
+                                  className="ml-11 flex items-center gap-2 pt-1"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
                                   {notif.handled === 'accepted' ? (
                                     <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-400 bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-500/30">
                                       <Check className="h-3 w-3" /> Solicitação aceita
@@ -563,13 +531,13 @@ export const Header: React.FC<HeaderProps> = ({
                                 </div>
                               )}
                             </div>
-                          ))
-                        )}
-                      </div>
+                          );
+                        })
+                      )}
                     </div>
                   </div>
                 </div>
-              </>,
+              </div>,
               document.body
             )}
           </div>

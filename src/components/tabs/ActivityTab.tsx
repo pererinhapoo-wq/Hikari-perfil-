@@ -15,9 +15,13 @@ import { useCurrentTime, formatRelativeTime, formatExactDateTime } from '../../u
 
 interface ActivityTabProps {
   activities: UserActivity[];
+  highlightedActivityId?: string;
 }
 
-export const ActivityTab: React.FC<ActivityTabProps> = ({ activities }) => {
+export const ActivityTab: React.FC<ActivityTabProps> = ({
+  activities,
+  highlightedActivityId
+}) => {
   const now = useCurrentTime();
 
   const getActivityIcon = (type: UserActivity['type']) => {
@@ -63,19 +67,37 @@ export const ActivityTab: React.FC<ActivityTabProps> = ({ activities }) => {
             {activities.map((activity) => {
               const relativeLabel = formatRelativeTime(activity.createdAtTimestamp, now, activity.timestamp, false);
               const exactDate = formatExactDateTime(activity.createdAtTimestamp);
+              const isHighlighted = activity.id === highlightedActivityId;
               return (
-                <div key={activity.id} className="relative group">
+                <div
+                  key={activity.id}
+                  id={`hikari-activity-${activity.id}`}
+                  className="relative group"
+                >
                   {/* Node icon */}
                   <div className="absolute -left-6 top-0 flex h-6 w-6 items-center justify-center rounded-full bg-[#130E24] border-2 border-purple-600/70 shadow-md">
                     {getActivityIcon(activity.type)}
                   </div>
 
                   {/* Content */}
-                  <div className="rounded-xl border border-purple-900/20 bg-[#17112c]/60 p-3.5 transition-colors group-hover:border-purple-600/40 group-hover:bg-[#1a1333]">
+                  <div
+                    className={`rounded-xl border p-3.5 transition-all duration-300 ${
+                      isHighlighted
+                        ? 'border-purple-500 bg-[#1e153b] ring-2 ring-purple-500/60 shadow-lg shadow-purple-900/40'
+                        : 'border-purple-900/20 bg-[#17112c]/60 group-hover:border-purple-600/40 group-hover:bg-[#1a1333]'
+                    }`}
+                  >
                     <div className="flex flex-wrap items-center justify-between gap-1">
-                      <span className="text-sm font-semibold text-white">
-                        {activity.title}
-                      </span>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-semibold text-white">
+                          {activity.title}
+                        </span>
+                        {isHighlighted && (
+                          <span className="inline-flex items-center gap-1 rounded-md bg-purple-900/80 px-2 py-0.5 text-[10px] font-semibold text-purple-200 border border-purple-500/40">
+                            ✦ Atividade da Notificação
+                          </span>
+                        )}
+                      </div>
                       <div
                         className="flex items-center gap-1 text-[11px] text-purple-400/60 font-mono"
                         title={exactDate || undefined}

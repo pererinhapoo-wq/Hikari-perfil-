@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Loader2 } from 'lucide-react';
 import { updateProfile } from 'firebase/auth';
 import { Header } from './components/Header';
@@ -17,6 +17,7 @@ import {
   UserProfile, 
   ProfileTab, 
   AnimeItem, 
+  AnimeStatus,
   HikariComment, 
   UserActivity, 
   FollowUser, 
@@ -38,14 +39,19 @@ import {
   INITIAL_NOTIFICATIONS 
 } from './data/mockData';
 import { inferOffsetMsFromLabel } from './utils/relativeTime';
+import { computeAnimeStats, EMPTY_ANIME_STATS } from './utils/animeStats';
 import { useAuth } from './contexts/AuthContext';
 import {
+  PUBLIC_PROFILES_STORAGE_KEY,
   buildProfileFromFirebaseUser,
   createEmptyUserWorkspace,
   getUserWorkspaceStorageKey,
+  loadPublicProfileFromFirestore,
   loadUserWorkspaceFromFirestore,
   readLocalUserWorkspace,
+  readPublicProfilesMap,
   saveUserWorkspaceToFirestore,
+  syncPublicProfileProjection,
   writeLocalUserWorkspace,
   type FirestoreSyncStatus,
   type UserPersonalWorkspace,
@@ -55,6 +61,7 @@ import {
 const DEMO_PROFILE_STORAGE_KEY = 'hikari_profile_user_data_v1';
 
 interface PersistedDemoProfileData {
+  profileOverrides?: UserProfileOverrides;
   animes: AnimeItem[];
   comments: HikariComment[];
   activities: UserActivity[];
@@ -100,6 +107,54 @@ const STATUS_ACTIVITY_LABEL: Record<AnimeItem['status'], string> = {
   planned: 'Planejados'
 };
 
+function buildProfileFromFollowUser(followUser: FollowUser): UserProfile {
+  return {
+    id: followUser.id,
+    username: followUser.username,
+    displayName: followUser.displayName,
+    avatarUrl: followUser.avatarUrl,
+    bannerUrl: '',
+    bio: followUser.bio,
+    createdAt: followUser.createdAt,
+    createdAtTimestamp: 0,
+    followersCount: followUser.isFollowing ? 1 : 0,
+    followingCount: followUser.isFollower ? 1 : 0,
+    isPrivate: false,
+    showCommentsOnProfile: true,
+    privacySettings: {
+      showAnimeList: true,
+      showFavorites: true,
+      showActivity: true,
+      showCommentsOnProfile: true,
+    },
+    externalAccounts: {
+      anilist: { connected: false },
+      mal: { connected: false },
+    },
+  };
+}
+
+function buildInitialDemoProfilesMap(): Record<string, UserProfile> {
+  const map: Record<string, UserProfile> = {
+    ...OTHER_USERS,
+    [CURRENT_USER.id]: CURRENT_USER,
+  };
+
+  const knownDemoUsers: FollowUser[] = [
+    ...INITIAL_FOLLOWERS,
+    ...INITIAL_FOLLOWING,
+    ...INITIAL_FOLLOW_REQUESTS.map((req) => req.user),
+  ];
+
+  for (const connUser of knownDemoUsers) {
+    if (!map[connUser.id]) {
+      map[connUser.id] = buildProfileFromFollowUser(connUser);
+    }
+  }
+
+  return map;
+}
+
 function mergeNotificationsWithSeed(
   persisted: NotificationItem[] | undefined,
   seed: NotificationItem[]
@@ -127,6 +182,10 @@ function loadInitialDemoProfileData(): PersistedDemoProfileData {
           INITIAL_NOTIFICATIONS
         );
         return {
+          profileOverrides:
+            parsed.profileOverrides && typeof parsed.profileOverrides === 'object'
+              ? parsed.profileOverrides
+              : undefined,
           animes: parsed.animes,
           comments: parsed.comments,
           activities: parsed.activities,
@@ -177,7 +236,18 @@ export default function App() {
   const [initialDemoData] = useState<PersistedDemoProfileData>(() => loadInitialDemoProfileData());
 
   // Demo Mode State (strictly isolated to !isAuthenticated && isDemoPreview)
-  const [demoProfile, setDemoProfile] = useState<UserProfile>(CURRENT_USER);
+  const [demoProfile, setDemoProfile] = useState<UserProfile>(() => {
+    const ov = initialDemoData.profileOverrides;
+    if (!ov) return CURRENT_USER;
+    return {
+      ...CURRENT_USER,
+      ...ov,
+      privacySettings: {
+        ...CURRENT_USER.privacySettings,
+        ...(ov.privacySettings ?? {}),
+      },
+    };
+  });
   const [demoAnimes, setDemoAnimes] = useState<AnimeItem[]>(initialDemoData.animes);
   const [demoComments, setDemoComments] = useState<HikariComment[]>(initialDemoData.comments);
   const [demoActivities, setDemoActivities] = useState<UserActivity[]>(initialDemoData.activities);
@@ -190,18 +260,22 @@ export default function App() {
   );
   const [demoRequestedIds, setDemoRequestedIds] = useState<Set<string>>(() => new Set());
   const [demoBlockedIds, setDemoBlockedIds] = useState<Set<string>>(() => new Set());
-  const [demoOtherProfiles, setDemoOtherProfiles] = useState<Record<string, UserProfile>>(() => ({
-    ...OTHER_USERS,
-    [CURRENT_USER.id]: CURRENT_USER,
-  }));
+  const [demoOtherProfiles, setDemoOtherProfiles] = useState<Record<string, UserProfile>>(
+    () => buildInitialDemoProfilesMap()
+  );
 
   // UID-isolated personal state for real Firebase accounts (keyed strictly by user.uid)
   const [authSession, setAuthSession] = useState<AuthSessionState | null>(null);
+  const [publicProfilesRevision, setPublicProfilesRevision] = useState(0);
+  const [remoteVisitedProfiles, setRemoteVisitedProfiles] = useState<Record<string, UserProfile>>({});
 
   const [activeProfileId, setActiveProfileId] = useState<string>(CURRENT_USER.id);
 
-  // Tab State
+  // Tab & Anime List Filter / Detail Navigation State
   const [activeTab, setActiveTab] = useState<ProfileTab>('overview');
+  const [selectedAnimeStatusFilter, setSelectedAnimeStatusFilter] = useState<AnimeStatus>('all');
+  const [animeFilterSyncKey, setAnimeFilterSyncKey] = useState(0);
+  const [selectedAnimeDetailId, setSelectedAnimeDetailId] = useState<string | null>(null);
 
   // Modal States
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -212,6 +286,20 @@ export default function App() {
 
   // Highlight state for direct notification navigation
   const [highlightedCommentId, setHighlightedCommentId] = useState<string | undefined>(undefined);
+  const [highlightedActivityId, setHighlightedActivityId] = useState<string | undefined>(undefined);
+  const highlightCommentTimerRef = useRef<number | null>(null);
+  const highlightActivityTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (highlightCommentTimerRef.current !== null) {
+        window.clearTimeout(highlightCommentTimerRef.current);
+      }
+      if (highlightActivityTimerRef.current !== null) {
+        window.clearTimeout(highlightActivityTimerRef.current);
+      }
+    };
+  }, []);
 
   // Hydrate or wipe authenticated workspace strictly by Firebase UID on every auth change
   useEffect(() => {
@@ -219,7 +307,10 @@ export default function App() {
 
     if (!user?.uid) {
       setAuthSession(null);
+      setRemoteVisitedProfiles({});
       setActiveProfileId(CURRENT_USER.id);
+      setSelectedAnimeStatusFilter('all');
+      setSelectedAnimeDetailId(null);
       setActiveTab('overview');
       return () => {
         cancelled = true;
@@ -234,6 +325,8 @@ export default function App() {
     setIsSettingsOpen(false);
     setIsFollowersOpen(false);
     setIsNotifOpen(false);
+    setSelectedAnimeStatusFilter('all');
+    setSelectedAnimeDetailId(null);
     setActiveProfileId(targetUid);
     setActiveTab('overview');
     setAuthSession({
@@ -277,6 +370,17 @@ export default function App() {
       window.localStorage.setItem(
         DEMO_PROFILE_STORAGE_KEY,
         JSON.stringify({
+          profileOverrides: {
+            displayName: demoProfile.displayName,
+            username: demoProfile.username,
+            avatarUrl: demoProfile.avatarUrl,
+            bannerUrl: demoProfile.bannerUrl,
+            bio: demoProfile.bio,
+            isPrivate: demoProfile.isPrivate,
+            showCommentsOnProfile: demoProfile.showCommentsOnProfile,
+            privacySettings: demoProfile.privacySettings,
+            externalAccounts: demoProfile.externalAccounts,
+          },
           animes: demoAnimes,
           comments: demoComments,
           activities: demoActivities,
@@ -286,12 +390,25 @@ export default function App() {
     } catch {
       // Ignore storage write errors gracefully
     }
-  }, [isAuthenticated, isDemoPreview, demoAnimes, demoComments, demoActivities, demoNotifications]);
+  }, [
+    isAuthenticated,
+    isDemoPreview,
+    demoProfile,
+    demoAnimes,
+    demoComments,
+    demoActivities,
+    demoNotifications,
+  ]);
 
   // Cross-tab storage synchronization strictly scoped to either current UID or Demo Mode
   useEffect(() => {
     function handleStorageSync(event: StorageEvent) {
       if (!event.newValue) return;
+
+      if (event.key === PUBLIC_PROFILES_STORAGE_KEY) {
+        setPublicProfilesRevision((r) => r + 1);
+        return;
+      }
 
       if (isAuthenticated && user?.uid) {
         const expectedKey = getUserWorkspaceStorageKey(user.uid);
@@ -343,6 +460,8 @@ export default function App() {
           updatedAtMs: Date.now(),
         });
         const resolvedProfile = buildProfileFromFirebaseUser(user, stamped.profileOverrides);
+        syncPublicProfileProjection(resolvedProfile, stamped.animes, stamped.updatedAtMs);
+        setPublicProfilesRevision((r) => r + 1);
         void saveUserWorkspaceToFirestore(targetUid, resolvedProfile, stamped).then(
           (syncStatus) => {
             setAuthSession((curr) =>
@@ -365,6 +484,16 @@ export default function App() {
     void userRevision;
     return buildProfileFromFirebaseUser(user, activeAuthWorkspace.profileOverrides);
   }, [isAuthenticated, user, userRevision, activeAuthWorkspace]);
+
+  // Keep sanitized public projection synced whenever authenticated profile or anime list hydrates/changes
+  useEffect(() => {
+    if (!isAuthenticated || !authenticatedProfile || !activeAuthWorkspace) return;
+    syncPublicProfileProjection(
+      authenticatedProfile,
+      activeAuthWorkspace.animes,
+      activeAuthWorkspace.updatedAtMs || Date.now()
+    );
+  }, [isAuthenticated, authenticatedProfile, activeAuthWorkspace]);
 
   const authFollowingIds = useMemo(
     () => new Set(activeAuthWorkspace?.followingIds ?? []),
@@ -420,9 +549,9 @@ export default function App() {
   const isViewingAppShell =
     !isLoading && ((isAuthenticated && isAuthWorkspaceReady) || (!isAuthenticated && isDemoPreview));
 
-  // Global background scroll lock for all open modals (preserves exact page position, zero jumping, no position:fixed hack, no scrollTo)
+  // Global background scroll lock for centered blocking modals only (never lock or shift page for notifications popover)
   useEffect(() => {
-    const isAnyModalOpen = isViewingAppShell && (isSettingsOpen || isFollowersOpen || isNotifOpen);
+    const isAnyModalOpen = isViewingAppShell && (isSettingsOpen || isFollowersOpen);
     if (isAnyModalOpen) {
       const scrollBarWidth = window.innerWidth - document.documentElement.clientWidth;
       const prevBodyOverflow = document.body.style.overflow;
@@ -438,28 +567,82 @@ export default function App() {
         document.body.style.paddingRight = prevPaddingRight;
       };
     }
-  }, [isViewingAppShell, isSettingsOpen, isFollowersOpen, isNotifOpen]);
+  }, [isViewingAppShell, isSettingsOpen, isFollowersOpen]);
+
+  // Sanitized public projections of other registered profiles (private anime lists are stripped to [])
+  const authPublicProfilesMap = useMemo(() => {
+    void publicProfilesRevision;
+    if (!isAuthenticated) return {};
+    return readPublicProfilesMap(user?.uid);
+  }, [isAuthenticated, user?.uid, publicProfilesRevision, activeAuthWorkspace?.updatedAtMs]);
+
+  // Real profiles accessible to the authenticated user (zero demo profiles)
+  const authOtherProfilesMap = useMemo<Record<string, UserProfile>>(() => {
+    if (!isAuthenticated || !activeAuthWorkspace) return {};
+    const map: Record<string, UserProfile> = {};
+
+    for (const [uid, proj] of Object.entries(authPublicProfilesMap)) {
+      if (uid && uid !== currentUser.id) {
+        map[uid] = proj.profile;
+      }
+    }
+
+    for (const [uid, remoteProf] of Object.entries(remoteVisitedProfiles)) {
+      if (uid && uid !== currentUser.id && !map[uid]) {
+        map[uid] = remoteProf;
+      }
+    }
+
+    const ownConnections: FollowUser[] = [
+      ...activeAuthWorkspace.followers,
+      ...activeAuthWorkspace.following,
+      ...activeAuthWorkspace.followRequests.map((req) => req.user),
+    ];
+    for (const connUser of ownConnections) {
+      if (connUser.id && connUser.id !== currentUser.id && !map[connUser.id]) {
+        map[connUser.id] = buildProfileFromFollowUser(connUser);
+      }
+    }
+    return map;
+  }, [
+    isAuthenticated,
+    activeAuthWorkspace,
+    authPublicProfilesMap,
+    remoteVisitedProfiles,
+    currentUser.id,
+  ]);
+
+  // Hydrate visited profile document from Firestore when not already cached locally
+  useEffect(() => {
+    if (!isAuthenticated || !user?.uid) return;
+    if (!activeProfileId || activeProfileId === user.uid) return;
+    if (authPublicProfilesMap[activeProfileId] || remoteVisitedProfiles[activeProfileId]) return;
+
+    let cancelled = false;
+    void loadPublicProfileFromFirestore(activeProfileId).then((loaded) => {
+      if (cancelled || !loaded) return;
+      setRemoteVisitedProfiles((prev) => ({
+        ...prev,
+        [loaded.id]: loaded,
+      }));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, user?.uid, activeProfileId, authPublicProfilesMap, remoteVisitedProfiles]);
 
   // Strictly separate authenticated user profile from Demo Mode profiles
-  const isOwnProfile = isAuthenticated ? true : activeProfileId === CURRENT_USER.id;
+  const isOwnProfile = isAuthenticated
+    ? activeProfileId === currentUser.id || !authOtherProfilesMap[activeProfileId]
+    : activeProfileId === CURRENT_USER.id;
+
   const activeProfile: UserProfile = isAuthenticated
-    ? currentUser
+    ? isOwnProfile
+      ? currentUser
+      : authOtherProfilesMap[activeProfileId] || currentUser
     : isOwnProfile
     ? demoProfile
     : demoOtherProfiles[activeProfileId] || demoProfile;
-
-  const displayedAnimes = animes;
-  const displayedFavoriteCharacters = isAuthenticated
-    ? activeAuthWorkspace?.favoriteCharacters ?? []
-    : FAVORITE_CHARACTERS;
-  const displayedFavoriteCompanies = isAuthenticated
-    ? activeAuthWorkspace?.favoriteCompanies ?? []
-    : FAVORITE_COMPANIES;
-  const displayedFavoritePeople = isAuthenticated
-    ? activeAuthWorkspace?.favoritePeople ?? []
-    : FAVORITE_PEOPLE;
-  const displayedComments = comments;
-  const displayedActivities = activities;
 
   const isFollowingActive = followingIds.has(activeProfile.id);
   const isRequestedActive = requestedIds.has(activeProfile.id);
@@ -468,20 +651,183 @@ export default function App() {
   // Check if active profile is private and locked for viewer
   const isPrivateLocked = !isOwnProfile && activeProfile.isPrivate && !isFollowingActive;
 
+  // Real data-level privacy gate for anime lists:
+  // Owner always accesses own lists; visitors only access when profile is unlocked AND showAnimeList !== false
+  const canAccessActiveProfileAnimeList =
+    isOwnProfile || (!isPrivateLocked && activeProfile.privacySettings?.showAnimeList !== false);
+
+  // Aggregated numeric stats remain visible even when anime lists are private
+  const activeProfileAnimeStats = useMemo(() => {
+    if (isOwnProfile) {
+      return computeAnimeStats(animes);
+    }
+    if (isAuthenticated) {
+      return authPublicProfilesMap[activeProfile.id]?.animeStats ?? EMPTY_ANIME_STATS;
+    }
+    return computeAnimeStats(demoAnimes);
+  }, [isOwnProfile, isAuthenticated, animes, authPublicProfilesMap, activeProfile.id, demoAnimes]);
+
+  // Raw anime entries are strictly withheld when !canAccessActiveProfileAnimeList
+  const exposedAnimes = useMemo<AnimeItem[]>(() => {
+    if (!canAccessActiveProfileAnimeList) {
+      return [];
+    }
+    if (isOwnProfile) {
+      return animes;
+    }
+    if (isAuthenticated) {
+      return authPublicProfilesMap[activeProfile.id]?.publicAnimes ?? [];
+    }
+    return demoAnimes;
+  }, [
+    canAccessActiveProfileAnimeList,
+    isOwnProfile,
+    isAuthenticated,
+    animes,
+    authPublicProfilesMap,
+    activeProfile.id,
+    demoAnimes,
+  ]);
+
+  const displayedFavoriteCharacters = isAuthenticated
+    ? isOwnProfile
+      ? activeAuthWorkspace?.favoriteCharacters ?? []
+      : []
+    : FAVORITE_CHARACTERS;
+  const displayedFavoriteCompanies = isAuthenticated
+    ? isOwnProfile
+      ? activeAuthWorkspace?.favoriteCompanies ?? []
+      : []
+    : FAVORITE_COMPANIES;
+  const displayedFavoritePeople = isAuthenticated
+    ? isOwnProfile
+      ? activeAuthWorkspace?.favoritePeople ?? []
+      : []
+    : FAVORITE_PEOPLE;
+  const displayedComments = isAuthenticated && !isOwnProfile ? [] : comments;
+  const displayedActivities = isAuthenticated && !isOwnProfile ? [] : activities;
+
   // Handler: Select Profile (switch view)
-  const handleSelectProfile = (userId: string) => {
-    if (isAuthenticated && user) {
-      setActiveProfileId(user.uid);
+  const handleSelectProfile = useCallback(
+    (userId: string) => {
+      setSelectedAnimeStatusFilter('all');
+      setSelectedAnimeDetailId(null);
+      if (isAuthenticated && user) {
+        if (userId === user.uid || !authOtherProfilesMap[userId]) {
+          setActiveProfileId(user.uid);
+        } else {
+          setActiveProfileId(userId);
+        }
+        setActiveTab('overview');
+        return;
+      }
+      setActiveProfileId(userId);
       setActiveTab('overview');
+    },
+    [isAuthenticated, user, authOtherProfilesMap]
+  );
+
+  // Handler: Open filtered Anime List from clickable Anime Stats status rows
+  const handleSelectAnimeStatus = useCallback(
+    (status: AnimeStatus) => {
+      if (!canAccessActiveProfileAnimeList) return;
+      setSelectedAnimeDetailId(null);
+      setSelectedAnimeStatusFilter(status);
+      setAnimeFilterSyncKey((prev) => prev + 1);
+      setActiveTab('animes');
+    },
+    [canAccessActiveProfileAnimeList]
+  );
+
+  // Handler: Navigate tabs (resets status filter when clicking Animes tab directly)
+  const handleTabChange = useCallback((tab: ProfileTab) => {
+    if (tab === 'animes') {
+      setSelectedAnimeDetailId(null);
+      setSelectedAnimeStatusFilter('all');
+      setAnimeFilterSyncKey((prev) => prev + 1);
+    }
+    setActiveTab(tab);
+  }, []);
+
+  // Handler: Open specific anime detail view from Header search
+  const handleSelectAnimeFromSearch = useCallback(
+    (animeId: string) => {
+      if (!canAccessActiveProfileAnimeList) return;
+      setSelectedAnimeStatusFilter('all');
+      setAnimeFilterSyncKey((prev) => prev + 1);
+      setSelectedAnimeDetailId(animeId);
+      setActiveTab('animes');
+    },
+    [canAccessActiveProfileAnimeList]
+  );
+
+  // Handler: Follow / Request toggle
+  const handleFollowToggle = () => {
+    if (isOwnProfile) return;
+
+    if (isAuthenticated) {
+      updateAuthWorkspace((prev) => {
+        const followingSet = new Set(prev.followingIds);
+        const requestedSet = new Set(prev.requestedIds);
+        let nextFollowing = prev.following;
+        let nextFollowers = prev.followers;
+        let followingDelta = 0;
+
+        if (followingSet.has(activeProfile.id)) {
+          followingSet.delete(activeProfile.id);
+          nextFollowing = prev.following.filter((u) => u.id !== activeProfile.id);
+          nextFollowers = prev.followers.map((u) =>
+            u.id === activeProfile.id ? { ...u, isFollowing: false } : u
+          );
+          followingDelta = -1;
+        } else if (requestedSet.has(activeProfile.id)) {
+          requestedSet.delete(activeProfile.id);
+        } else if (activeProfile.isPrivate) {
+          requestedSet.add(activeProfile.id);
+        } else {
+          followingSet.add(activeProfile.id);
+          const alreadyListed = prev.following.some((u) => u.id === activeProfile.id);
+          if (!alreadyListed) {
+            nextFollowing = [
+              {
+                id: activeProfile.id,
+                username: activeProfile.username,
+                displayName: activeProfile.displayName,
+                avatarUrl: activeProfile.avatarUrl,
+                bio: activeProfile.bio,
+                isFollowing: true,
+                isRequested: false,
+                isFollower: prev.followers.some((u) => u.id === activeProfile.id),
+                isBlocked: false,
+                createdAt: activeProfile.createdAt,
+              },
+              ...prev.following,
+            ];
+          }
+          nextFollowers = prev.followers.map((u) =>
+            u.id === activeProfile.id ? { ...u, isFollowing: true } : u
+          );
+          followingDelta = 1;
+        }
+
+        const currentFollowingCount = prev.profileOverrides.followingCount ?? 0;
+        return {
+          ...prev,
+          followingIds: Array.from(followingSet),
+          requestedIds: Array.from(requestedSet),
+          following: nextFollowing,
+          followers: nextFollowers,
+          profileOverrides:
+            followingDelta !== 0
+              ? {
+                  ...prev.profileOverrides,
+                  followingCount: Math.max(0, currentFollowingCount + followingDelta),
+                }
+              : prev.profileOverrides,
+        };
+      });
       return;
     }
-    setActiveProfileId(userId);
-    setActiveTab('overview');
-  };
-
-  // Handler: Follow / Request toggle (Demo Mode multi-profile interaction)
-  const handleFollowToggle = () => {
-    if (isOwnProfile || isAuthenticated) return;
 
     if (isFollowingActive) {
       setDemoFollowingIds((prev) => {
@@ -489,18 +835,24 @@ export default function App() {
         next.delete(activeProfile.id);
         return next;
       });
-      setDemoOtherProfiles((prev) => ({
-        ...prev,
-        [activeProfile.id]: {
-          ...prev[activeProfile.id],
-          followersCount: Math.max(0, prev[activeProfile.id].followersCount - 1),
-        },
-      }));
+      setDemoOtherProfiles((prev) => {
+        const existingTarget = prev[activeProfile.id] ?? activeProfile;
+        return {
+          ...prev,
+          [activeProfile.id]: {
+            ...existingTarget,
+            followersCount: Math.max(0, existingTarget.followersCount - 1),
+          },
+        };
+      });
       setDemoProfile((prev) => ({
         ...prev,
         followingCount: Math.max(0, prev.followingCount - 1),
       }));
       setDemoFollowing((prev) => prev.filter((u) => u.id !== activeProfile.id));
+      setDemoFollowers((prev) =>
+        prev.map((u) => (u.id === activeProfile.id ? { ...u, isFollowing: false } : u))
+      );
     } else if (isRequestedActive) {
       setDemoRequestedIds((prev) => {
         const next = new Set(prev);
@@ -511,32 +863,41 @@ export default function App() {
       setDemoRequestedIds((prev) => new Set(prev).add(activeProfile.id));
     } else {
       setDemoFollowingIds((prev) => new Set(prev).add(activeProfile.id));
-      setDemoOtherProfiles((prev) => ({
-        ...prev,
-        [activeProfile.id]: {
-          ...prev[activeProfile.id],
-          followersCount: prev[activeProfile.id].followersCount + 1,
-        },
-      }));
+      setDemoOtherProfiles((prev) => {
+        const existingTarget = prev[activeProfile.id] ?? activeProfile;
+        return {
+          ...prev,
+          [activeProfile.id]: {
+            ...existingTarget,
+            followersCount: existingTarget.followersCount + 1,
+          },
+        };
+      });
       setDemoProfile((prev) => ({
         ...prev,
         followingCount: prev.followingCount + 1,
       }));
-      setDemoFollowing((prev) => [
-        {
-          id: activeProfile.id,
-          username: activeProfile.username,
-          displayName: activeProfile.displayName,
-          avatarUrl: activeProfile.avatarUrl,
-          bio: activeProfile.bio,
-          isFollowing: true,
-          isRequested: false,
-          isFollower: false,
-          isBlocked: false,
-          createdAt: activeProfile.createdAt,
-        },
-        ...prev,
-      ]);
+      setDemoFollowing((prev) => {
+        if (prev.some((u) => u.id === activeProfile.id)) return prev;
+        return [
+          {
+            id: activeProfile.id,
+            username: activeProfile.username,
+            displayName: activeProfile.displayName,
+            avatarUrl: activeProfile.avatarUrl,
+            bio: activeProfile.bio,
+            isFollowing: true,
+            isRequested: false,
+            isFollower: demoFollowers.some((u) => u.id === activeProfile.id),
+            isBlocked: false,
+            createdAt: activeProfile.createdAt,
+          },
+          ...prev,
+        ];
+      });
+      setDemoFollowers((prev) =>
+        prev.map((u) => (u.id === activeProfile.id ? { ...u, isFollowing: true } : u))
+      );
     }
   };
 
@@ -741,6 +1102,17 @@ export default function App() {
         window.localStorage.setItem(
           DEMO_PROFILE_STORAGE_KEY,
           JSON.stringify({
+            profileOverrides: {
+              displayName: demoProfile.displayName,
+              username: demoProfile.username,
+              avatarUrl: demoProfile.avatarUrl,
+              bannerUrl: demoProfile.bannerUrl,
+              bio: demoProfile.bio,
+              isPrivate: demoProfile.isPrivate,
+              showCommentsOnProfile: demoProfile.showCommentsOnProfile,
+              privacySettings: demoProfile.privacySettings,
+              externalAccounts: demoProfile.externalAccounts,
+            },
             animes: nextAnimes,
             comments: nextComments,
             activities: nextActivities,
@@ -1032,6 +1404,8 @@ export default function App() {
     setIsNotifOpen(false);
     setIsDemoPreview(false);
     setAuthInitialMode('login');
+    setSelectedAnimeStatusFilter('all');
+    setSelectedAnimeDetailId(null);
     setActiveTab('overview');
     setAuthSession(null);
     await signOutUser();
@@ -1102,31 +1476,218 @@ export default function App() {
     });
   }, [isAuthenticated, updateAuthWorkspace]);
 
-  // Notification navigation to relevant content
-  const handleSelectNotification = (notif: NotificationItem) => {
-    if (notif.contextData?.tab === 'comments') {
-      setActiveProfileId(currentUser.id);
-      setActiveTab('comments');
-      if (notif.contextData.commentId) {
-        setHighlightedCommentId(notif.contextData.commentId);
-        setTimeout(() => {
-          const el = document.getElementById(`hikari-comment-${notif.contextData?.commentId}`);
-          if (el) {
-            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  // Resolve the real profile ID of a notification's actor without fabricating nonexistent users
+  const resolveNotificationActorProfileId = useCallback(
+    (notif: NotificationItem): string | null => {
+      const normalizedUsername = notif.actor.username
+        .trim()
+        .replace(/^@/, '')
+        .toLowerCase();
+
+      if (isAuthenticated) {
+        const explicitId = notif.actor.id || notif.contextData?.userId;
+        if (explicitId) {
+          if (explicitId === currentUser.id || authOtherProfilesMap[explicitId]) {
+            return explicitId;
           }
-        }, 150);
-        setTimeout(() => {
-          setHighlightedCommentId(undefined);
-        }, 4000);
+        }
+        if (normalizedUsername) {
+          if (currentUser.username.toLowerCase() === normalizedUsername) {
+            return currentUser.id;
+          }
+          const matchedAuthConn = Object.values(authOtherProfilesMap).find(
+            (u) => u.username.toLowerCase() === normalizedUsername
+          );
+          if (matchedAuthConn) return matchedAuthConn.id;
+        }
+        return null;
       }
-    } else if (notif.contextData?.modal === 'followers') {
-      setFollowersInitialTab(notif.contextData.modalTab || 'followers');
-      setIsFollowersOpen(true);
-    } else if (!isAuthenticated && notif.contextData?.userId) {
-      setActiveProfileId(notif.contextData.userId);
+
+      const explicitId = notif.actor.id || notif.contextData?.userId;
+      if (explicitId) {
+        if (explicitId === CURRENT_USER.id || demoOtherProfiles[explicitId]) {
+          return explicitId;
+        }
+        const matchedConn = [
+          ...demoFollowers,
+          ...demoFollowing,
+          ...demoFollowRequests.map((r) => r.user),
+        ].find((u) => u.id === explicitId);
+        if (matchedConn) return matchedConn.id;
+      }
+
+      if (normalizedUsername) {
+        if (demoProfile.username.toLowerCase() === normalizedUsername) {
+          return CURRENT_USER.id;
+        }
+        const matchedFromMap = Object.values(demoOtherProfiles).find(
+          (u) => u.username.toLowerCase() === normalizedUsername
+        );
+        if (matchedFromMap) return matchedFromMap.id;
+
+        const matchedConn = [
+          ...demoFollowers,
+          ...demoFollowing,
+          ...demoFollowRequests.map((r) => r.user),
+        ].find((u) => u.username.toLowerCase() === normalizedUsername);
+        if (matchedConn) return matchedConn.id;
+      }
+
+      return null;
+    },
+    [
+      isAuthenticated,
+      currentUser.id,
+      currentUser.username,
+      authOtherProfilesMap,
+      demoOtherProfiles,
+      demoFollowers,
+      demoFollowing,
+      demoFollowRequests,
+      demoProfile.username,
+    ]
+  );
+
+  // Navigate directly to a notification actor's real profile when available
+  const handleSelectNotificationActor = useCallback(
+    (notif: NotificationItem) => {
+      const targetProfileId = resolveNotificationActorProfileId(notif);
+      if (!targetProfileId) {
+        if (notif.contextData?.modal === 'followers') {
+          setFollowersInitialTab(notif.contextData.modalTab || 'followers');
+          setIsFollowersOpen(true);
+        }
+        return;
+      }
+
+      if (!isAuthenticated && targetProfileId !== CURRENT_USER.id && !demoOtherProfiles[targetProfileId]) {
+        const matchedConn = [
+          ...demoFollowers,
+          ...demoFollowing,
+          ...demoFollowRequests.map((r) => r.user),
+        ].find((u) => u.id === targetProfileId);
+        if (matchedConn) {
+          setDemoOtherProfiles((prev) => ({
+            ...prev,
+            [matchedConn.id]: buildProfileFromFollowUser(matchedConn),
+          }));
+        }
+      }
+
+      setActiveProfileId(targetProfileId);
       setActiveTab('overview');
-    }
-  };
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    },
+    [
+      resolveNotificationActorProfileId,
+      isAuthenticated,
+      demoOtherProfiles,
+      demoFollowers,
+      demoFollowing,
+      demoFollowRequests,
+    ]
+  );
+
+  // Notification navigation to real destination (profile, liked/commented post, or activity)
+  const handleSelectNotification = useCallback(
+    (notif: NotificationItem) => {
+      // 1. Follower & follow-request notifications open the related person's profile
+      if (
+        notif.type === 'new_follower' ||
+        notif.type === 'follow_request' ||
+        notif.type === 'request_accepted'
+      ) {
+        const targetProfileId = resolveNotificationActorProfileId(notif);
+        if (targetProfileId) {
+          handleSelectNotificationActor(notif);
+          return;
+        }
+        if (notif.contextData?.modal === 'followers') {
+          setFollowersInitialTab(notif.contextData.modalTab || 'followers');
+          setIsFollowersOpen(true);
+        }
+        return;
+      }
+
+      // 2. Activity likes/interactions open the activity timeline and highlight the target activity
+      if (
+        !notif.contextData?.commentId &&
+        (notif.contextData?.tab === 'activity' || Boolean(notif.contextData?.activityId))
+      ) {
+        setActiveProfileId(currentUser.id);
+        setActiveTab('activity');
+        const targetActivityId = notif.contextData?.activityId;
+        if (targetActivityId && activities.some((a) => a.id === targetActivityId)) {
+          if (highlightActivityTimerRef.current !== null) {
+            window.clearTimeout(highlightActivityTimerRef.current);
+          }
+          setHighlightedActivityId(targetActivityId);
+          window.setTimeout(() => {
+            const el = document.getElementById(`hikari-activity-${targetActivityId}`);
+            if (el) {
+              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+          }, 150);
+          highlightActivityTimerRef.current = window.setTimeout(() => {
+            setHighlightedActivityId(undefined);
+            highlightActivityTimerRef.current = null;
+          }, 4000);
+        }
+        return;
+      }
+
+      // 3. Comment likes & comment replies open the comment section and highlight the target comment
+      if (
+        notif.type === 'comment_like' ||
+        notif.type === 'comment_reply' ||
+        notif.contextData?.tab === 'comments' ||
+        Boolean(notif.contextData?.commentId)
+      ) {
+        setActiveProfileId(currentUser.id);
+        setActiveTab('comments');
+        const targetCommentId = notif.contextData?.commentId;
+        if (targetCommentId && comments.some((c) => c.id === targetCommentId)) {
+          if (highlightCommentTimerRef.current !== null) {
+            window.clearTimeout(highlightCommentTimerRef.current);
+          }
+          setHighlightedCommentId(targetCommentId);
+          window.setTimeout(() => {
+            const el = document.getElementById(`hikari-comment-${targetCommentId}`);
+            if (el) {
+              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+          }, 150);
+          highlightCommentTimerRef.current = window.setTimeout(() => {
+            setHighlightedCommentId(undefined);
+            highlightCommentTimerRef.current = null;
+          }, 4000);
+        }
+        return;
+      }
+
+      // 4. Other explicit real tab destinations (e.g., anime list or favorites)
+      if (notif.contextData?.tab) {
+        setActiveProfileId(currentUser.id);
+        setActiveTab(notif.contextData.tab);
+        return;
+      }
+
+      // 5. Fallback to actor profile or followers modal only if supported by real contextData
+      if (notif.contextData?.userId || notif.actor.id) {
+        handleSelectNotificationActor(notif);
+      } else if (notif.contextData?.modal === 'followers') {
+        setFollowersInitialTab(notif.contextData.modalTab || 'followers');
+        setIsFollowersOpen(true);
+      }
+    },
+    [
+      resolveNotificationActorProfileId,
+      handleSelectNotificationActor,
+      currentUser.id,
+      comments,
+      activities,
+    ]
+  );
 
   // Synchronous render gate: never render a profile shell while auth is loading OR while authSession.uid hasn't matched user.uid
   if (isLoading || (isAuthenticated && (!user || !isAuthWorkspaceReady || !authenticatedProfile))) {
@@ -1166,7 +1727,8 @@ export default function App() {
       <Header
         currentUser={currentUser}
         activeProfile={activeProfile}
-        animes={displayedAnimes}
+        animes={exposedAnimes}
+        searchableProfiles={isAuthenticated ? Object.values(authOtherProfilesMap) : undefined}
         notifications={notifications}
         isNotifOpen={isNotifOpen}
         onToggleNotif={setIsNotifOpen}
@@ -1179,11 +1741,13 @@ export default function App() {
           setIsFollowersOpen(true);
         }}
         onSelectProfile={handleSelectProfile}
+        onSelectAnime={handleSelectAnimeFromSearch}
         onMarkNotificationAsRead={handleMarkNotificationAsRead}
         onMarkNotificationsAsRead={handleMarkNotificationsAsRead}
         onMarkAllNotificationsAsRead={handleMarkAllNotificationsAsRead}
         onSelectNotification={handleSelectNotification}
-        onNavigateTab={(tab) => setActiveTab(tab)}
+        onSelectNotificationActor={handleSelectNotificationActor}
+        onNavigateTab={handleTabChange}
         onAcceptRequest={handleAcceptRequest}
         onRejectRequest={handleRejectRequest}
         isAuthenticated={isAuthenticated}
@@ -1227,10 +1791,10 @@ export default function App() {
         {/* Navigation Tabs Bar */}
         <TabsNavigation
           activeTab={activeTab}
-          onTabChange={setActiveTab}
-          animeCount={displayedAnimes.length}
+          onTabChange={handleTabChange}
+          animeCount={activeProfileAnimeStats.totalEntries}
           commentsCount={displayedComments.length}
-          favoritesCount={displayedAnimes.filter(a => a.isFavorite).length}
+          favoritesCount={exposedAnimes.filter(a => a.isFavorite).length}
           isPrivateLocked={isPrivateLocked}
         />
 
@@ -1247,30 +1811,41 @@ export default function App() {
               {(activeTab === 'overview' || activeTab === 'favorites') && (
                 <OverviewTab
                   profile={activeProfile}
-                  animes={displayedAnimes}
+                  animes={exposedAnimes}
+                  animeStats={activeProfileAnimeStats}
+                  canAccessAnimeLists={canAccessActiveProfileAnimeList}
                   favoriteCharacters={displayedFavoriteCharacters}
                   favoriteCompanies={displayedFavoriteCompanies}
                   favoritePeople={displayedFavoritePeople}
                   comments={displayedComments}
                   activities={displayedActivities}
                   isOwnProfile={isOwnProfile}
-                  onNavigateTab={setActiveTab}
+                  onNavigateTab={handleTabChange}
+                  onSelectAnimeStatus={handleSelectAnimeStatus}
                   onToggleFavorite={handleToggleFavorite}
                 />
               )}
 
               {activeTab === 'animes' && (
-                !isOwnProfile && activeProfile.privacySettings?.showAnimeList === false ? (
-                  <div className="rounded-2xl border border-purple-900/30 bg-[#130E24] p-8 text-center space-y-2">
+                !canAccessActiveProfileAnimeList ? (
+                  <div
+                    data-testid="private-anime-list-notice"
+                    className="rounded-2xl border border-purple-900/30 bg-[#130E24] p-8 text-center space-y-2"
+                  >
                     <p className="text-sm font-semibold text-white">Lista de Animes Privada</p>
                     <p className="text-xs text-purple-300/60 max-w-sm mx-auto">
-                      O usuário optou por manter sua lista de animes oculta em suas preferências de privacidade.
+                      O usuário configurou suas listas de animes como privadas. As estatísticas numéricas continuam visíveis na visão geral, mas os animes das listas não podem ser abertos por visitantes.
                     </p>
                   </div>
                 ) : (
                   <AnimeListTab
-                    animes={displayedAnimes}
+                    animes={exposedAnimes}
                     isOwnProfile={isOwnProfile}
+                    selectedStatusFilter={selectedAnimeStatusFilter}
+                    filterSyncKey={animeFilterSyncKey}
+                    selectedAnimeId={selectedAnimeDetailId}
+                    onClearSelectedAnime={() => setSelectedAnimeDetailId(null)}
+                    isListPrivateForVisitors={activeProfile.privacySettings?.showAnimeList === false}
                     onUpdateEpisode={handleUpdateEpisode}
                     onToggleFavorite={handleToggleFavorite}
                     onUpdateStatus={handleUpdateStatus}
@@ -1311,7 +1886,10 @@ export default function App() {
                     </p>
                   </div>
                 ) : (
-                  <ActivityTab activities={displayedActivities} />
+                  <ActivityTab
+                    activities={displayedActivities}
+                    highlightedActivityId={highlightedActivityId}
+                  />
                 )
               )}
             </>

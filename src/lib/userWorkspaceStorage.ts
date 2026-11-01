@@ -21,8 +21,22 @@ import type {
   FollowUser,
   FollowRequest,
 } from '../types';
+import {
+  computeAnimeStats,
+  EMPTY_ANIME_STATS,
+  sanitizeAnimeStatsSummary,
+  type AnimeStatsSummary,
+} from '../utils/animeStats';
 
 export const USER_WORKSPACE_STORAGE_PREFIX = 'hikari_user_workspace_v1:';
+export const PUBLIC_PROFILES_STORAGE_KEY = 'hikari_public_profiles_v1';
+
+export interface PublicProfileProjection {
+  profile: UserProfile;
+  animeStats: AnimeStatsSummary;
+  publicAnimes: AnimeItem[];
+  updatedAtMs: number;
+}
 
 export type FirestoreSyncStatus =
   | 'idle'
@@ -194,17 +208,22 @@ function sanitizeOverrides(raw: unknown): UserProfileOverrides {
   }
   if (typeof src.privacySettings === 'object' && src.privacySettings !== null) {
     const ps = src.privacySettings as Record<string, unknown>;
-    if (
-      typeof ps.showAnimeList === 'boolean' &&
-      typeof ps.showFavorites === 'boolean' &&
-      typeof ps.showActivity === 'boolean' &&
-      typeof ps.showCommentsOnProfile === 'boolean'
-    ) {
+    const hasAnyPrivacyKey =
+      typeof ps.showAnimeList === 'boolean' ||
+      typeof ps.showFavorites === 'boolean' ||
+      typeof ps.showActivity === 'boolean' ||
+      typeof ps.showCommentsOnProfile === 'boolean';
+    if (hasAnyPrivacyKey) {
       overrides.privacySettings = {
-        showAnimeList: ps.showAnimeList,
-        showFavorites: ps.showFavorites,
-        showActivity: ps.showActivity,
-        showCommentsOnProfile: ps.showCommentsOnProfile,
+        showAnimeList: typeof ps.showAnimeList === 'boolean' ? ps.showAnimeList : true,
+        showFavorites: typeof ps.showFavorites === 'boolean' ? ps.showFavorites : true,
+        showActivity: typeof ps.showActivity === 'boolean' ? ps.showActivity : true,
+        showCommentsOnProfile:
+          typeof ps.showCommentsOnProfile === 'boolean'
+            ? ps.showCommentsOnProfile
+            : typeof src.showCommentsOnProfile === 'boolean'
+            ? src.showCommentsOnProfile
+            : true,
       };
     }
   }
@@ -564,3 +583,201 @@ export async function saveUserWorkspaceToFirestore(
     return 'error';
   }
 }
+
+/**
+ * Writes a sanitized public projection of an authenticated user's profile so
+ * other users can visit the profile without ever having read access to private
+ * workspaces or private anime lists. When showAnimeList is false (or profile is
+ * private), publicAnimes is stripped to [] at write time while numeric stats remain.
+ */
+export function syncPublicProfileProjection(
+  profile: UserProfile,
+  animes: AnimeItem[],
+  updatedAtMs: number = Date.now()
+): void {
+  const cleanUid = profile.id.trim();
+  if (!cleanUid || typeof window === 'undefined') return;
+
+  const canExposeAnimeItems =
+    !profile.isPrivate && profile.privacySettings?.showAnimeList !== false;
+
+  const projection: PublicProfileProjection = {
+    profile: {
+      id: cleanUid,
+      username: profile.username,
+      displayName: profile.displayName,
+      avatarUrl: profile.avatarUrl,
+      bannerUrl: profile.bannerUrl,
+      bio: profile.bio,
+      createdAt: profile.createdAt,
+      createdAtTimestamp: profile.createdAtTimestamp,
+      followersCount: profile.followersCount,
+      followingCount: profile.followingCount,
+      isPrivate: Boolean(profile.isPrivate),
+      showCommentsOnProfile: Boolean(profile.showCommentsOnProfile),
+      privacySettings: {
+        showAnimeList: profile.privacySettings?.showAnimeList !== false,
+        showFavorites: profile.privacySettings?.showFavorites !== false,
+        showActivity: profile.privacySettings?.showActivity !== false,
+        showCommentsOnProfile:
+          profile.privacySettings?.showCommentsOnProfile ?? profile.showCommentsOnProfile,
+      },
+      externalAccounts: {
+        anilist: { connected: false },
+        mal: { connected: false },
+      },
+    },
+    animeStats: computeAnimeStats(animes),
+    publicAnimes: canExposeAnimeItems ? animes.slice(0, 2000) : [],
+    updatedAtMs: Math.max(0, Math.floor(updatedAtMs)),
+  };
+
+  try {
+    const raw = window.localStorage.getItem(PUBLIC_PROFILES_STORAGE_KEY);
+    const parsed =
+      raw && typeof JSON.parse(raw) === 'object' && JSON.parse(raw) !== null
+        ? (JSON.parse(raw) as Record<string, unknown>)
+        : {};
+    parsed[cleanUid] = projection;
+    window.localStorage.setItem(PUBLIC_PROFILES_STORAGE_KEY, JSON.stringify(parsed));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+export function readPublicProfilesMap(
+  excludeUid?: string
+): Record<string, PublicProfileProjection> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(PUBLIC_PROFILES_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) return {};
+
+    const result: Record<string, PublicProfileProjection> = {};
+    for (const [uid, entry] of Object.entries(parsed as Record<string, unknown>)) {
+      if (excludeUid && uid === excludeUid) continue;
+      if (typeof entry !== 'object' || entry === null) continue;
+      const rec = entry as Record<string, unknown>;
+      if (typeof rec.profile !== 'object' || rec.profile === null) continue;
+      const p = rec.profile as Record<string, unknown>;
+      if (typeof p.id !== 'string' || p.id !== uid || typeof p.username !== 'string') continue;
+
+      const overrides = sanitizeOverrides(p);
+      const showAnimeList = overrides.privacySettings?.showAnimeList !== false;
+      const isPrivate = Boolean(p.isPrivate);
+      const canExpose = !isPrivate && showAnimeList;
+
+      const safeProfile: UserProfile = {
+        id: uid,
+        username: p.username,
+        displayName: typeof p.displayName === 'string' ? p.displayName : p.username,
+        avatarUrl: typeof p.avatarUrl === 'string' ? p.avatarUrl : '',
+        bannerUrl: typeof p.bannerUrl === 'string' ? p.bannerUrl : '',
+        bio: typeof p.bio === 'string' ? p.bio : '',
+        createdAt: typeof p.createdAt === 'string' ? p.createdAt : '',
+        createdAtTimestamp:
+          typeof p.createdAtTimestamp === 'number' && Number.isFinite(p.createdAtTimestamp)
+            ? p.createdAtTimestamp
+            : 0,
+        followersCount: overrides.followersCount ?? 0,
+        followingCount: overrides.followingCount ?? 0,
+        isPrivate,
+        showCommentsOnProfile: overrides.showCommentsOnProfile ?? true,
+        privacySettings: overrides.privacySettings ?? {
+          showAnimeList: true,
+          showFavorites: true,
+          showActivity: true,
+          showCommentsOnProfile: true,
+        },
+        externalAccounts: {
+          anilist: { connected: false },
+          mal: { connected: false },
+        },
+      };
+
+      const rawPublicAnimes =
+        canExpose && Array.isArray(rec.publicAnimes) ? (rec.publicAnimes as AnimeItem[]) : [];
+
+      const safeStats =
+        sanitizeAnimeStatsSummary(rec.animeStats) ??
+        (rawPublicAnimes.length > 0 ? computeAnimeStats(rawPublicAnimes) : EMPTY_ANIME_STATS);
+
+      result[uid] = {
+        profile: safeProfile,
+        animeStats: safeStats,
+        publicAnimes: canExpose ? rawPublicAnimes : [],
+        updatedAtMs:
+          typeof rec.updatedAtMs === 'number' && Number.isFinite(rec.updatedAtMs)
+            ? Math.max(0, Math.floor(rec.updatedAtMs))
+            : 0,
+      };
+    }
+
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+export async function loadPublicProfileFromFirestore(
+  targetUid: string
+): Promise<UserProfile | null> {
+  const cleanUid = targetUid.trim();
+  if (!cleanUid || !firebaseConfigStatus.isInitialized || !db) {
+    return null;
+  }
+
+  try {
+    const profileRef = doc(db, 'users', cleanUid);
+    const snap = await getDoc(profileRef);
+    if (!snap.exists()) return null;
+    const data = snap.data();
+    if (data.uid !== cleanUid || typeof data.username !== 'string') return null;
+
+    const overrides = sanitizeOverrides(data);
+    const createdAtTs = data.createdAt as Timestamp | undefined;
+    const createdMs =
+      createdAtTs && typeof createdAtTs.toMillis === 'function' ? createdAtTs.toMillis() : 0;
+    const formattedCreatedAt =
+      createdMs > 0
+        ? new Date(createdMs).toLocaleDateString('pt-BR', {
+            day: '2-digit',
+            month: 'long',
+            year: 'numeric',
+          })
+        : '';
+
+    return {
+      id: cleanUid,
+      username: data.username,
+      displayName:
+        typeof data.displayName === 'string' && data.displayName.trim()
+          ? data.displayName.trim()
+          : data.username,
+      avatarUrl: typeof data.avatarUrl === 'string' ? data.avatarUrl : '',
+      bannerUrl: typeof data.bannerUrl === 'string' ? data.bannerUrl : '',
+      bio: typeof data.bio === 'string' ? data.bio : '',
+      createdAt: formattedCreatedAt,
+      createdAtTimestamp: createdMs,
+      followersCount: overrides.followersCount ?? 0,
+      followingCount: overrides.followingCount ?? 0,
+      isPrivate: Boolean(data.isPrivate),
+      showCommentsOnProfile: overrides.showCommentsOnProfile ?? true,
+      privacySettings: overrides.privacySettings ?? {
+        showAnimeList: true,
+        showFavorites: true,
+        showActivity: true,
+        showCommentsOnProfile: true,
+      },
+      externalAccounts: {
+        anilist: { connected: false },
+        mal: { connected: false },
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
