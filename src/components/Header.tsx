@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { 
   Bell, 
   Search, 
@@ -29,6 +30,7 @@ interface HeaderProps {
   onOpenFollowers: (initialTab?: 'followers' | 'following' | 'requests') => void;
   onSelectProfile: (userId: string) => void;
   onMarkNotificationAsRead: (id: string) => void;
+  onMarkNotificationsAsRead?: (ids: string[]) => void;
   onMarkAllNotificationsAsRead: () => void;
   onSelectNotification: (notif: NotificationItem) => void;
   onNavigateTab: (tab: 'overview' | 'animes' | 'comments' | 'about' | 'activity' | 'favorites') => void;
@@ -46,6 +48,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenFollowers,
   onSelectProfile,
   onMarkNotificationAsRead,
+  onMarkNotificationsAsRead,
   onMarkAllNotificationsAsRead,
   onSelectNotification,
   onNavigateTab,
@@ -58,6 +61,11 @@ export const Header: React.FC<HeaderProps> = ({
 
   const userMenuRef = useRef<HTMLDivElement>(null);
   const notifRef = useRef<HTMLDivElement>(null);
+  const notifPanelRef = useRef<HTMLDivElement>(null);
+  const notifListRef = useRef<HTMLDivElement>(null);
+  const viewTimersRef = useRef<Map<string, number>>(new Map());
+  const pendingReadIdsRef = useRef<Set<string>>(new Set());
+  const flushScheduledRef = useRef(false);
   const searchRef = useRef<HTMLDivElement>(null);
 
   const unreadCount = notifications.filter(n => !n.isRead).length;
@@ -65,19 +73,137 @@ export const Header: React.FC<HeaderProps> = ({
   // Close dropdowns on outside click
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
-      if (userMenuRef.current && !userMenuRef.current.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (userMenuRef.current && !userMenuRef.current.contains(target)) {
         setIsUserMenuOpen(false);
       }
-      if (notifRef.current && !notifRef.current.contains(event.target as Node)) {
+      if (
+        notifRef.current &&
+        !notifRef.current.contains(target) &&
+        (!notifPanelRef.current || !notifPanelRef.current.contains(target))
+      ) {
         onToggleNotif(false);
       }
-      if (searchRef.current && !searchRef.current.contains(event.target as Node)) {
+      if (searchRef.current && !searchRef.current.contains(target)) {
         setIsSearchOpen(false);
       }
     }
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [onToggleNotif]);
+
+  // Close notifications panel on Escape key
+  useEffect(() => {
+    if (!isNotifOpen) return;
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        onToggleNotif(false);
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isNotifOpen, onToggleNotif]);
+
+  // Clear pending view-tracking timers whenever the panel closes or unmounts
+  useEffect(() => {
+    if (!isNotifOpen) {
+      viewTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
+      viewTimersRef.current.clear();
+      pendingReadIdsRef.current.clear();
+      flushScheduledRef.current = false;
+    }
+    return () => {
+      viewTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
+      viewTimersRef.current.clear();
+      pendingReadIdsRef.current.clear();
+      flushScheduledRef.current = false;
+    };
+  }, [isNotifOpen]);
+
+  // Mark unread notifications as read once they are effectively viewed inside the panel viewport
+  useEffect(() => {
+    if (!isNotifOpen) return;
+    const listEl = notifListRef.current;
+    if (!listEl || typeof IntersectionObserver === 'undefined') return;
+
+    const timers = viewTimersRef.current;
+    const unreadIds = new Set(notifications.filter((n) => !n.isRead).map((n) => n.id));
+
+    timers.forEach((timerId, id) => {
+      if (!unreadIds.has(id)) {
+        window.clearTimeout(timerId);
+        timers.delete(id);
+      }
+    });
+
+    if (unreadIds.size === 0) return;
+
+    const scheduleFlush = () => {
+      if (flushScheduledRef.current) return;
+      flushScheduledRef.current = true;
+      queueMicrotask(() => {
+        flushScheduledRef.current = false;
+        if (pendingReadIdsRef.current.size === 0) return;
+        const batch = Array.from(pendingReadIdsRef.current);
+        pendingReadIdsRef.current.clear();
+        if (onMarkNotificationsAsRead) {
+          onMarkNotificationsAsRead(batch);
+        } else {
+          batch.forEach((id) => onMarkNotificationAsRead(id));
+        }
+      });
+    };
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          const id = (entry.target as HTMLElement).dataset.notifId;
+          if (!id || !unreadIds.has(id)) return;
+
+          const rect = entry.boundingClientRect;
+          const inScreenViewport =
+            rect.bottom > 0 && rect.top < window.innerHeight && rect.height > 0;
+          const minRatio =
+            listEl.clientHeight > 0 && rect.height > listEl.clientHeight * 0.7 ? 0.35 : 0.65;
+          const isEffectivelyVisible =
+            entry.isIntersecting && entry.intersectionRatio >= minRatio && inScreenViewport;
+
+          if (isEffectivelyVisible) {
+            if (!timers.has(id)) {
+              const timerId = window.setTimeout(() => {
+                timers.delete(id);
+                pendingReadIdsRef.current.add(id);
+                scheduleFlush();
+              }, 250);
+              timers.set(id, timerId);
+            }
+          } else {
+            const existingTimer = timers.get(id);
+            if (existingTimer !== undefined) {
+              window.clearTimeout(existingTimer);
+              timers.delete(id);
+            }
+          }
+        });
+      },
+      {
+        root: listEl,
+        threshold: [0, 0.35, 0.65, 0.95]
+      }
+    );
+
+    const itemNodes = listEl.querySelectorAll<HTMLElement>('[data-notif-id]');
+    itemNodes.forEach((node) => {
+      const id = node.dataset.notifId;
+      if (id && unreadIds.has(id)) {
+        observer.observe(node);
+      }
+    });
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [isNotifOpen, notifications, onMarkNotificationAsRead, onMarkNotificationsAsRead]);
 
   const searchResults = searchQuery.trim() ? [
     { type: 'user', id: 'usr_hikari_001', name: 'Ren Amano', sub: '@ren_hikari (Meu Perfil)', avatar: currentUser.avatarUrl },
@@ -198,9 +324,14 @@ export const Header: React.FC<HeaderProps> = ({
           <div ref={notifRef} className="relative">
             <button
               type="button"
-              onClick={() => onToggleNotif(!isNotifOpen)}
+              onClick={() => {
+                setIsUserMenuOpen(false);
+                setIsSearchOpen(false);
+                onToggleNotif(!isNotifOpen);
+              }}
               className="relative flex h-9 w-9 items-center justify-center rounded-xl border border-purple-900/40 bg-[#130E24] text-purple-300 transition-all hover:border-purple-600/50 hover:bg-purple-900/20 hover:text-white focus:outline-none cursor-pointer"
               aria-label="Notificações"
+              aria-expanded={isNotifOpen}
             >
               <Bell className="h-4 w-4" />
               {unreadCount > 0 && (
@@ -210,157 +341,152 @@ export const Header: React.FC<HeaderProps> = ({
               )}
             </button>
 
-            {/* Notifications Panel: Viewport-fixed so it is ALWAYS visible anywhere on page */}
-            {isNotifOpen && (
+            {/* Notifications Panel rendered via Portal in document.body so backdrop-filter on <header> never traps position:fixed */}
+            {isNotifOpen && typeof document !== 'undefined' && createPortal(
               <>
-                {/* Backdrop overlay */}
-                <div 
-                  className="fixed inset-0 z-40 bg-black/40 backdrop-blur-xs transition-opacity"
+                {/* Viewport-fixed backdrop overlay */}
+                <div
+                  className="fixed inset-0 z-40 bg-black/40 backdrop-blur-xs touch-none overscroll-contain transition-opacity"
+                  onWheel={(e) => e.preventDefault()}
                   onClick={(e) => {
                     e.stopPropagation();
                     onToggleNotif(false);
                   }}
-                  onTouchMove={(e) => {
-                    if (e.target === e.currentTarget) {
-                      e.preventDefault();
-                    }
-                  }}
                 />
 
-                {/* Fixed Panel Container */}
-                <div 
-                  className="fixed right-2 sm:right-6 lg:right-8 top-16 z-50 w-[calc(100vw-1rem)] sm:w-96 max-w-sm rounded-2xl border border-purple-800/40 bg-[#130E24] p-3.5 shadow-2xl shadow-black/95 backdrop-blur-xl animate-in fade-in slide-in-from-top-2 duration-150"
-                  style={{ maxHeight: 'calc(100vh - 5rem)' }}
-                  onClick={(e) => e.stopPropagation()}
-                  onTouchMove={(e) => e.stopPropagation()}
-                >
-                  {/* Popover Header with clean alignment and formatting */}
-                  <div className="flex items-center justify-between gap-2 border-b border-purple-900/40 pb-3 px-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-bold text-white">Notificações</span>
-                    {unreadCount > 0 && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-purple-950/90 border border-purple-700/50 px-2 py-0.5 text-[11px] font-medium text-purple-300">
-                        <span className="font-mono tabular-nums font-semibold text-purple-200">{unreadCount}</span>
-                        <span>{unreadCount === 1 ? 'nova' : 'novas'}</span>
-                      </span>
-                    )}
-                  </div>
-                  {unreadCount > 0 && (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onMarkAllNotificationsAsRead();
-                      }}
-                      className="text-xs text-purple-400 hover:text-purple-200 font-medium transition-colors cursor-pointer"
+                {/* Viewport-fixed panel wrapper aligned with header container */}
+                <div className="fixed inset-x-0 top-16 z-50 pointer-events-none">
+                  <div className="mx-auto flex max-w-7xl justify-end px-3 sm:px-6 lg:px-8">
+                    <div
+                      ref={notifPanelRef}
+                      role="dialog"
+                      aria-label="Notificações"
+                      className="pointer-events-auto flex w-full max-w-full sm:w-96 sm:max-w-sm max-h-[min(25rem,calc(100dvh-5rem))] sm:max-h-[min(28rem,calc(100dvh-5.5rem))] flex-col overflow-hidden rounded-2xl border border-purple-800/40 bg-[#130E24] p-3.5 shadow-2xl shadow-black/95 backdrop-blur-xl animate-in fade-in slide-in-from-top-2 duration-150"
+                      onClick={(e) => e.stopPropagation()}
                     >
-                      Marcar todas como lidas
-                    </button>
-                  )}
-                </div>
-
-                {/* Notifications List */}
-                <div className="mt-2 max-h-80 overflow-y-auto space-y-2 pr-1 overscroll-contain">
-                  {notifications.length === 0 ? (
-                    <div className="py-8 text-center text-xs text-purple-300/50">
-                      Nenhuma notificação por aqui.
-                    </div>
-                  ) : (
-                    notifications.map((notif) => (
-                      <div
-                        key={notif.id}
-                        onClick={() => {
-                          onMarkNotificationAsRead(notif.id);
-                          onToggleNotif(false);
-                          onSelectNotification(notif);
-                        }}
-                        className={`group relative flex flex-col gap-2 rounded-xl p-2.5 transition-all duration-150 active:scale-[0.985] cursor-pointer ${
-                          notif.isRead 
-                            ? 'bg-[#18122c]/40 hover:bg-[#1c1533]' 
-                            : 'bg-purple-950/40 border border-purple-700/30 hover:bg-purple-900/40'
-                        }`}
-                      >
-                        <div className="flex items-start gap-3">
-                          <img
-                            src={notif.actor.avatarUrl}
-                            alt={notif.actor.displayName}
-                            className="h-8 w-8 rounded-full object-cover border border-purple-500/30 shrink-0 mt-0.5"
-                          />
-                          <div className="flex-1 min-w-0">
-                            <p className="text-xs text-purple-200 leading-snug">
-                              <strong className="text-white font-medium">{notif.actor.displayName}</strong>{' '}
-                              {notif.message}
-                            </p>
-                            <span className="text-[10px] text-purple-400/60 block mt-1">
-                              {notif.createdAt}
+                      {/* Popover Header (sticky/pinned via shrink-0 while list scrolls) */}
+                      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-purple-900/40 pb-3 px-1">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="text-sm font-bold text-white">Notificações</span>
+                          {unreadCount > 0 && (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-purple-950/90 border border-purple-700/50 px-2 py-0.5 text-[11px] font-medium text-purple-300 shrink-0">
+                              <span className="font-mono tabular-nums font-semibold text-purple-200">{unreadCount}</span>
+                              <span>{unreadCount === 1 ? 'nova' : 'novas'}</span>
                             </span>
-                          </div>
-                          {!notif.isRead && (
-                            <div className="h-2 w-2 rounded-full bg-purple-500 shrink-0 mt-2" />
                           )}
                         </div>
-
-                        {/* Interactive Accept / Reject controls for follow requests */}
-                        {notif.type === 'follow_request' && (
-                          <div className="ml-11 flex items-center gap-2 pt-1">
-                            {notif.handled === 'accepted' ? (
-                              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-400 bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-500/30">
-                                <Check className="h-3 w-3" /> Solicitação aceita
-                              </span>
-                            ) : notif.handled === 'rejected' ? (
-                              <span className="text-[11px] font-medium text-neutral-400 bg-neutral-900/60 px-2 py-0.5 rounded border border-neutral-700/40">
-                                Solicitação recusada
-                              </span>
-                            ) : (
-                              <>
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    onAcceptRequest(notif.contextData?.requestId || 'req_01', notif.id);
-                                  }}
-                                  className="rounded-lg bg-purple-600 hover:bg-purple-500 px-3 py-1 text-xs font-semibold text-white shadow-sm transition-all active:scale-95 cursor-pointer"
-                                >
-                                  Aceitar
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    onRejectRequest(notif.contextData?.requestId || 'req_01', notif.id);
-                                  }}
-                                  className="rounded-lg bg-neutral-800 hover:bg-neutral-700 border border-neutral-700/50 px-3 py-1 text-xs font-semibold text-neutral-300 transition-all active:scale-95 cursor-pointer"
-                                >
-                                  Recusar
-                                </button>
-                              </>
-                            )}
-                          </div>
+                        {notifications.length > 0 && (
+                          <button
+                            type="button"
+                            disabled={unreadCount === 0}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onMarkAllNotificationsAsRead();
+                            }}
+                            className={`shrink-0 text-xs font-medium transition-colors ${
+                              unreadCount > 0
+                                ? 'text-purple-400 hover:text-purple-200 cursor-pointer'
+                                : 'text-purple-400/40 cursor-default'
+                            }`}
+                          >
+                            Marcar todas como lidas
+                          </button>
                         )}
                       </div>
-                    ))
-                  )}
-                </div>
 
-                {/* Popover Footer: Replaces 'Gerenciar solicitações' with 'Marcar todas como lidas' */}
-                {unreadCount > 0 && (
-                  <div className="mt-2.5 border-t border-purple-900/30 pt-2.5 text-center">
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onMarkAllNotificationsAsRead();
-                      }}
-                      className="text-xs text-purple-400 hover:text-purple-200 font-medium transition-colors cursor-pointer"
-                    >
-                      Marcar todas como lidas
-                    </button>
+                      {/* Notifications List with preserved internal scroll */}
+                      <div
+                        ref={notifListRef}
+                        className="mt-2 min-h-0 flex-1 overflow-y-auto overscroll-contain space-y-2 pr-1"
+                      >
+                        {notifications.length === 0 ? (
+                          <div className="py-8 text-center text-xs text-purple-300/50">
+                            Nenhuma notificação por aqui.
+                          </div>
+                        ) : (
+                          notifications.map((notif) => (
+                            <div
+                              key={notif.id}
+                              data-notif-id={notif.id}
+                              onClick={() => {
+                                onMarkNotificationAsRead(notif.id);
+                                onToggleNotif(false);
+                                onSelectNotification(notif);
+                              }}
+                              className={`group relative flex flex-col gap-2 rounded-xl p-2.5 transition-all duration-150 active:scale-[0.985] cursor-pointer ${
+                                notif.isRead 
+                                  ? 'bg-[#18122c]/40 hover:bg-[#1c1533]' 
+                                  : 'bg-purple-950/40 border border-purple-700/30 hover:bg-purple-900/40'
+                              }`}
+                            >
+                              <div className="flex items-start gap-3">
+                                <img
+                                  src={notif.actor.avatarUrl}
+                                  alt={notif.actor.displayName}
+                                  className="h-8 w-8 rounded-full object-cover border border-purple-500/30 shrink-0 mt-0.5"
+                                />
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-xs text-purple-200 leading-snug">
+                                    <strong className="text-white font-medium">{notif.actor.displayName}</strong>{' '}
+                                    {notif.message}
+                                  </p>
+                                  <span className="text-[10px] text-purple-400/60 block mt-1">
+                                    {notif.createdAt}
+                                  </span>
+                                </div>
+                                {!notif.isRead && (
+                                  <div className="h-2 w-2 rounded-full bg-purple-500 shrink-0 mt-2" />
+                                )}
+                              </div>
+
+                              {/* Interactive Accept / Reject controls for follow requests */}
+                              {notif.type === 'follow_request' && (
+                                <div className="ml-11 flex items-center gap-2 pt-1">
+                                  {notif.handled === 'accepted' ? (
+                                    <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-400 bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-500/30">
+                                      <Check className="h-3 w-3" /> Solicitação aceita
+                                    </span>
+                                  ) : notif.handled === 'rejected' ? (
+                                    <span className="text-[11px] font-medium text-neutral-400 bg-neutral-900/60 px-2 py-0.5 rounded border border-neutral-700/40">
+                                      Solicitação recusada
+                                    </span>
+                                  ) : (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.preventDefault();
+                                          e.stopPropagation();
+                                          onAcceptRequest(notif.contextData?.requestId || 'req_01', notif.id);
+                                        }}
+                                        className="rounded-lg bg-purple-600 hover:bg-purple-500 px-3 py-1 text-xs font-semibold text-white shadow-sm transition-all active:scale-95 cursor-pointer"
+                                      >
+                                        Aceitar
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.preventDefault();
+                                          e.stopPropagation();
+                                          onRejectRequest(notif.contextData?.requestId || 'req_01', notif.id);
+                                        }}
+                                        className="rounded-lg bg-neutral-800 hover:bg-neutral-700 border border-neutral-700/50 px-3 py-1 text-xs font-semibold text-neutral-300 transition-all active:scale-95 cursor-pointer"
+                                      >
+                                        Recusar
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
                   </div>
-                )}
-              </div>
-              </>
+                </div>
+              </>,
+              document.body
             )}
           </div>
 

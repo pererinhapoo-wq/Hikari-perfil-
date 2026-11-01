@@ -6,15 +6,20 @@ import {
   Star, 
   MessageSquare, 
   Bookmark,
+  RefreshCw,
+  PlusCircle,
   Calendar
 } from 'lucide-react';
 import { UserActivity } from '../../types';
+import { useCurrentTime, formatRelativeTime, formatExactDateTime } from '../../utils/relativeTime';
 
 interface ActivityTabProps {
   activities: UserActivity[];
 }
 
 export const ActivityTab: React.FC<ActivityTabProps> = ({ activities }) => {
+  const now = useCurrentTime();
+
   const getActivityIcon = (type: UserActivity['type']) => {
     switch (type) {
       case 'watched_ep':
@@ -27,6 +32,10 @@ export const ActivityTab: React.FC<ActivityTabProps> = ({ activities }) => {
         return <MessageSquare className="h-4 w-4 text-indigo-400" />;
       case 'added_favorite':
         return <Bookmark className="h-4 w-4 text-pink-400" />;
+      case 'status_changed':
+        return <RefreshCw className="h-4 w-4 text-sky-400" />;
+      case 'added_anime':
+        return <PlusCircle className="h-4 w-4 text-emerald-400" />;
       default:
         return <Activity className="h-4 w-4 text-purple-400" />;
     }
@@ -51,30 +60,37 @@ export const ActivityTab: React.FC<ActivityTabProps> = ({ activities }) => {
           </div>
         ) : (
           <div className="relative mt-6 pl-6 space-y-6 before:absolute before:left-2.5 before:top-2 before:bottom-2 before:w-0.5 before:bg-purple-900/40">
-            {activities.map((activity) => (
-              <div key={activity.id} className="relative group">
-                {/* Node icon */}
-                <div className="absolute -left-6 top-0 flex h-6 w-6 items-center justify-center rounded-full bg-[#130E24] border-2 border-purple-600/70 shadow-md">
-                  {getActivityIcon(activity.type)}
-                </div>
-
-                {/* Content */}
-                <div className="rounded-xl border border-purple-900/20 bg-[#17112c]/60 p-3.5 transition-colors group-hover:border-purple-600/40 group-hover:bg-[#1a1333]">
-                  <div className="flex flex-wrap items-center justify-between gap-1">
-                    <span className="text-sm font-semibold text-white">
-                      {activity.title}
-                    </span>
-                    <div className="flex items-center gap-1 text-[11px] text-purple-400/60 font-mono">
-                      <Calendar className="h-3 w-3" />
-                      <span>{activity.timestamp}</span>
-                    </div>
+            {activities.map((activity) => {
+              const relativeLabel = formatRelativeTime(activity.createdAtTimestamp, now, activity.timestamp, false);
+              const exactDate = formatExactDateTime(activity.createdAtTimestamp);
+              return (
+                <div key={activity.id} className="relative group">
+                  {/* Node icon */}
+                  <div className="absolute -left-6 top-0 flex h-6 w-6 items-center justify-center rounded-full bg-[#130E24] border-2 border-purple-600/70 shadow-md">
+                    {getActivityIcon(activity.type)}
                   </div>
-                  <p className="mt-1 text-xs text-purple-200/80">
-                    {activity.description}
-                  </p>
+
+                  {/* Content */}
+                  <div className="rounded-xl border border-purple-900/20 bg-[#17112c]/60 p-3.5 transition-colors group-hover:border-purple-600/40 group-hover:bg-[#1a1333]">
+                    <div className="flex flex-wrap items-center justify-between gap-1">
+                      <span className="text-sm font-semibold text-white">
+                        {activity.title}
+                      </span>
+                      <div
+                        className="flex items-center gap-1 text-[11px] text-purple-400/60 font-mono"
+                        title={exactDate || undefined}
+                      >
+                        <Calendar className="h-3 w-3" />
+                        <span>{relativeLabel}</span>
+                      </div>
+                    </div>
+                    <p className="mt-1 text-xs text-purple-200/80">
+                      {activity.description}
+                    </p>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

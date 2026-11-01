@@ -60,18 +60,15 @@ const AnimeEditModalContent: React.FC<AnimeEditModalContentProps> = ({
   // Background scroll lock without position:fixed or scrollTo (preserves exact page position)
   useEffect(() => {
     const scrollBarWidth = window.innerWidth - document.documentElement.clientWidth;
-    const prevHtmlOverflow = document.documentElement.style.overflow;
     const prevBodyOverflow = document.body.style.overflow;
     const prevPaddingRight = document.body.style.paddingRight;
 
-    document.documentElement.style.overflow = 'hidden';
     document.body.style.overflow = 'hidden';
     if (scrollBarWidth > 0) {
       document.body.style.paddingRight = `${scrollBarWidth}px`;
     }
 
     return () => {
-      document.documentElement.style.overflow = prevHtmlOverflow;
       document.body.style.overflow = prevBodyOverflow;
       document.body.style.paddingRight = prevPaddingRight;
     };
@@ -94,27 +91,47 @@ const AnimeEditModalContent: React.FC<AnimeEditModalContentProps> = ({
     };
   }, [isStatusDropdownOpen]);
 
-  // Stepper handlers
+  // Stepper handlers inside "Gerenciar progresso"
   const handleDecrementEpisode = () => {
-    setCurrentEpisode(prev => Math.max(0, prev - 1));
-  };
-
-  const handleIncrementEpisode = () => {
-    setCurrentEpisode(prev => {
-      const next = Math.min(anime.totalEpisodes, prev + 1);
-      if (next === anime.totalEpisodes && status !== 'completed') {
-        setStatus('completed');
+    setCurrentEpisode((prev) => {
+      const next = Math.max(0, prev - 1);
+      if (status === 'completed' && next < anime.totalEpisodes) {
+        setStatus(next === 0 ? 'planned' : 'watching');
       }
       return next;
     });
   };
 
-  const handleEpisodeInputChange = (val: number) => {
-    if (isNaN(val)) return;
+  const handleIncrementEpisode = () => {
+    setCurrentEpisode((prev) => {
+      const next = Math.min(anime.totalEpisodes, prev + 1);
+      if (next === anime.totalEpisodes && anime.totalEpisodes > 0 && status !== 'completed') {
+        setStatus('completed');
+      } else if (next > 0 && status === 'planned') {
+        setStatus('watching');
+      }
+      return next;
+    });
+  };
+
+  const handleEpisodeInputChange = (raw: string) => {
+    if (raw === '') {
+      setCurrentEpisode(0);
+      if (status === 'completed' && anime.totalEpisodes > 0) {
+        setStatus('planned');
+      }
+      return;
+    }
+    const val = parseInt(raw, 10);
+    if (Number.isNaN(val)) return;
     const clamped = Math.min(anime.totalEpisodes, Math.max(0, val));
     setCurrentEpisode(clamped);
-    if (clamped === anime.totalEpisodes && status !== 'completed') {
+    if (clamped === anime.totalEpisodes && anime.totalEpisodes > 0 && status !== 'completed') {
       setStatus('completed');
+    } else if (status === 'completed' && clamped < anime.totalEpisodes) {
+      setStatus(clamped === 0 ? 'planned' : 'watching');
+    } else if (clamped > 0 && status === 'planned') {
+      setStatus('watching');
     }
   };
 
@@ -123,12 +140,15 @@ const AnimeEditModalContent: React.FC<AnimeEditModalContentProps> = ({
     setStatus(newStatus);
     if (newStatus === 'completed') {
       setCurrentEpisode(anime.totalEpisodes);
+    } else if (status === 'completed' && currentEpisode >= anime.totalEpisodes && anime.totalEpisodes > 0) {
+      setCurrentEpisode(newStatus === 'planned' ? 0 : Math.max(0, anime.totalEpisodes - 1));
     }
     setIsStatusDropdownOpen(false);
   };
 
   // Save handler
   const handleSave = () => {
+    if (isSaving) return;
     setIsSaving(true);
     setSaveSuccess(true);
     onSave({
@@ -136,16 +156,10 @@ const AnimeEditModalContent: React.FC<AnimeEditModalContentProps> = ({
       status,
       rating
     });
-
-    setTimeout(() => {
-      setIsSaving(false);
-      setSaveSuccess(false);
-      onClose();
-    }, 500);
   };
 
   const currentStatusObj = STATUS_OPTIONS.find(s => s.id === status) || STATUS_OPTIONS[0];
-  const progressPercent = Math.round((currentEpisode / anime.totalEpisodes) * 100);
+  const progressPercent = anime.totalEpisodes > 0 ? Math.round((currentEpisode / anime.totalEpisodes) * 100) : 0;
 
   return (
     <div 
@@ -277,7 +291,7 @@ const AnimeEditModalContent: React.FC<AnimeEditModalContentProps> = ({
                   min={0}
                   max={anime.totalEpisodes}
                   value={currentEpisode}
-                  onChange={(e) => handleEpisodeInputChange(parseInt(e.target.value, 10))}
+                  onChange={(e) => handleEpisodeInputChange(e.target.value)}
                   className="w-full text-center rounded-xl border border-purple-800/50 bg-[#0d091a] py-2 px-3 text-xs sm:text-sm font-mono font-bold text-white focus:border-purple-500 focus:outline-none"
                 />
               </div>
@@ -322,6 +336,9 @@ const AnimeEditModalContent: React.FC<AnimeEditModalContentProps> = ({
               className="w-full rounded-xl border border-purple-800/50 bg-[#0d091a] px-3.5 py-2.5 text-xs text-white focus:border-purple-500 focus:outline-none cursor-pointer"
             >
               <option value={0}>Sem nota</option>
+              {rating > 0 && !Number.isInteger(rating) && (
+                <option value={rating}>{rating} — Nota atual</option>
+              )}
               <option value={10}>10 — Obra-prima</option>
               <option value={9}>9 — Excelente</option>
               <option value={8}>8 — Muito bom</option>

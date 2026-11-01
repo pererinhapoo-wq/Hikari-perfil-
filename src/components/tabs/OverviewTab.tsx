@@ -1,17 +1,14 @@
 import React from 'react';
 import { 
-  Tv, 
-  CheckCircle2, 
-  Clock, 
-  Star, 
   MessageSquare, 
   ArrowRight, 
   TrendingUp,
-  Sparkles,
+  BarChart3,
   Lock
 } from 'lucide-react';
 import { UserProfile, AnimeItem, HikariComment, UserActivity } from '../../types';
 import { FavoritesTab } from './FavoritesTab';
+import { useCurrentTime, formatRelativeTime, formatExactDateTime } from '../../utils/relativeTime';
 
 interface OverviewTabProps {
   profile: UserProfile;
@@ -32,81 +29,280 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
   onNavigateTab,
   onToggleFavorite
 }) => {
-  const completedAnimes = animes.filter(a => a.status === 'completed');
-  const watchingAnimes = animes.filter(a => a.status === 'watching');
-  const favorites = animes.filter(a => a.isFavorite);
+  const now = useCurrentTime();
 
-  const totalEpisodesWatched = animes.reduce((acc, a) => {
-    if (a.status === 'completed') return acc + a.totalEpisodes;
-    return acc + a.currentEpisode;
-  }, 0);
+  // Deduplicate anime entries by ID so counts and totals never double-count
+  const uniqueAnimes = Array.from(new Map(animes.map(a => [a.id, a])).values());
 
-  const ratedAnimes = animes.filter(a => a.rating > 0);
-  const averageScore = ratedAnimes.length > 0 
-    ? (ratedAnimes.reduce((acc, a) => acc + a.rating, 0) / ratedAnimes.length).toFixed(1)
+  const watchingAnimes = uniqueAnimes.filter(a => a.status === 'watching');
+  const completedAnimes = uniqueAnimes.filter(a => a.status === 'completed');
+  const onHoldAnimes = uniqueAnimes.filter(a => a.status === 'on_hold');
+  const droppedAnimes = uniqueAnimes.filter(a => a.status === 'dropped');
+  const plannedAnimes = uniqueAnimes.filter(a => a.status === 'planned');
+  const favorites = uniqueAnimes.filter(a => a.isFavorite);
+
+  const totalEntries = uniqueAnimes.length;
+
+  // Episodes watched: calculated safely only when episode counters are valid numbers
+  const hasEpisodeData = uniqueAnimes.every(
+    a =>
+      typeof a.currentEpisode === 'number' &&
+      Number.isFinite(a.currentEpisode) &&
+      typeof a.totalEpisodes === 'number' &&
+      Number.isFinite(a.totalEpisodes)
+  );
+
+  const totalEpisodesWatched = hasEpisodeData
+    ? uniqueAnimes.reduce((acc, a) => {
+        const baseEps = a.status === 'completed' ? Math.max(0, a.totalEpisodes) : Math.max(0, a.currentEpisode);
+        const rewatchedEps =
+          typeof a.rewatchCount === 'number' && Number.isFinite(a.rewatchCount) && a.rewatchCount > 0
+            ? a.rewatchCount * Math.max(0, a.totalEpisodes)
+            : 0;
+        return acc + baseEps + rewatchedEps;
+      }, 0)
+    : 0;
+
+  // Mean Score: calculated strictly from valid ratings (> 0)
+  const ratedAnimes = uniqueAnimes.filter(
+    a => typeof a.rating === 'number' && Number.isFinite(a.rating) && a.rating > 0 && a.rating <= 10
+  );
+  const meanScoreFormatted = ratedAnimes.length > 0
+    ? (ratedAnimes.reduce((acc, a) => acc + a.rating, 0) / ratedAnimes.length).toFixed(2)
     : '—';
 
+  // Days Watched: calculated strictly when watched entries include real episodeDurationMinutes
+  const watchedEntries = uniqueAnimes.filter(
+    a => (a.status === 'completed' ? a.totalEpisodes : a.currentEpisode) > 0
+  );
+  const canCalculateDaysWatched =
+    totalEntries === 0 ||
+    watchedEntries.length === 0 ||
+    watchedEntries.every(
+      a =>
+        typeof a.episodeDurationMinutes === 'number' &&
+        Number.isFinite(a.episodeDurationMinutes) &&
+        a.episodeDurationMinutes > 0
+    );
+
+  const daysWatchedFormatted = !canCalculateDaysWatched
+    ? null
+    : watchedEntries.length === 0
+    ? '0.0'
+    : (
+        watchedEntries.reduce((acc, a) => {
+          const eps = a.status === 'completed' ? Math.max(0, a.totalEpisodes) : Math.max(0, a.currentEpisode);
+          const extraEps =
+            typeof a.rewatchCount === 'number' && Number.isFinite(a.rewatchCount) && a.rewatchCount > 0
+              ? a.rewatchCount * Math.max(0, a.totalEpisodes)
+              : 0;
+          return acc + (eps + extraEps) * (a.episodeDurationMinutes || 0);
+        }, 0) / 1440
+      ).toFixed(1);
+
+  // Rewatched: calculated strictly when rewatchCount metadata exists on entries
+  const hasRewatchData =
+    totalEntries > 0 &&
+    uniqueAnimes.some(a => typeof a.rewatchCount === 'number' && Number.isFinite(a.rewatchCount));
+  const rewatchedTotal = hasRewatchData
+    ? uniqueAnimes.reduce((acc, a) => acc + Math.max(0, a.rewatchCount || 0), 0)
+    : null;
+
+  // Proportional stacked bar segments (SVG viewBox width = 1000)
+  const barSegments = totalEntries > 0
+    ? [
+        { key: 'watching', count: watchingAnimes.length, fill: 'fill-emerald-500' },
+        { key: 'completed', count: completedAnimes.length, fill: 'fill-purple-500' },
+        { key: 'on_hold', count: onHoldAnimes.length, fill: 'fill-amber-400' },
+        { key: 'dropped', count: droppedAnimes.length, fill: 'fill-rose-500' },
+        { key: 'planned', count: plannedAnimes.length, fill: 'fill-indigo-300/60' }
+      ]
+    : [];
+
+  let cumulativeBarX = 0;
+  const renderedSegments = barSegments
+    .filter(seg => seg.count > 0)
+    .map(seg => {
+      const width = (seg.count / totalEntries) * 1000;
+      const x = cumulativeBarX;
+      cumulativeBarX += width;
+      return { ...seg, x, width };
+    });
+
   return (
-    <div className="space-y-6">
-      {/* KPI Stats Strip */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
-        <div className="rounded-2xl border border-purple-900/30 bg-[#130E24]/80 p-4 backdrop-blur-md">
-          <div className="flex items-center gap-2 text-xs font-medium text-purple-400">
-            <Tv className="h-4 w-4" />
-            <span>Total na Lista</span>
-          </div>
-          <div className="mt-2 font-mono text-2xl font-bold text-white tabular-nums">
-            {animes.length}
-          </div>
-          <div className="mt-1 text-[11px] text-purple-300/60">
-            {watchingAnimes.length} em exibição
-          </div>
-        </div>
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      {/* Left column: Anime Stats + Favorites + Currently Watching (2 columns) */}
+      <div className="lg:col-span-2 space-y-6 min-w-0">
+          {/* Anime Stats Section (MyAnimeList-inspired, Hikari dark-purple theme) */}
+          {!isOwnProfile && profile.privacySettings?.showAnimeList === false ? (
+            <div className="rounded-2xl border border-purple-900/30 bg-[#130E24]/60 p-5 text-center space-y-1">
+              <div className="flex items-center justify-center gap-2 text-purple-300">
+                <Lock className="h-4 w-4 text-purple-400" />
+                <span className="text-xs font-semibold text-white">Anime Stats Privado</span>
+              </div>
+              <p className="text-[11px] text-purple-300/60 max-w-sm mx-auto">
+                As estatísticas da lista de animes estão ocultas conforme as preferências de privacidade deste perfil.
+              </p>
+            </div>
+          ) : (
+            <section
+              aria-label="Anime Stats"
+              className="rounded-2xl border border-purple-900/30 bg-[#130E24] p-4 sm:p-5 shadow-xl space-y-4"
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between border-b border-purple-900/30 pb-3">
+                <div className="flex items-center gap-2">
+                  <BarChart3 className="h-4 w-4 text-purple-400" />
+                  <h2 className="text-sm sm:text-base font-bold text-white">Anime Stats</h2>
+                </div>
+              </div>
 
-        <div className="rounded-2xl border border-purple-900/30 bg-[#130E24]/80 p-4 backdrop-blur-md">
-          <div className="flex items-center gap-2 text-xs font-medium text-emerald-400">
-            <CheckCircle2 className="h-4 w-4" />
-            <span>Concluídos</span>
-          </div>
-          <div className="mt-2 font-mono text-2xl font-bold text-white tabular-nums">
-            {completedAnimes.length}
-          </div>
-          <div className="mt-1 text-[11px] text-purple-300/60">
-            Obras finalizadas
-          </div>
-        </div>
+              {/* Top Summary Bar: Days Watched & Mean Score */}
+              <div className="flex flex-wrap items-baseline justify-between gap-3 text-xs sm:text-sm">
+                <div className="flex items-baseline gap-2">
+                  <span className="font-semibold text-purple-300/90">Days Watched:</span>
+                  {daysWatchedFormatted !== null ? (
+                    <span className="font-mono text-base sm:text-lg font-bold text-white tabular-nums">
+                      {daysWatchedFormatted}
+                    </span>
+                  ) : (
+                    <span
+                      className="inline-flex items-baseline gap-1.5 text-purple-300/60"
+                      title="A duração em minutos por episódio ainda não está disponível nos registros atuais da lista."
+                    >
+                      <span className="font-mono text-sm font-semibold text-purple-200/80">—</span>
+                      <span className="text-[11px] text-purple-400/60">(duração indisponível)</span>
+                    </span>
+                  )}
+                </div>
 
-        <div className="rounded-2xl border border-purple-900/30 bg-[#130E24]/80 p-4 backdrop-blur-md">
-          <div className="flex items-center gap-2 text-xs font-medium text-indigo-400">
-            <Clock className="h-4 w-4" />
-            <span>Episódios Vistos</span>
-          </div>
-          <div className="mt-2 font-mono text-2xl font-bold text-white tabular-nums">
-            {totalEpisodesWatched}
-          </div>
-          <div className="mt-1 text-[11px] text-purple-300/60">
-            ~{((totalEpisodesWatched * 24) / 60).toFixed(0)} horas assistidas
-          </div>
-        </div>
+                <div className="flex items-baseline gap-2">
+                  <span className="font-semibold text-purple-300/90">Mean Score:</span>
+                  {ratedAnimes.length > 0 ? (
+                    <span className="font-mono text-base sm:text-lg font-bold text-amber-300 tabular-nums">
+                      {meanScoreFormatted}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-purple-400/60">Sem avaliações</span>
+                  )}
+                </div>
+              </div>
 
-        <div className="rounded-2xl border border-purple-900/30 bg-[#130E24]/80 p-4 backdrop-blur-md">
-          <div className="flex items-center gap-2 text-xs font-medium text-amber-400">
-            <Star className="h-4 w-4" />
-            <span>Média de Notas</span>
-          </div>
-          <div className="mt-2 font-mono text-2xl font-bold text-white tabular-nums">
-            {averageScore} <span className="text-xs text-amber-300/80">★</span>
-          </div>
-          <div className="mt-1 text-[11px] text-purple-300/60">
-            {ratedAnimes.length} obras avaliadas
-          </div>
-        </div>
-      </div>
+              {/* Proportional Status Distribution Bar */}
+              {totalEntries > 0 ? (
+                <svg
+                  viewBox="0 0 1000 12"
+                  preserveAspectRatio="none"
+                  className="block h-3 w-full overflow-hidden rounded-full bg-purple-950/80 ring-1 ring-purple-900/40"
+                  role="img"
+                  aria-label="Distribuição da lista de animes por status"
+                >
+                  {renderedSegments.map((seg) => (
+                    <rect
+                      key={seg.key}
+                      x={seg.x}
+                      y={0}
+                      width={seg.width}
+                      height={12}
+                      className={seg.fill}
+                    />
+                  ))}
+                </svg>
+              ) : (
+                <div className="h-3 w-full rounded-full bg-purple-950/60 ring-1 ring-purple-900/30" />
+              )}
 
-      {/* Grid: 4 Favorites Sections & Sidebar */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left column: Favorites + Currently Watching (2 columns) */}
-        <div className="lg:col-span-2 space-y-6 min-w-0">
+              {/* Two-Column MAL-style Breakdown: Status Counts (Left) & Totals (Right) */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-8 pt-1">
+                {/* Status Breakdown */}
+                <div className="space-y-2 text-xs">
+                  <div className="flex items-center justify-between py-0.5">
+                    <div className="flex items-center gap-2.5">
+                      <span className="h-2.5 w-2.5 rounded-full bg-emerald-500 shrink-0" />
+                      <span className="text-purple-100 font-medium">Assistindo</span>
+                    </div>
+                    <span className="font-mono font-semibold text-white tabular-nums">
+                      {watchingAnimes.length}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between py-0.5">
+                    <div className="flex items-center gap-2.5">
+                      <span className="h-2.5 w-2.5 rounded-full bg-purple-500 shrink-0" />
+                      <span className="text-purple-100 font-medium">Concluídos</span>
+                    </div>
+                    <span className="font-mono font-semibold text-white tabular-nums">
+                      {completedAnimes.length}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between py-0.5">
+                    <div className="flex items-center gap-2.5">
+                      <span className="h-2.5 w-2.5 rounded-full bg-amber-400 shrink-0" />
+                      <span className="text-purple-100 font-medium">Em espera</span>
+                    </div>
+                    <span className="font-mono font-semibold text-white tabular-nums">
+                      {onHoldAnimes.length}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between py-0.5">
+                    <div className="flex items-center gap-2.5">
+                      <span className="h-2.5 w-2.5 rounded-full bg-rose-500 shrink-0" />
+                      <span className="text-purple-100 font-medium">Abandonados</span>
+                    </div>
+                    <span className="font-mono font-semibold text-white tabular-nums">
+                      {droppedAnimes.length}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between py-0.5">
+                    <div className="flex items-center gap-2.5">
+                      <span className="h-2.5 w-2.5 rounded-full bg-indigo-300/60 shrink-0" />
+                      <span className="text-purple-100 font-medium">Planejados</span>
+                    </div>
+                    <span className="font-mono font-semibold text-white tabular-nums">
+                      {plannedAnimes.length}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Totals Column */}
+                <div className="space-y-2 text-xs border-t sm:border-t-0 sm:border-l border-purple-900/30 pt-3 sm:pt-0 sm:pl-6 flex flex-col justify-center">
+                  <div className="flex items-center justify-between py-0.5">
+                    <span className="text-purple-300/80 font-medium">Total de entradas</span>
+                    <span className="font-mono font-semibold text-white tabular-nums">
+                      {totalEntries.toLocaleString('pt-BR')}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between py-0.5">
+                    <span className="text-purple-300/80 font-medium">Reassistidos</span>
+                    {rewatchedTotal !== null ? (
+                      <span className="font-mono font-semibold text-white tabular-nums">
+                        {rewatchedTotal.toLocaleString('pt-BR')}
+                      </span>
+                    ) : (
+                      <span
+                        className="text-[11px] text-purple-400/60 font-mono"
+                        title="Contagem de reassistidos ainda não registrada nos dados da lista."
+                      >
+                        Não disponível
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-between py-0.5">
+                    <span className="text-purple-300/80 font-medium">Episódios assistidos</span>
+                    <span className="font-mono font-semibold text-white tabular-nums">
+                      {hasEpisodeData ? totalEpisodesWatched.toLocaleString('pt-BR') : '—'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </section>
+          )}
+
           {/* The 4 Favorites Sections directly in Overview (Visão geral) */}
           {!isOwnProfile && profile.privacySettings?.showFavorites === false ? (
             <div className="rounded-2xl border border-purple-900/30 bg-[#130E24]/60 p-6 text-center space-y-1">
@@ -220,16 +416,35 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
             </div>
 
             <div className="mt-3 space-y-3">
-              {activities.slice(0, 4).map((act) => (
-                <div key={act.id} className="relative flex items-start gap-2.5 text-xs">
-                  <div className="h-2 w-2 rounded-full bg-purple-500 shrink-0 mt-1.5 ring-2 ring-purple-900/60" />
-                  <div className="flex-1 min-w-0">
-                    <p className="font-medium text-white truncate">{act.title}</p>
-                    <p className="text-[11px] text-purple-300/70 truncate">{act.description}</p>
-                    <span className="text-[10px] text-purple-400/50 mt-0.5 block">{act.timestamp}</span>
-                  </div>
-                </div>
-              ))}
+              {activities.length === 0 ? (
+                <p className="text-xs text-purple-300/50 py-3 text-center">
+                  Nenhuma atividade recente registrada.
+                </p>
+              ) : (
+                activities.slice(0, 5).map((act) => {
+                  const relativeLabel = formatRelativeTime(act.createdAtTimestamp, now, act.timestamp, true);
+                  const exactDate = formatExactDateTime(act.createdAtTimestamp);
+                  return (
+                    <div key={act.id} className="relative flex items-start gap-2.5 text-xs">
+                      <div className="h-2 w-2 rounded-full bg-purple-500 shrink-0 mt-1.5 ring-2 ring-purple-900/60" />
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium text-white leading-snug break-words">
+                          <span>{act.title}</span>
+                          <span
+                            className="text-purple-400/75 font-normal"
+                            title={exactDate || undefined}
+                          >
+                            {' '}— {relativeLabel}
+                          </span>
+                        </p>
+                        {act.description && (
+                          <p className="text-[11px] text-purple-300/70 truncate mt-0.5">{act.description}</p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
             </div>
           </div>
 
@@ -255,12 +470,13 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                 </p>
                 <div className="mt-2 flex items-center justify-between text-[11px] text-purple-300/60">
                   <span className="truncate max-w-[150px] text-purple-400 font-medium">{comments[0].animeTitle}</span>
-                  <span>{comments[0].createdAt}</span>
+                  <span title={formatExactDateTime(comments[0].createdAtTimestamp) || undefined}>
+                    {formatRelativeTime(comments[0].createdAtTimestamp, now, comments[0].createdAt, false)}
+                  </span>
                 </div>
               </div>
             </div>
-          )}
-        </div>
+        )}
       </div>
     </div>
   );

@@ -1,8 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Search, 
-  Plus, 
-  Minus, 
   Check, 
   Play, 
   Clock, 
@@ -246,43 +244,11 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
                       />
                     </div>
 
-                    {/* Controls row: visible + and - stepper buttons & "Gerenciar progresso" */}
+                    {/* Controls row: percentage & "Gerenciar progresso" */}
                     <div className="mt-2 pt-1.5 border-t border-purple-900/30">
                       {isOwnProfile ? (
                         <div className="space-y-1.5">
-                          {/* Stepper buttons - and + directly visible on each card */}
-                          <div className="flex items-center justify-between gap-1">
-                            <div className="flex items-center gap-1">
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.preventDefault();
-                                  e.stopPropagation();
-                                  onUpdateEpisode(anime.id, -1);
-                                }}
-                                disabled={anime.currentEpisode <= 0}
-                                className="flex h-5 w-5 sm:h-6 sm:w-6 items-center justify-center rounded bg-purple-950/80 hover:bg-purple-900 border border-purple-800/60 text-purple-200 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors cursor-pointer"
-                                title="Diminuir 1 episódio (−)"
-                                aria-label="Diminuir 1 episódio"
-                              >
-                                <Minus className="h-2.5 w-2.5 sm:h-3 sm:w-3" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.preventDefault();
-                                  e.stopPropagation();
-                                  onUpdateEpisode(anime.id, 1);
-                                }}
-                                disabled={anime.currentEpisode >= anime.totalEpisodes}
-                                className="flex h-5 w-5 sm:h-6 sm:w-6 items-center justify-center rounded bg-purple-600 hover:bg-purple-500 text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors shadow-xs cursor-pointer"
-                                title="Avançar 1 episódio (+)"
-                                aria-label="Avançar 1 episódio"
-                              >
-                                <Plus className="h-2.5 w-2.5 sm:h-3 sm:w-3" />
-                              </button>
-                            </div>
-
+                          <div className="flex items-center justify-end">
                             <span className="font-mono text-[9px] sm:text-[10px] text-purple-300 tabular-nums">
                               {progress}%
                             </span>

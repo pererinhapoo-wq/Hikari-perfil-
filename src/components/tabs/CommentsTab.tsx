@@ -9,6 +9,7 @@ import {
   Calendar
 } from 'lucide-react';
 import { HikariComment } from '../../types';
+import { useCurrentTime, formatRelativeTime, formatExactDateTime } from '../../utils/relativeTime';
 
 interface CommentsTabProps {
   comments: HikariComment[];
@@ -25,6 +26,8 @@ export const CommentsTab: React.FC<CommentsTabProps> = ({
   userName,
   highlightedCommentId
 }) => {
+  const now = useCurrentTime();
+
   // If user disabled comments on profile and viewer is not the owner:
   if (!showCommentsOnProfile && !isOwnProfile) {
     return (
@@ -94,9 +97,12 @@ export const CommentsTab: React.FC<CommentsTabProps> = ({
                   </div>
 
                 <div className="flex items-center gap-3">
-                  <div className="flex items-center gap-1 text-[11px] text-purple-300/60">
+                  <div
+                    className="flex items-center gap-1 text-[11px] text-purple-300/60"
+                    title={formatExactDateTime(comment.createdAtTimestamp) || undefined}
+                  >
                     <Calendar className="h-3 w-3" />
-                    <span>{comment.createdAt}</span>
+                    <span>{formatRelativeTime(comment.createdAtTimestamp, now, comment.createdAt, false)}</span>
                   </div>
 
                   {/* Link to open on Hikari */}

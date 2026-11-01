@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Header } from './components/Header';
 import { ProfileHeader } from './components/ProfileHeader';
 import { TabsNavigation } from './components/TabsNavigation';
@@ -31,8 +31,96 @@ import {
   INITIAL_FOLLOW_REQUESTS, 
   INITIAL_NOTIFICATIONS 
 } from './data/mockData';
+import { inferOffsetMsFromLabel } from './utils/relativeTime';
+
+const PROFILE_STORAGE_KEY = 'hikari_profile_user_data_v1';
+
+interface PersistedProfileData {
+  animes: AnimeItem[];
+  comments: HikariComment[];
+  activities: UserActivity[];
+  notifications: NotificationItem[];
+}
+
+const STATUS_ACTIVITY_LABEL: Record<AnimeItem['status'], string> = {
+  watching: 'Assistindo',
+  completed: 'Concluído',
+  on_hold: 'Em espera',
+  dropped: 'Abandonado',
+  planned: 'Planejados'
+};
+
+function mergeNotificationsWithSeed(
+  persisted: NotificationItem[] | undefined,
+  seed: NotificationItem[]
+): NotificationItem[] {
+  if (!Array.isArray(persisted)) {
+    return seed;
+  }
+  const persistedIds = new Set(persisted.map((n) => n.id));
+  const newFromSeed = seed.filter((n) => !persistedIds.has(n.id));
+  return [...newFromSeed, ...persisted];
+}
+
+function loadInitialProfileData(): PersistedProfileData {
+  try {
+    const raw = window.localStorage.getItem(PROFILE_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<PersistedProfileData>;
+      if (
+        Array.isArray(parsed.animes) &&
+        Array.isArray(parsed.comments) &&
+        Array.isArray(parsed.activities)
+      ) {
+        const mergedNotifications = mergeNotificationsWithSeed(
+          parsed.notifications,
+          INITIAL_NOTIFICATIONS
+        );
+        return {
+          animes: parsed.animes,
+          comments: parsed.comments,
+          activities: parsed.activities,
+          notifications: mergedNotifications
+        };
+      }
+    }
+  } catch {
+    // Fallback to initial seed if localStorage is inaccessible or corrupted
+  }
+
+  const seedTimestamp = Date.now();
+  const seededComments: HikariComment[] = INITIAL_COMMENTS.map((comm, idx) => ({
+    ...comm,
+    createdAtTimestamp:
+      comm.createdAtTimestamp ?? seedTimestamp - inferOffsetMsFromLabel(comm.createdAt) - idx * 1000
+  }));
+
+  const seededActivities: UserActivity[] = INITIAL_ACTIVITIES.map((act, idx) => ({
+    ...act,
+    createdAtTimestamp:
+      act.createdAtTimestamp ?? seedTimestamp - inferOffsetMsFromLabel(act.timestamp) - idx * 1000
+  }));
+
+  const seeded: PersistedProfileData = {
+    animes: INITIAL_ANIMES,
+    comments: seededComments,
+    activities: seededActivities,
+    notifications: INITIAL_NOTIFICATIONS
+  };
+
+  try {
+    window.localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(seeded));
+  } catch {
+    // Ignore storage write errors in restricted contexts
+  }
+
+  return seeded;
+}
 
 export default function App() {
+  // Hydrate persisted profile records once on mount
+  const [initialData] = useState<PersistedProfileData>(() => loadInitialProfileData());
+
   // Session & Profiles
   const [currentUser, setCurrentUser] = useState<UserProfile>(CURRENT_USER);
   const [otherProfiles, setOtherProfiles] = useState<Record<string, UserProfile>>(OTHER_USERS);
@@ -41,14 +129,43 @@ export default function App() {
   // Tab State
   const [activeTab, setActiveTab] = useState<ProfileTab>('overview');
 
-  // Social & Data State
-  const [animes, setAnimes] = useState<AnimeItem[]>(INITIAL_ANIMES);
-  const [comments, setComments] = useState<HikariComment[]>(INITIAL_COMMENTS);
-  const [activities, setActivities] = useState<UserActivity[]>(INITIAL_ACTIVITIES);
+  // Persisted Social & Data State
+  const [animes, setAnimes] = useState<AnimeItem[]>(initialData.animes);
+  const [comments, setComments] = useState<HikariComment[]>(initialData.comments);
+  const [activities, setActivities] = useState<UserActivity[]>(initialData.activities);
   const [followers, setFollowers] = useState<FollowUser[]>(INITIAL_FOLLOWERS);
   const [following, setFollowing] = useState<FollowUser[]>(INITIAL_FOLLOWING);
   const [followRequests, setFollowRequests] = useState<FollowRequest[]>(INITIAL_FOLLOW_REQUESTS);
-  const [notifications, setNotifications] = useState<NotificationItem[]>(INITIAL_NOTIFICATIONS);
+  const [notifications, setNotifications] = useState<NotificationItem[]>(initialData.notifications);
+
+  // Keep localStorage synchronized whenever animes, comments, activities, or notifications change
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        PROFILE_STORAGE_KEY,
+        JSON.stringify({ animes, comments, activities, notifications })
+      );
+    } catch {
+      // Ignore storage write errors gracefully
+    }
+  }, [animes, comments, activities, notifications]);
+
+  // Synchronize notifications if updated from another tab or external Hikari event in the same storage
+  useEffect(() => {
+    function handleStorageSync(event: StorageEvent) {
+      if (event.key !== PROFILE_STORAGE_KEY || !event.newValue) return;
+      try {
+        const parsed = JSON.parse(event.newValue) as Partial<PersistedProfileData>;
+        if (Array.isArray(parsed.notifications)) {
+          setNotifications(parsed.notifications);
+        }
+      } catch {
+        // Ignore malformed external storage payloads
+      }
+    }
+    window.addEventListener('storage', handleStorageSync);
+    return () => window.removeEventListener('storage', handleStorageSync);
+  }, []);
 
   // Relational follow state for other users
   const [followingIds, setFollowingIds] = useState<Set<string>>(new Set(['usr_kuroha', 'usr_shinji']));
@@ -70,18 +187,15 @@ export default function App() {
     const isAnyModalOpen = isSettingsOpen || isFollowersOpen || isNotifOpen;
     if (isAnyModalOpen) {
       const scrollBarWidth = window.innerWidth - document.documentElement.clientWidth;
-      const prevHtmlOverflow = document.documentElement.style.overflow;
       const prevBodyOverflow = document.body.style.overflow;
       const prevPaddingRight = document.body.style.paddingRight;
 
-      document.documentElement.style.overflow = 'hidden';
       document.body.style.overflow = 'hidden';
       if (scrollBarWidth > 0) {
         document.body.style.paddingRight = `${scrollBarWidth}px`;
       }
 
       return () => {
-        document.documentElement.style.overflow = prevHtmlOverflow;
         document.body.style.overflow = prevBodyOverflow;
         document.body.style.paddingRight = prevPaddingRight;
       };
@@ -258,60 +372,250 @@ export default function App() {
     }));
   };
 
+  const persistAndApply = (
+    nextAnimes: AnimeItem[],
+    newActivity: UserActivity | null,
+    nextComments: HikariComment[] = comments
+  ) => {
+    const nextActivities = newActivity ? [newActivity, ...activities] : activities;
+    try {
+      window.localStorage.setItem(
+        PROFILE_STORAGE_KEY,
+        JSON.stringify({
+          animes: nextAnimes,
+          comments: nextComments,
+          activities: nextActivities,
+          notifications
+        })
+      );
+    } catch {
+      // Fallback to state if browser storage is restricted
+    }
+    setAnimes(nextAnimes);
+    if (nextComments !== comments) {
+      setComments(nextComments);
+    }
+    if (newActivity) {
+      setActivities(nextActivities);
+    }
+  };
+
   // Handler: Update episode progress
   const handleUpdateEpisode = (animeId: string, delta: number) => {
-    setAnimes(prev => prev.map(anime => {
-      if (anime.id === animeId) {
-        const newEp = Math.min(anime.totalEpisodes, Math.max(0, anime.currentEpisode + delta));
-        const newStatus = newEp === anime.totalEpisodes ? 'completed' : anime.status;
-        return {
-          ...anime,
-          currentEpisode: newEp,
-          status: newStatus
+    const prevAnime = animes.find(a => a.id === animeId);
+    if (!prevAnime) return;
+
+    const newEp = Math.min(prevAnime.totalEpisodes, Math.max(0, prevAnime.currentEpisode + delta));
+    const newStatus: AnimeItem['status'] =
+      newEp === prevAnime.totalEpisodes && prevAnime.totalEpisodes > 0
+        ? 'completed'
+        : prevAnime.status === 'completed' && newEp < prevAnime.totalEpisodes
+        ? newEp === 0
+          ? 'planned'
+          : 'watching'
+        : prevAnime.status === 'planned' && newEp > 0
+        ? 'watching'
+        : prevAnime.status;
+
+    if (newEp === prevAnime.currentEpisode && newStatus === prevAnime.status) return;
+
+    const nextAnimes = animes.map(anime =>
+      anime.id === animeId ? { ...anime, currentEpisode: newEp, status: newStatus } : anime
+    );
+
+    const actionNow = Date.now();
+    const completedNow = newStatus === 'completed' && prevAnime.status !== 'completed';
+    const activity: UserActivity = completedNow
+      ? {
+          id: `act_${actionNow}_${animeId}`,
+          type: 'completed_anime',
+          title: `Marcou ${prevAnime.title} como concluído`,
+          description: `${newEp}/${prevAnime.totalEpisodes} episódios`,
+          timestamp: 'Agora',
+          createdAtTimestamp: actionNow,
+          episode: newEp
+        }
+      : {
+          id: `act_${actionNow}_${animeId}`,
+          type: 'watched_ep',
+          title:
+            newEp > prevAnime.currentEpisode
+              ? `Assistiu até o episódio ${newEp} de ${prevAnime.title}`
+              : `Atualizou o progresso de ${prevAnime.title} para o episódio ${newEp}`,
+          description: `Progresso: ${newEp}/${prevAnime.totalEpisodes} episódios`,
+          timestamp: 'Agora',
+          createdAtTimestamp: actionNow,
+          episode: newEp
         };
-      }
-      return anime;
-    }));
+
+    persistAndApply(nextAnimes, activity);
   };
 
   // Handler: Update anime status (with automatic episode maxing on completion)
   const handleUpdateStatus = (animeId: string, newStatus: AnimeItem['status']) => {
-    setAnimes(prev => prev.map(anime => {
-      if (anime.id === animeId) {
-        const isCompleted = newStatus === 'completed';
-        return {
-          ...anime,
-          status: newStatus,
-          currentEpisode: isCompleted ? anime.totalEpisodes : anime.currentEpisode
+    const prevAnime = animes.find(a => a.id === animeId);
+    if (!prevAnime || prevAnime.status === newStatus) return;
+
+    const isCompleted = newStatus === 'completed';
+    const nextEp = isCompleted ? prevAnime.totalEpisodes : prevAnime.currentEpisode;
+
+    const nextAnimes = animes.map(anime =>
+      anime.id === animeId
+        ? { ...anime, status: newStatus, currentEpisode: nextEp }
+        : anime
+    );
+
+    const actionNow = Date.now();
+    const activity: UserActivity = isCompleted
+      ? {
+          id: `act_${actionNow}_${animeId}`,
+          type: 'completed_anime',
+          title: `Marcou ${prevAnime.title} como concluído`,
+          description: `${nextEp}/${prevAnime.totalEpisodes} episódios`,
+          timestamp: 'Agora',
+          createdAtTimestamp: actionNow,
+          episode: nextEp
+        }
+      : {
+          id: `act_${actionNow}_${animeId}`,
+          type: 'status_changed',
+          title:
+            newStatus === 'on_hold'
+              ? `Colocou ${prevAnime.title} em espera`
+              : newStatus === 'dropped'
+              ? `Marcou ${prevAnime.title} como abandonado`
+              : `Moveu ${prevAnime.title} para ${STATUS_ACTIVITY_LABEL[newStatus]}`,
+          description: `Progresso: ${nextEp}/${prevAnime.totalEpisodes} episódios`,
+          timestamp: 'Agora',
+          createdAtTimestamp: actionNow,
+          episode: nextEp
         };
-      }
-      return anime;
-    }));
+
+    persistAndApply(nextAnimes, activity);
   };
 
-  // Handler: Save anime edit from modal (updates episode count, status and rating)
-  const handleSaveAnimeEdit = (animeId: string, updates: { currentEpisode: number; status: AnimeItem['status']; rating: number }) => {
-    setAnimes(prev => prev.map(anime => {
-      if (anime.id === animeId) {
-        return {
-          ...anime,
-          currentEpisode: Math.min(anime.totalEpisodes, Math.max(0, updates.currentEpisode)),
-          status: updates.status,
-          rating: updates.rating
-        };
-      }
-      return anime;
-    }));
+  // Handler: Save anime edit from modal (updates episode count, status and rating, recording 1 consolidated activity)
+  const handleSaveAnimeEdit = (
+    animeId: string,
+    updates: { currentEpisode: number; status: AnimeItem['status']; rating: number }
+  ) => {
+    const prevAnime = animes.find(a => a.id === animeId);
+    if (!prevAnime) return;
+
+    const nextEp = Math.min(prevAnime.totalEpisodes, Math.max(0, updates.currentEpisode));
+    const nextStatus = updates.status;
+    const nextRating = updates.rating;
+
+    const statusChanged = nextStatus !== prevAnime.status;
+    const epChanged = nextEp !== prevAnime.currentEpisode;
+    const ratingChanged = nextRating !== prevAnime.rating;
+
+    if (!statusChanged && !epChanged && !ratingChanged) {
+      return;
+    }
+
+    const nextAnimes = animes.map(anime =>
+      anime.id === animeId
+        ? {
+            ...anime,
+            currentEpisode: nextEp,
+            status: nextStatus,
+            rating: nextRating
+          }
+        : anime
+    );
+
+    const actionNow = Date.now();
+    let newActivity: UserActivity | null = null;
+
+    if (statusChanged && nextStatus === 'completed') {
+      newActivity = {
+        id: `act_${actionNow}_${animeId}`,
+        type: 'completed_anime',
+        title: `Marcou ${prevAnime.title} como concluído`,
+        description: `${nextEp}/${prevAnime.totalEpisodes} episódios${ratingChanged && nextRating > 0 ? ` · Nota ${nextRating}/10` : ''}`,
+        timestamp: 'Agora',
+        createdAtTimestamp: actionNow,
+        episode: nextEp,
+        score: ratingChanged && nextRating > 0 ? nextRating : undefined
+      };
+    } else if (statusChanged) {
+      const statusTitle =
+        nextStatus === 'on_hold'
+          ? `Colocou ${prevAnime.title} em espera`
+          : nextStatus === 'dropped'
+          ? `Marcou ${prevAnime.title} como abandonado`
+          : `Moveu ${prevAnime.title} para ${STATUS_ACTIVITY_LABEL[nextStatus]}`;
+
+      newActivity = {
+        id: `act_${actionNow}_${animeId}`,
+        type: 'status_changed',
+        title: statusTitle,
+        description: `Progresso: ${nextEp}/${prevAnime.totalEpisodes} episódios${ratingChanged && nextRating > 0 ? ` · Nota ${nextRating}/10` : ''}`,
+        timestamp: 'Agora',
+        createdAtTimestamp: actionNow,
+        episode: nextEp,
+        score: ratingChanged && nextRating > 0 ? nextRating : undefined
+      };
+    } else if (ratingChanged) {
+      newActivity = {
+        id: `act_${actionNow}_${animeId}`,
+        type: 'rated',
+        title:
+          nextRating > 0
+            ? `Avaliou ${prevAnime.title} com nota ${nextRating}`
+            : `Removeu a avaliação de ${prevAnime.title}`,
+        description: epChanged
+          ? `Progresso atualizado para ${nextEp}/${prevAnime.totalEpisodes} episódios`
+          : nextRating > 0
+          ? `Avaliação atualizada (${nextRating}/10)`
+          : 'Sem nota atribuída',
+        timestamp: 'Agora',
+        createdAtTimestamp: actionNow,
+        score: nextRating > 0 ? nextRating : undefined,
+        episode: epChanged ? nextEp : undefined
+      };
+    } else if (epChanged) {
+      newActivity = {
+        id: `act_${actionNow}_${animeId}`,
+        type: 'watched_ep',
+        title:
+          nextEp > prevAnime.currentEpisode
+            ? `Assistiu até o episódio ${nextEp} de ${prevAnime.title}`
+            : `Atualizou o progresso de ${prevAnime.title} para o episódio ${nextEp}`,
+        description: `Progresso: ${nextEp}/${prevAnime.totalEpisodes} episódios`,
+        timestamp: 'Agora',
+        createdAtTimestamp: actionNow,
+        episode: nextEp
+      };
+    }
+
+    persistAndApply(nextAnimes, newActivity);
   };
 
   // Handler: Toggle favorite
   const handleToggleFavorite = (animeId: string) => {
-    setAnimes(prev => prev.map(anime => {
-      if (anime.id === animeId) {
-        return { ...anime, isFavorite: !anime.isFavorite };
-      }
-      return anime;
-    }));
+    const prevAnime = animes.find(a => a.id === animeId);
+    if (!prevAnime) return;
+
+    const nextFav = !prevAnime.isFavorite;
+    const nextAnimes = animes.map(anime =>
+      anime.id === animeId ? { ...anime, isFavorite: nextFav } : anime
+    );
+
+    const actionNow = Date.now();
+    const activity: UserActivity = {
+      id: `act_${actionNow}_${animeId}`,
+      type: 'added_favorite',
+      title: nextFav
+        ? `Adicionou ${prevAnime.title} aos favoritos`
+        : `Removeu ${prevAnime.title} dos favoritos`,
+      description: prevAnime.genres.slice(0, 2).join(' · '),
+      timestamp: 'Agora',
+      createdAtTimestamp: actionNow
+    };
+
+    persistAndApply(nextAnimes, activity);
   };
 
   // Image updates
@@ -337,13 +641,33 @@ export default function App() {
   };
 
   // Notification handlers
-  const handleMarkNotificationAsRead = (id: string) => {
-    setNotifications(prev => prev.map(n => n.id === id ? { ...n, isRead: true } : n));
-  };
+  const handleMarkNotificationsAsRead = useCallback((ids: string[]) => {
+    if (ids.length === 0) return;
+    const idSet = new Set(ids);
+    setNotifications((prev) => {
+      let hasChanges = false;
+      const next = prev.map((n) => {
+        if (idSet.has(n.id) && !n.isRead) {
+          hasChanges = true;
+          return { ...n, isRead: true };
+        }
+        return n;
+      });
+      return hasChanges ? next : prev;
+    });
+  }, []);
 
-  const handleMarkAllNotificationsAsRead = () => {
-    setNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
-  };
+  const handleMarkNotificationAsRead = useCallback((id: string) => {
+    handleMarkNotificationsAsRead([id]);
+  }, [handleMarkNotificationsAsRead]);
+
+  const handleMarkAllNotificationsAsRead = useCallback(() => {
+    setNotifications((prev) => {
+      const hasUnread = prev.some((n) => !n.isRead);
+      if (!hasUnread) return prev;
+      return prev.map((n) => (n.isRead ? n : { ...n, isRead: true }));
+    });
+  }, []);
 
   // Notification navigation to relevant content
   const handleSelectNotification = (notif: NotificationItem) => {
@@ -390,6 +714,7 @@ export default function App() {
         }}
         onSelectProfile={handleSelectProfile}
         onMarkNotificationAsRead={handleMarkNotificationAsRead}
+        onMarkNotificationsAsRead={handleMarkNotificationsAsRead}
         onMarkAllNotificationsAsRead={handleMarkAllNotificationsAsRead}
         onSelectNotification={handleSelectNotification}
         onNavigateTab={(tab) => setActiveTab(tab)}

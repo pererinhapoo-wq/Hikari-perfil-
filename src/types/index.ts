@@ -64,6 +64,8 @@ export interface AnimeItem {
   isFavorite: boolean;
   year: number;
   genres: string[];
+  episodeDurationMinutes?: number;
+  rewatchCount?: number;
 }
 
 export interface HikariComment {
@@ -74,6 +76,7 @@ export interface HikariComment {
   discussionTopic?: string;
   content: string;
   createdAt: string;
+  createdAtTimestamp?: number;
   likesCount: number;
   repliesCount: number;
   originUrl: string;
@@ -81,10 +84,11 @@ export interface HikariComment {
 
 export interface UserActivity {
   id: string;
-  type: 'watched_ep' | 'completed_anime' | 'rated' | 'commented' | 'added_favorite';
+  type: 'watched_ep' | 'completed_anime' | 'rated' | 'commented' | 'added_favorite' | 'status_changed' | 'added_anime';
   title: string;
   description: string;
   timestamp: string;
+  createdAtTimestamp?: number;
   score?: number;
   episode?: number;
 }

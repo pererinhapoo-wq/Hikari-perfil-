@@ -44,9 +44,6 @@ export const FavoritesTab: React.FC<FavoritesTabProps> = ({
             <Tv className="h-4 w-4 text-purple-400" />
             <h2 className="text-sm sm:text-base font-bold text-white">Favoritos — Animes</h2>
           </div>
-          <span className="font-mono text-xs text-purple-400/80 tabular-nums">
-            {animeFavorites.length}/10 em destaque
-          </span>
         </div>
 
         {animeFavorites.length === 0 ? (
@@ -125,9 +122,6 @@ export const FavoritesTab: React.FC<FavoritesTabProps> = ({
             <Sparkles className="h-4 w-4 text-purple-400" />
             <h2 className="text-sm sm:text-base font-bold text-white">Favoritos — Personagens</h2>
           </div>
-          <span className="font-mono text-xs text-purple-400/80 tabular-nums">
-            {characterFavorites.length}/10 personagens
-          </span>
         </div>
 
         <div className="flex gap-3 overflow-x-auto pb-3 pt-1 overscroll-x-contain no-scrollbar">
@@ -143,11 +137,6 @@ export const FavoritesTab: React.FC<FavoritesTabProps> = ({
                   referrerPolicy="no-referrer"
                   className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
                 />
-                <div className="absolute bottom-1 left-1 right-1">
-                  <span className="block truncate rounded bg-black/75 px-1.5 py-0.5 text-[9px] font-medium text-purple-200 backdrop-blur-xs">
-                    {char.role}
-                  </span>
-                </div>
               </div>
 
               <div className="mt-2 px-0.5">
@@ -175,9 +164,6 @@ export const FavoritesTab: React.FC<FavoritesTabProps> = ({
             <Building2 className="h-4 w-4 text-purple-400" />
             <h2 className="text-sm sm:text-base font-bold text-white">Favoritos — Empresas & Estúdios</h2>
           </div>
-          <span className="font-mono text-xs text-purple-400/80 tabular-nums">
-            {companyFavorites.length}/10 empresas
-          </span>
         </div>
 
         <div className="flex gap-3 overflow-x-auto pb-3 pt-1 overscroll-x-contain no-scrollbar">
@@ -223,9 +209,6 @@ export const FavoritesTab: React.FC<FavoritesTabProps> = ({
             <Users className="h-4 w-4 text-purple-400" />
             <h2 className="text-sm sm:text-base font-bold text-white">Favoritos — Pessoas (Criadores & Voz)</h2>
           </div>
-          <span className="font-mono text-xs text-purple-400/80 tabular-nums">
-            {personFavorites.length}/10 pessoas
-          </span>
         </div>
 
         <div className="flex gap-3 overflow-x-auto pb-3 pt-1 overscroll-x-contain no-scrollbar">
