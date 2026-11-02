@@ -74,6 +74,13 @@ interface PersistedDemoProfileData {
   comments: HikariComment[];
   activities: UserActivity[];
   notifications: NotificationItem[];
+  followingIds?: string[];
+  requestedIds?: string[];
+  blockedIds?: string[];
+  following?: FollowUser[];
+  followers?: FollowUser[];
+  followRequests?: FollowRequest[];
+  otherProfiles?: Record<string, UserProfile>;
 }
 
 interface AuthSessionState {
@@ -116,26 +123,27 @@ const STATUS_ACTIVITY_LABEL: Record<AnimeItem['status'], string> = {
 };
 
 function buildProfileFromFollowUser(followUser: FollowUser): UserProfile {
+  const base = OTHER_USERS[followUser.id];
   return {
     id: followUser.id,
     username: followUser.username,
     displayName: followUser.displayName,
     avatarUrl: followUser.avatarUrl,
-    bannerUrl: '',
-    bio: followUser.bio,
-    createdAt: followUser.createdAt,
-    createdAtTimestamp: 0,
-    followersCount: followUser.isFollowing ? 1 : 0,
-    followingCount: followUser.isFollower ? 1 : 0,
-    isPrivate: false,
-    showCommentsOnProfile: true,
-    privacySettings: {
+    bannerUrl: base?.bannerUrl ?? '',
+    bio: followUser.bio || base?.bio || '',
+    createdAt: followUser.createdAt || base?.createdAt || '',
+    createdAtTimestamp: base?.createdAtTimestamp ?? 0,
+    followersCount: base ? base.followersCount : (followUser.isFollowing ? 1 : 0),
+    followingCount: base ? base.followingCount : (followUser.isFollower ? 1 : 0),
+    isPrivate: base?.isPrivate ?? false,
+    showCommentsOnProfile: base?.showCommentsOnProfile ?? true,
+    privacySettings: base?.privacySettings ?? {
       showAnimeList: true,
       showFavorites: true,
       showActivity: true,
       showCommentsOnProfile: true,
     },
-    externalAccounts: {
+    externalAccounts: base?.externalAccounts ?? {
       anilist: { connected: false },
       mal: { connected: false },
     },
@@ -224,7 +232,17 @@ function loadInitialDemoProfileData(): PersistedDemoProfileData {
           favoriteCharacters: sanitizedCharacters,
           comments: parsed.comments,
           activities: parsed.activities,
-          notifications: mergedNotifications
+          notifications: mergedNotifications,
+          followingIds: Array.isArray(parsed.followingIds) ? parsed.followingIds : undefined,
+          requestedIds: Array.isArray(parsed.requestedIds) ? parsed.requestedIds : undefined,
+          blockedIds: Array.isArray(parsed.blockedIds) ? parsed.blockedIds : undefined,
+          following: Array.isArray(parsed.following) ? parsed.following : undefined,
+          followers: Array.isArray(parsed.followers) ? parsed.followers : undefined,
+          followRequests: Array.isArray(parsed.followRequests) ? parsed.followRequests : undefined,
+          otherProfiles:
+            parsed.otherProfiles && typeof parsed.otherProfiles === 'object'
+              ? (parsed.otherProfiles as Record<string, UserProfile>)
+              : undefined,
         };
       }
     }
@@ -278,6 +296,10 @@ export default function App() {
     return {
       ...CURRENT_USER,
       ...ov,
+      followersCount:
+        typeof ov.followersCount === 'number' ? ov.followersCount : CURRENT_USER.followersCount,
+      followingCount:
+        typeof ov.followingCount === 'number' ? ov.followingCount : CURRENT_USER.followingCount,
       privacySettings: {
         ...CURRENT_USER.privacySettings,
         ...(ov.privacySettings ?? {}),
@@ -290,18 +312,31 @@ export default function App() {
   );
   const [demoComments, setDemoComments] = useState<HikariComment[]>(initialDemoData.comments);
   const [demoActivities, setDemoActivities] = useState<UserActivity[]>(initialDemoData.activities);
-  const [demoFollowers, setDemoFollowers] = useState<FollowUser[]>(INITIAL_FOLLOWERS);
-  const [demoFollowing, setDemoFollowing] = useState<FollowUser[]>(INITIAL_FOLLOWING);
-  const [demoFollowRequests, setDemoFollowRequests] = useState<FollowRequest[]>(INITIAL_FOLLOW_REQUESTS);
+  const [demoFollowers, setDemoFollowers] = useState<FollowUser[]>(
+    () => initialDemoData.followers ?? INITIAL_FOLLOWERS
+  );
+  const [demoFollowing, setDemoFollowing] = useState<FollowUser[]>(
+    () => initialDemoData.following ?? INITIAL_FOLLOWING
+  );
+  const [demoFollowRequests, setDemoFollowRequests] = useState<FollowRequest[]>(
+    () => initialDemoData.followRequests ?? INITIAL_FOLLOW_REQUESTS
+  );
   const [demoNotifications, setDemoNotifications] = useState<NotificationItem[]>(initialDemoData.notifications);
   const [demoFollowingIds, setDemoFollowingIds] = useState<Set<string>>(
-    () => new Set(['usr_kuroha', 'usr_shinji'])
+    () => new Set(initialDemoData.followingIds ?? ['usr_kuroha', 'usr_shinji'])
   );
-  const [demoRequestedIds, setDemoRequestedIds] = useState<Set<string>>(() => new Set());
-  const [demoBlockedIds, setDemoBlockedIds] = useState<Set<string>>(() => new Set());
+  const [demoRequestedIds, setDemoRequestedIds] = useState<Set<string>>(
+    () => new Set(initialDemoData.requestedIds ?? [])
+  );
+  const [demoBlockedIds, setDemoBlockedIds] = useState<Set<string>>(
+    () => new Set(initialDemoData.blockedIds ?? [])
+  );
   const [demoOtherProfiles, setDemoOtherProfiles] = useState<Record<string, UserProfile>>(
-    () => buildInitialDemoProfilesMap()
+    () => initialDemoData.otherProfiles ?? buildInitialDemoProfilesMap()
   );
+
+  // Busy lock to prevent concurrent or duplicated follow/unfollow clicks
+  const [isFollowPending, setIsFollowPending] = useState(false);
 
   // UID-isolated personal state for real Firebase accounts (keyed strictly by user.uid)
   const [authSession, setAuthSession] = useState<AuthSessionState | null>(null);
@@ -419,11 +454,20 @@ export default function App() {
             showCommentsOnProfile: demoProfile.showCommentsOnProfile,
             privacySettings: demoProfile.privacySettings,
             externalAccounts: demoProfile.externalAccounts,
+            followersCount: demoProfile.followersCount,
+            followingCount: demoProfile.followingCount,
           },
           animes: demoAnimes,
           comments: demoComments,
           activities: demoActivities,
           notifications: demoNotifications,
+          followingIds: Array.from(demoFollowingIds),
+          requestedIds: Array.from(demoRequestedIds),
+          blockedIds: Array.from(demoBlockedIds),
+          following: demoFollowing,
+          followers: demoFollowers,
+          followRequests: demoFollowRequests,
+          otherProfiles: demoOtherProfiles,
         })
       );
     } catch {
@@ -437,6 +481,13 @@ export default function App() {
     demoComments,
     demoActivities,
     demoNotifications,
+    demoFollowingIds,
+    demoRequestedIds,
+    demoBlockedIds,
+    demoFollowing,
+    demoFollowers,
+    demoFollowRequests,
+    demoOtherProfiles,
   ]);
 
   // Cross-tab storage synchronization strictly scoped to either current UID or Demo Mode
@@ -620,6 +671,12 @@ export default function App() {
     if (!isAuthenticated || !activeAuthWorkspace) return {};
     const map: Record<string, UserProfile> = {};
 
+    for (const [uid, userProf] of Object.entries(OTHER_USERS)) {
+      if (uid !== currentUser.id) {
+        map[uid] = userProf;
+      }
+    }
+
     for (const [uid, proj] of Object.entries(authPublicProfilesMap)) {
       if (uid && uid !== currentUser.id) {
         map[uid] = proj.profile;
@@ -627,7 +684,7 @@ export default function App() {
     }
 
     for (const [uid, remoteProf] of Object.entries(remoteVisitedProfiles)) {
-      if (uid && uid !== currentUser.id && !map[uid]) {
+      if (uid && uid !== currentUser.id) {
         map[uid] = remoteProf;
       }
     }
@@ -730,7 +787,11 @@ export default function App() {
 
   // Memoize favorites count to avoid O(N) array filtering directly inside the JSX render loop
   const exposedFavoritesCount = useMemo(() => {
-    return exposedAnimes.filter((a) => a.isFavorite).length;
+    let count = 0;
+    for (let i = 0; i < exposedAnimes.length; i++) {
+      if (exposedAnimes[i].isFavorite) count++;
+    }
+    return count;
   }, [exposedAnimes]);
 
   const displayedFavoriteCharacters = isAuthenticated
@@ -808,142 +869,192 @@ export default function App() {
   );
 
   // Handler: Follow / Request toggle
-  const handleFollowToggle = () => {
-    if (isOwnProfile) return;
+  const handleFollowToggle = async () => {
+    if (isOwnProfile || isFollowPending) return;
+    const targetId = activeProfile.id;
+    if (!targetId || targetId === currentUser.id) return;
 
-    if (isAuthenticated) {
-      updateAuthWorkspace((prev) => {
-        const followingSet = new Set(prev.followingIds);
-        const requestedSet = new Set(prev.requestedIds);
-        let nextFollowing = prev.following;
-        let nextFollowers = prev.followers;
-        let followingDelta = 0;
+    setIsFollowPending(true);
 
-        if (followingSet.has(activeProfile.id)) {
-          followingSet.delete(activeProfile.id);
-          nextFollowing = prev.following.filter((u) => u.id !== activeProfile.id);
-          nextFollowers = prev.followers.map((u) =>
-            u.id === activeProfile.id ? { ...u, isFollowing: false } : u
-          );
-          followingDelta = -1;
-        } else if (requestedSet.has(activeProfile.id)) {
-          requestedSet.delete(activeProfile.id);
-        } else if (activeProfile.isPrivate) {
-          requestedSet.add(activeProfile.id);
-        } else {
-          followingSet.add(activeProfile.id);
-          const alreadyListed = prev.following.some((u) => u.id === activeProfile.id);
-          if (!alreadyListed) {
-            nextFollowing = [
-              {
-                id: activeProfile.id,
-                username: activeProfile.username,
-                displayName: activeProfile.displayName,
-                avatarUrl: activeProfile.avatarUrl,
-                bio: activeProfile.bio,
-                isFollowing: true,
-                isRequested: false,
-                isFollower: prev.followers.some((u) => u.id === activeProfile.id),
-                isBlocked: false,
-                createdAt: activeProfile.createdAt,
-              },
-              ...prev.following,
-            ];
-          }
-          nextFollowers = prev.followers.map((u) =>
-            u.id === activeProfile.id ? { ...u, isFollowing: true } : u
-          );
-          followingDelta = 1;
+    try {
+      if (isAuthenticated) {
+        const isFollowingTarget = followingIds.has(targetId);
+        const isRequestedTarget = requestedIds.has(targetId);
+
+        let delta = 0;
+        if (isFollowingTarget) {
+          delta = -1;
+        } else if (!isRequestedTarget && !activeProfile.isPrivate) {
+          delta = 1;
         }
 
-        const currentFollowingCount = prev.profileOverrides.followingCount ?? 0;
-        return {
-          ...prev,
-          followingIds: Array.from(followingSet),
-          requestedIds: Array.from(requestedSet),
-          following: nextFollowing,
-          followers: nextFollowers,
-          profileOverrides:
-            followingDelta !== 0
-              ? {
-                  ...prev.profileOverrides,
-                  followingCount: Math.max(0, currentFollowingCount + followingDelta),
-                }
-              : prev.profileOverrides,
-        };
-      });
-      return;
-    }
+        updateAuthWorkspace((prev) => {
+          const followingSet = new Set(prev.followingIds);
+          const requestedSet = new Set(prev.requestedIds);
+          let nextFollowing = prev.following;
+          let nextFollowers = prev.followers;
 
-    if (isFollowingActive) {
-      setDemoFollowingIds((prev) => {
-        const next = new Set(prev);
-        next.delete(activeProfile.id);
-        return next;
-      });
-      setDemoOtherProfiles((prev) => {
-        const existingTarget = prev[activeProfile.id] ?? activeProfile;
-        return {
+          if (isFollowingTarget) {
+            followingSet.delete(targetId);
+            nextFollowing = prev.following.filter((u) => u.id !== targetId);
+            nextFollowers = prev.followers.map((u) =>
+              u.id === targetId ? { ...u, isFollowing: false } : u
+            );
+          } else if (isRequestedTarget) {
+            requestedSet.delete(targetId);
+          } else if (activeProfile.isPrivate) {
+            requestedSet.add(targetId);
+          } else {
+            followingSet.add(targetId);
+            const alreadyListed = prev.following.some((u) => u.id === targetId);
+            if (!alreadyListed) {
+              nextFollowing = [
+                {
+                  id: targetId,
+                  username: activeProfile.username,
+                  displayName: activeProfile.displayName,
+                  avatarUrl: activeProfile.avatarUrl,
+                  bio: activeProfile.bio,
+                  isFollowing: true,
+                  isRequested: false,
+                  isFollower: prev.followers.some((u) => u.id === targetId),
+                  isBlocked: false,
+                  createdAt: activeProfile.createdAt,
+                },
+                ...prev.following,
+              ];
+            }
+            nextFollowers = prev.followers.map((u) =>
+              u.id === targetId ? { ...u, isFollowing: true } : u
+            );
+          }
+
+          const currentFollowingCount =
+            prev.profileOverrides.followingCount ?? prev.following.length;
+
+          return {
+            ...prev,
+            followingIds: Array.from(followingSet),
+            requestedIds: Array.from(requestedSet),
+            following: nextFollowing,
+            followers: nextFollowers,
+            profileOverrides:
+              delta !== 0
+                ? {
+                    ...prev.profileOverrides,
+                    followingCount: Math.max(0, currentFollowingCount + delta),
+                  }
+                : prev.profileOverrides,
+          };
+        });
+
+        if (delta !== 0) {
+          setRemoteVisitedProfiles((prev) => {
+            const currentTarget = prev[targetId] ?? authOtherProfilesMap[targetId] ?? activeProfile;
+            return {
+              ...prev,
+              [targetId]: {
+                ...currentTarget,
+                followersCount: Math.max(0, currentTarget.followersCount + delta),
+              },
+            };
+          });
+
+          try {
+            const raw = window.localStorage.getItem(PUBLIC_PROFILES_STORAGE_KEY);
+            if (raw) {
+              const parsed = JSON.parse(raw);
+              if (parsed && typeof parsed === 'object' && parsed[targetId]?.profile) {
+                parsed[targetId].profile.followersCount = Math.max(
+                  0,
+                  (parsed[targetId].profile.followersCount ?? 0) + delta
+                );
+                window.localStorage.setItem(PUBLIC_PROFILES_STORAGE_KEY, JSON.stringify(parsed));
+              }
+            }
+          } catch {
+            // Ignore storage quota error
+          }
+          setPublicProfilesRevision((r) => r + 1);
+        }
+        return;
+      }
+
+      // Demo Mode
+      if (isFollowingActive) {
+        setDemoFollowingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(targetId);
+          return next;
+        });
+        setDemoOtherProfiles((prev) => {
+          const existingTarget = prev[targetId] ?? activeProfile;
+          return {
+            ...prev,
+            [targetId]: {
+              ...existingTarget,
+              followersCount: Math.max(0, existingTarget.followersCount - 1),
+            },
+          };
+        });
+        setDemoProfile((prev) => ({
           ...prev,
-          [activeProfile.id]: {
-            ...existingTarget,
-            followersCount: Math.max(0, existingTarget.followersCount - 1),
-          },
-        };
-      });
-      setDemoProfile((prev) => ({
-        ...prev,
-        followingCount: Math.max(0, prev.followingCount - 1),
-      }));
-      setDemoFollowing((prev) => prev.filter((u) => u.id !== activeProfile.id));
-      setDemoFollowers((prev) =>
-        prev.map((u) => (u.id === activeProfile.id ? { ...u, isFollowing: false } : u))
-      );
-    } else if (isRequestedActive) {
-      setDemoRequestedIds((prev) => {
-        const next = new Set(prev);
-        next.delete(activeProfile.id);
-        return next;
-      });
-    } else if (activeProfile.isPrivate) {
-      setDemoRequestedIds((prev) => new Set(prev).add(activeProfile.id));
-    } else {
-      setDemoFollowingIds((prev) => new Set(prev).add(activeProfile.id));
-      setDemoOtherProfiles((prev) => {
-        const existingTarget = prev[activeProfile.id] ?? activeProfile;
-        return {
+          followingCount: Math.max(0, prev.followingCount - 1),
+        }));
+        setDemoFollowing((prev) => prev.filter((u) => u.id !== targetId));
+        setDemoFollowers((prev) =>
+          prev.map((u) => (u.id === targetId ? { ...u, isFollowing: false } : u))
+        );
+      } else if (isRequestedActive) {
+        setDemoRequestedIds((prev) => {
+          const next = new Set(prev);
+          next.delete(targetId);
+          return next;
+        });
+      } else if (activeProfile.isPrivate) {
+        setDemoRequestedIds((prev) => new Set(prev).add(targetId));
+      } else {
+        setDemoFollowingIds((prev) => new Set(prev).add(targetId));
+        setDemoOtherProfiles((prev) => {
+          const existingTarget = prev[targetId] ?? activeProfile;
+          return {
+            ...prev,
+            [targetId]: {
+              ...existingTarget,
+              followersCount: existingTarget.followersCount + 1,
+            },
+          };
+        });
+        setDemoProfile((prev) => ({
           ...prev,
-          [activeProfile.id]: {
-            ...existingTarget,
-            followersCount: existingTarget.followersCount + 1,
-          },
-        };
-      });
-      setDemoProfile((prev) => ({
-        ...prev,
-        followingCount: prev.followingCount + 1,
-      }));
-      setDemoFollowing((prev) => {
-        if (prev.some((u) => u.id === activeProfile.id)) return prev;
-        return [
-          {
-            id: activeProfile.id,
-            username: activeProfile.username,
-            displayName: activeProfile.displayName,
-            avatarUrl: activeProfile.avatarUrl,
-            bio: activeProfile.bio,
-            isFollowing: true,
-            isRequested: false,
-            isFollower: demoFollowers.some((u) => u.id === activeProfile.id),
-            isBlocked: false,
-            createdAt: activeProfile.createdAt,
-          },
-          ...prev,
-        ];
-      });
-      setDemoFollowers((prev) =>
-        prev.map((u) => (u.id === activeProfile.id ? { ...u, isFollowing: true } : u))
-      );
+          followingCount: prev.followingCount + 1,
+        }));
+        setDemoFollowing((prev) => {
+          if (prev.some((u) => u.id === targetId)) return prev;
+          return [
+            {
+              id: targetId,
+              username: activeProfile.username,
+              displayName: activeProfile.displayName,
+              avatarUrl: activeProfile.avatarUrl,
+              bio: activeProfile.bio,
+              isFollowing: true,
+              isRequested: false,
+              isFollower: demoFollowers.some((u) => u.id === targetId),
+              isBlocked: false,
+              createdAt: activeProfile.createdAt,
+            },
+            ...prev,
+          ];
+        });
+        setDemoFollowers((prev) =>
+          prev.map((u) => (u.id === targetId ? { ...u, isFollowing: true } : u))
+        );
+      }
+    } catch (err) {
+      console.error('Falha ao alternar relação de seguidor:', err);
+    } finally {
+      setIsFollowPending(false);
     }
   };
 
@@ -1109,9 +1220,37 @@ export default function App() {
         followingIds: prev.followingIds.filter((id) => id !== userId),
         profileOverrides: {
           ...prev.profileOverrides,
-          followingCount: Math.max(0, (prev.profileOverrides.followingCount ?? 0) - 1),
+          followingCount: Math.max(0, (prev.profileOverrides.followingCount ?? prev.following.length) - 1),
         },
       }));
+
+      setRemoteVisitedProfiles((prev) => {
+        if (!prev[userId]) return prev;
+        return {
+          ...prev,
+          [userId]: {
+            ...prev[userId],
+            followersCount: Math.max(0, prev[userId].followersCount - 1),
+          },
+        };
+      });
+
+      try {
+        const raw = window.localStorage.getItem(PUBLIC_PROFILES_STORAGE_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed === 'object' && parsed[userId]?.profile) {
+            parsed[userId].profile.followersCount = Math.max(
+              0,
+              (parsed[userId].profile.followersCount ?? 1) - 1
+            );
+            window.localStorage.setItem(PUBLIC_PROFILES_STORAGE_KEY, JSON.stringify(parsed));
+          }
+        }
+      } catch {
+        // Ignore storage error
+      }
+      setPublicProfilesRevision((r) => r + 1);
       return;
     }
 
@@ -1125,6 +1264,16 @@ export default function App() {
       ...prev,
       followingCount: Math.max(0, prev.followingCount - 1),
     }));
+    setDemoOtherProfiles((prev) => {
+      if (!prev[userId]) return prev;
+      return {
+        ...prev,
+        [userId]: {
+          ...prev[userId],
+          followersCount: Math.max(0, prev[userId].followersCount - 1),
+        },
+      };
+    });
   };
 
   const persistAndApply = (
@@ -2013,6 +2162,7 @@ export default function App() {
           isFollowing={isFollowingActive}
           isRequested={isRequestedActive}
           isBlocked={isBlockedActive}
+          isFollowPending={isFollowPending}
           onFollowToggle={handleFollowToggle}
           onBlockToggle={handleBlockToggle}
           onOpenSettings={(tab = 'profile') => {

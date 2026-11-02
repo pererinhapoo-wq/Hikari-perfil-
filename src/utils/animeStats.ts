@@ -36,96 +36,120 @@ export const EMPTY_ANIME_STATS: AnimeStatsSummary = {
  * a profile's anime lists are marked private while keeping stats visible.
  */
 export function computeAnimeStats(animes: AnimeItem[]): AnimeStatsSummary {
-  const uniqueAnimes = Array.from(new Map(animes.map((a) => [a.id, a])).values());
+  if (!animes || animes.length === 0) {
+    return { ...EMPTY_ANIME_STATS };
+  }
 
-  const watchingCount = uniqueAnimes.filter((a) => a.status === 'watching').length;
-  const completedCount = uniqueAnimes.filter((a) => a.status === 'completed').length;
-  const onHoldCount = uniqueAnimes.filter((a) => a.status === 'on_hold').length;
-  const droppedCount = uniqueAnimes.filter((a) => a.status === 'dropped').length;
-  const plannedCount = uniqueAnimes.filter((a) => a.status === 'planned').length;
+  const seenIds = new Set<string>();
+  let watchingCount = 0;
+  let completedCount = 0;
+  let onHoldCount = 0;
+  let droppedCount = 0;
+  let plannedCount = 0;
+  let totalEntries = 0;
 
-  const totalEntries = uniqueAnimes.length;
+  let hasEpisodeData = true;
+  let totalEpisodesWatched = 0;
 
-  const hasEpisodeData = uniqueAnimes.every(
-    (a) =>
+  let ratedCount = 0;
+  let ratingSum = 0;
+
+  let hasRewatchData = false;
+  let rewatchedSum = 0;
+
+  let canCalculateDaysWatched = true;
+  let watchedEntriesCount = 0;
+  let watchedMinutesSum = 0;
+
+  for (let i = 0; i < animes.length; i++) {
+    const a = animes[i];
+    if (seenIds.has(a.id)) continue;
+    seenIds.add(a.id);
+    totalEntries++;
+
+    switch (a.status) {
+      case 'watching':
+        watchingCount++;
+        break;
+      case 'completed':
+        completedCount++;
+        break;
+      case 'on_hold':
+        onHoldCount++;
+        break;
+      case 'dropped':
+        droppedCount++;
+        break;
+      case 'planned':
+        plannedCount++;
+        break;
+    }
+
+    const hasValidEpData =
       typeof a.currentEpisode === 'number' &&
       Number.isFinite(a.currentEpisode) &&
       typeof a.totalEpisodes === 'number' &&
-      Number.isFinite(a.totalEpisodes)
-  );
+      Number.isFinite(a.totalEpisodes);
 
-  const totalEpisodesWatched = hasEpisodeData
-    ? uniqueAnimes.reduce((acc, a) => {
-        const baseEps =
-          a.status === 'completed'
-            ? Math.max(0, a.totalEpisodes)
-            : Math.max(0, a.currentEpisode);
-        const rewatchedEps =
-          typeof a.rewatchCount === 'number' &&
-          Number.isFinite(a.rewatchCount) &&
-          a.rewatchCount > 0
-            ? a.rewatchCount * Math.max(0, a.totalEpisodes)
-            : 0;
-        return acc + baseEps + rewatchedEps;
-      }, 0)
-    : 0;
+    if (!hasValidEpData) {
+      hasEpisodeData = false;
+    }
 
-  const ratedAnimes = uniqueAnimes.filter(
-    (a) =>
+    const baseEps =
+      a.status === 'completed'
+        ? Math.max(0, a.totalEpisodes || 0)
+        : Math.max(0, a.currentEpisode || 0);
+
+    const rewatchEps =
+      typeof a.rewatchCount === 'number' &&
+      Number.isFinite(a.rewatchCount) &&
+      a.rewatchCount > 0
+        ? a.rewatchCount * Math.max(0, a.totalEpisodes || 0)
+        : 0;
+
+    totalEpisodesWatched += baseEps + rewatchEps;
+
+    if (
       typeof a.rating === 'number' &&
       Number.isFinite(a.rating) &&
       a.rating > 0 &&
       a.rating <= 10
-  );
+    ) {
+      ratedCount++;
+      ratingSum += a.rating;
+    }
 
-  const meanScoreFormatted =
-    ratedAnimes.length > 0
-      ? (ratedAnimes.reduce((acc, a) => acc + a.rating, 0) / ratedAnimes.length).toFixed(2)
-      : '—';
+    if (typeof a.rewatchCount === 'number' && Number.isFinite(a.rewatchCount)) {
+      hasRewatchData = true;
+      rewatchedSum += Math.max(0, a.rewatchCount);
+    }
 
-  const watchedEntries = uniqueAnimes.filter(
-    (a) => (a.status === 'completed' ? a.totalEpisodes : a.currentEpisode) > 0
-  );
-
-  const canCalculateDaysWatched =
-    totalEntries === 0 ||
-    watchedEntries.length === 0 ||
-    watchedEntries.every(
-      (a) =>
+    if (baseEps > 0) {
+      watchedEntriesCount++;
+      const hasValidDuration =
         typeof a.episodeDurationMinutes === 'number' &&
         Number.isFinite(a.episodeDurationMinutes) &&
-        a.episodeDurationMinutes > 0
-    );
+        a.episodeDurationMinutes > 0;
+
+      if (!hasValidDuration) {
+        canCalculateDaysWatched = false;
+      } else {
+        watchedMinutesSum += (baseEps + rewatchEps) * a.episodeDurationMinutes!;
+      }
+    }
+  }
+
+  const finalTotalEpisodesWatched = hasEpisodeData ? totalEpisodesWatched : 0;
+  const meanScoreFormatted =
+    ratedCount > 0 ? (ratingSum / ratedCount).toFixed(2) : '—';
 
   const daysWatchedFormatted = !canCalculateDaysWatched
     ? null
-    : watchedEntries.length === 0
+    : watchedEntriesCount === 0
     ? '0.0'
-    : (
-        watchedEntries.reduce((acc, a) => {
-          const eps =
-            a.status === 'completed'
-              ? Math.max(0, a.totalEpisodes)
-              : Math.max(0, a.currentEpisode);
-          const extraEps =
-            typeof a.rewatchCount === 'number' &&
-            Number.isFinite(a.rewatchCount) &&
-            a.rewatchCount > 0
-              ? a.rewatchCount * Math.max(0, a.totalEpisodes)
-              : 0;
-          return acc + (eps + extraEps) * (a.episodeDurationMinutes || 0);
-        }, 0) / 1440
-      ).toFixed(1);
+    : (watchedMinutesSum / 1440).toFixed(1);
 
-  const hasRewatchData =
-    totalEntries > 0 &&
-    uniqueAnimes.some(
-      (a) => typeof a.rewatchCount === 'number' && Number.isFinite(a.rewatchCount)
-    );
-
-  const rewatchedTotal = hasRewatchData
-    ? uniqueAnimes.reduce((acc, a) => acc + Math.max(0, a.rewatchCount || 0), 0)
-    : null;
+  const rewatchedTotal = hasRewatchData ? rewatchedSum : null;
 
   return {
     watchingCount,
@@ -135,8 +159,8 @@ export function computeAnimeStats(animes: AnimeItem[]): AnimeStatsSummary {
     plannedCount,
     totalEntries,
     hasEpisodeData,
-    totalEpisodesWatched,
-    ratedCount: ratedAnimes.length,
+    totalEpisodesWatched: finalTotalEpisodesWatched,
+    ratedCount,
     meanScoreFormatted,
     daysWatchedFormatted,
     rewatchedTotal,

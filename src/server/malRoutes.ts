@@ -381,7 +381,7 @@ malRouter.get(['/callback', '/callback/'], async (req, res) => {
 
   const renderPopupResult = (
     result:
-      | { success: true; username: string; avatarUrl: string }
+      | { success: true; username: string; avatarUrl: string; joinedAt?: string }
       | { success: false; message: string }
   ) => {
     const postData = result.success
@@ -389,6 +389,7 @@ malRouter.get(['/callback', '/callback/'], async (req, res) => {
           type: 'MAL_AUTH_SUCCESS',
           username: result.username,
           avatarUrl: result.avatarUrl,
+          joinedAt: result.joinedAt,
         }
       : {
           type: 'MAL_AUTH_ERROR',
@@ -599,7 +600,7 @@ malRouter.get(['/callback', '/callback/'], async (req, res) => {
       });
     }
 
-    const userRes = await fetch('https://api.myanimelist.net/v2/users/@me', {
+    const userRes = await fetch('https://api.myanimelist.net/v2/users/@me?fields=joined_at', {
       headers: {
         Authorization: `Bearer ${tokenData.access_token}`,
       },
@@ -625,6 +626,7 @@ malRouter.get(['/callback', '/callback/'], async (req, res) => {
       {
         username: userData.name,
         avatarUrl: userData.picture || undefined,
+        joinedAt: typeof userData.joined_at === 'string' ? userData.joined_at : undefined,
         expiresAt: Date.now() + expiresInSec * 1000,
       },
       storageCtx.encryptionKey
@@ -634,6 +636,7 @@ malRouter.get(['/callback', '/callback/'], async (req, res) => {
       success: true,
       username: userData.name,
       avatarUrl: userData.picture || '',
+      joinedAt: typeof userData.joined_at === 'string' ? userData.joined_at : undefined,
     });
   } catch (err) {
     return renderPopupResult({

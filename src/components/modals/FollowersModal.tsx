@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   X, 
   Search, 
@@ -45,6 +45,33 @@ export const FollowersModal: React.FC<FollowersModalProps> = ({
   const [activeTab, setActiveTab] = useState<'followers' | 'following' | 'requests'>(initialTab);
   const [searchQuery, setSearchQuery] = useState('');
 
+  // Background scroll lock without position jumps, and Escape key dismissal
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const prevBodyOverflow = document.body.style.overflow;
+    const prevHtmlOverflow = document.documentElement.style.overflow;
+    const prevTouchAction = document.body.style.touchAction;
+
+    document.body.style.overflow = 'hidden';
+    document.documentElement.style.overflow = 'hidden';
+    document.body.style.touchAction = 'none';
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.body.style.overflow = prevBodyOverflow;
+      document.documentElement.style.overflow = prevHtmlOverflow;
+      document.body.style.touchAction = prevTouchAction;
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isOpen, onClose]);
+
   if (!isOpen) return null;
 
   const currentList = activeTab === 'followers' 
@@ -60,18 +87,21 @@ export const FollowersModal: React.FC<FollowersModalProps> = ({
 
   return (
     <div 
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150 overscroll-contain"
-      onClick={onClose}
-      onTouchMove={(e) => {
-        if (e.target === e.currentTarget) {
-          e.preventDefault();
-        }
+      role="dialog"
+      aria-modal="true"
+      className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150 overflow-y-auto overscroll-contain"
+      style={{
+        paddingTop: 'max(0.625rem, env(safe-area-inset-top))',
+        paddingBottom: 'max(0.625rem, env(safe-area-inset-bottom))',
+        paddingLeft: 'max(0.625rem, env(safe-area-inset-left))',
+        paddingRight: 'max(0.625rem, env(safe-area-inset-right))',
       }}
+      onClick={onClose}
     >
       <div 
-        className="relative w-full max-w-lg rounded-2xl border border-purple-900/40 bg-[#130E24] shadow-2xl flex flex-col max-h-[85vh] overscroll-contain"
+        className="relative w-full max-w-lg my-auto rounded-2xl border border-purple-900/40 bg-[#130E24] shadow-2xl flex flex-col h-[min(90dvh,750px)] max-h-[85vh] overflow-hidden overscroll-contain"
         onClick={(e) => e.stopPropagation()}
-        onTouchMove={(e) => e.stopPropagation()}
+        style={{ touchAction: 'pan-y' }}
       >
         {/* Header */}
         <div className="flex items-center justify-between border-b border-purple-900/30 px-5 py-4">

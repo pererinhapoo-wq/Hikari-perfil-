@@ -61,23 +61,41 @@ function getStatusBadge(status: AnimeItem['status']) {
   switch (status) {
     case 'watching':
       return (
-        <span className="text-[9px] sm:text-[11px] font-medium text-emerald-400">Assistindo</span>
+        <span className="inline-flex items-center gap-1 text-[9px] sm:text-[11px] font-medium text-emerald-400">
+          <span className="relative flex h-1.5 w-1.5 shrink-0 items-center justify-center">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60 motion-reduce:hidden" />
+            <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" />
+          </span>
+          <span>Assistindo</span>
+        </span>
       );
     case 'completed':
       return (
-        <span className="text-[9px] sm:text-[11px] font-medium text-purple-300">Concluído</span>
+        <span className="inline-flex items-center gap-1 text-[9px] sm:text-[11px] font-medium text-purple-300">
+          <span className="h-1.5 w-1.5 rounded-full bg-purple-400 shrink-0" />
+          <span>Concluído</span>
+        </span>
       );
     case 'planned':
       return (
-        <span className="text-[9px] sm:text-[11px] font-medium text-indigo-300">Planejado</span>
+        <span className="inline-flex items-center gap-1 text-[9px] sm:text-[11px] font-medium text-indigo-300">
+          <span className="h-1.5 w-1.5 rounded-full bg-indigo-400 shrink-0" />
+          <span>Planejado</span>
+        </span>
       );
     case 'on_hold':
       return (
-        <span className="text-[9px] sm:text-[11px] font-medium text-amber-300">Em espera</span>
+        <span className="inline-flex items-center gap-1 text-[9px] sm:text-[11px] font-medium text-amber-300">
+          <span className="h-1.5 w-1.5 rounded-full bg-amber-400 shrink-0" />
+          <span>Em espera</span>
+        </span>
       );
     case 'dropped':
       return (
-        <span className="text-[9px] sm:text-[11px] font-medium text-rose-300">Abandonado</span>
+        <span className="inline-flex items-center gap-1 text-[9px] sm:text-[11px] font-medium text-rose-300">
+          <span className="h-1.5 w-1.5 rounded-full bg-rose-400 shrink-0" />
+          <span>Abandonado</span>
+        </span>
       );
     default:
       return null;
@@ -262,10 +280,22 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
 
   // Virtualization state & refs
   const gridRef = useRef<HTMLDivElement | null>(null);
+  const gridOffsetTopRef = useRef<number>(0);
+  const lastStartRowRef = useRef<number>(-1);
+  const lastEndRowRef = useRef<number>(-1);
   const [measuredRowHeight, setMeasuredRowHeight] = useState<number>(DEFAULT_ROW_HEIGHT);
   const [scrollY, setScrollY] = useState<number>(() => {
     return typeof window !== 'undefined' ? window.scrollY || window.pageYOffset || 0 : 0;
   });
+
+  // Safely measure gridOffsetTop on mount, resize and filter change (never on every scroll pixel)
+  const updateGridOffsetTop = useCallback(() => {
+    if (gridRef.current) {
+      const rect = gridRef.current.getBoundingClientRect();
+      const currentScrollY = window.scrollY || window.pageYOffset || 0;
+      gridOffsetTopRef.current = Math.max(0, rect.top + currentScrollY);
+    }
+  }, []);
 
   // Sync status filter when navigating from clickable Anime Stats rows
   useEffect(() => {
@@ -301,33 +331,17 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
     }
   }, [selectedStatusFilter]);
 
-  // Window scroll & resize listener with requestAnimationFrame throttling
-  useEffect(() => {
-    let ticking = false;
-    const handleScrollOrResize = () => {
-      if (!ticking) {
-        window.requestAnimationFrame(() => {
-          const currentY = window.scrollY || window.pageYOffset || 0;
-          setScrollY(currentY);
-          persistentAnimeTabState.scrollY = currentY;
-          ticking = false;
-        });
-        ticking = true;
+  const uniqueAnimes = useMemo(() => {
+    const seen = new Set<string>();
+    const result: AnimeItem[] = [];
+    for (let i = 0; i < animes.length; i++) {
+      if (!seen.has(animes[i].id)) {
+        seen.add(animes[i].id);
+        result.push(animes[i]);
       }
-    };
-
-    window.addEventListener('scroll', handleScrollOrResize, { passive: true });
-    window.addEventListener('resize', handleScrollOrResize, { passive: true });
-    return () => {
-      window.removeEventListener('scroll', handleScrollOrResize);
-      window.removeEventListener('resize', handleScrollOrResize);
-    };
-  }, []);
-
-  const uniqueAnimes = useMemo(
-    () => Array.from(new Map(animes.map((a) => [a.id, a])).values()),
-    [animes]
-  );
+    }
+    return result;
+  }, [animes]);
 
   const detailAnime = useMemo(
     () => (detailAnimeId ? uniqueAnimes.find((a) => a.id === detailAnimeId) ?? null : null),
@@ -357,10 +371,50 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
     });
   }, [uniqueAnimes, activeFilter, searchQuery]);
 
+  // Virtual window total metrics
+  const totalItems = filteredAnimes.length;
+  const totalRows = Math.ceil(totalItems / COLUMNS);
+
+  // Window scroll & resize listener with row-change banding to eliminate redundant renders
+  useEffect(() => {
+    let ticking = false;
+    const handleScrollOrResize = () => {
+      if (!ticking) {
+        window.requestAnimationFrame(() => {
+          const currentY = window.scrollY || window.pageYOffset || 0;
+          persistentAnimeTabState.scrollY = currentY;
+
+          const rowHeight = measuredRowHeight > 0 ? measuredRowHeight : DEFAULT_ROW_HEIGHT;
+          const viewportHeight = typeof window !== 'undefined' && window.innerHeight > 0 ? window.innerHeight : 800;
+          const relativeScroll = Math.max(0, currentY - gridOffsetTopRef.current);
+          const startRow = Math.max(0, Math.floor(relativeScroll / rowHeight) - OVERSCAN_ROWS);
+          const endRow = Math.min(totalRows, Math.ceil((relativeScroll + viewportHeight) / rowHeight) + OVERSCAN_ROWS);
+
+          if (startRow !== lastStartRowRef.current || endRow !== lastEndRowRef.current) {
+            lastStartRowRef.current = startRow;
+            lastEndRowRef.current = endRow;
+            setScrollY(currentY);
+          }
+          ticking = false;
+        });
+        ticking = true;
+      }
+    };
+
+    updateGridOffsetTop();
+    window.addEventListener('scroll', handleScrollOrResize, { passive: true });
+    window.addEventListener('resize', handleScrollOrResize, { passive: true });
+    return () => {
+      window.removeEventListener('scroll', handleScrollOrResize);
+      window.removeEventListener('resize', handleScrollOrResize);
+    };
+  }, [totalRows, measuredRowHeight, updateGridOffsetTop]);
+
   // Dynamically measure actual rendered card height on screen
   useEffect(() => {
     const measure = () => {
       if (!gridRef.current) return;
+      updateGridOffsetTop();
       const firstCard = gridRef.current.querySelector<HTMLElement>('[data-testid^="anime-card-"]');
       if (firstCard) {
         const height = firstCard.getBoundingClientRect().height;
@@ -372,11 +426,7 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
     };
 
     measure();
-  }, [filteredAnimes.length]);
-
-  // Virtual window calculation
-  const totalItems = filteredAnimes.length;
-  const totalRows = Math.ceil(totalItems / COLUMNS);
+  }, [filteredAnimes.length, updateGridOffsetTop]);
 
   const { visibleAnimes, topPadding, bottomPadding } = useMemo(() => {
     // If list is small (<= 24 items), render completely without windowing
@@ -391,11 +441,12 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
     const rowHeight = measuredRowHeight > 0 ? measuredRowHeight : DEFAULT_ROW_HEIGHT;
     const viewportHeight = typeof window !== 'undefined' && window.innerHeight > 0 ? window.innerHeight : 800;
 
-    let gridOffsetTop = 0;
-    if (gridRef.current) {
+    let gridOffsetTop = gridOffsetTopRef.current;
+    if (gridOffsetTop === 0 && gridRef.current) {
       const rect = gridRef.current.getBoundingClientRect();
       const currentScrollY = window.scrollY || window.pageYOffset || 0;
       gridOffsetTop = Math.max(0, rect.top + currentScrollY);
+      gridOffsetTopRef.current = gridOffsetTop;
     }
 
     const relativeScroll = Math.max(0, scrollY - gridOffsetTop);

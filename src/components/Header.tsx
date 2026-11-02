@@ -17,7 +17,8 @@ import {
   Eye,
   CheckCircle2,
   XCircle,
-  MessageSquare
+  MessageSquare,
+  Camera
 } from 'lucide-react';
 import { UserProfile, NotificationItem, AnimeItem } from '../types';
 
@@ -116,6 +117,33 @@ export const Header: React.FC<HeaderProps> = ({
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [isNotifOpen, onToggleNotif]);
+
+  // Lock background scrolling cleanly while user menu is open (Item 2)
+  useEffect(() => {
+    if (!isUserMenuOpen) return;
+
+    const originalBodyOverflow = document.body.style.overflow;
+    const originalHtmlOverflow = document.documentElement.style.overflow;
+    const originalTouchAction = document.body.style.touchAction;
+
+    document.body.style.overflow = 'hidden';
+    document.documentElement.style.overflow = 'hidden';
+    document.body.style.touchAction = 'none';
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setIsUserMenuOpen(false);
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.body.style.overflow = originalBodyOverflow;
+      document.documentElement.style.overflow = originalHtmlOverflow;
+      document.body.style.touchAction = originalTouchAction;
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isUserMenuOpen]);
 
   const searchResults = searchQuery.trim()
     ? (isAuthenticated
@@ -571,7 +599,25 @@ export const Header: React.FC<HeaderProps> = ({
 
             {/* Menu da foto de perfil: EXACTLY the 7 items requested */}
             {isUserMenuOpen && (
-              <div className="absolute right-0 top-full mt-2 w-64 rounded-2xl border border-purple-800/30 bg-[#130E24] p-2 shadow-2xl shadow-black/90 backdrop-blur-xl z-50 animate-in fade-in zoom-in-95 duration-100">
+              <>
+                {/* Backdrop to prevent underlying touch movement and dismiss on outside click */}
+                <div
+                  className="fixed inset-0 z-40 bg-black/20 md:bg-transparent"
+                  onClick={() => setIsUserMenuOpen(false)}
+                  onTouchMove={(e) => {
+                    e.preventDefault();
+                  }}
+                />
+
+                <div
+                  role="menu"
+                  aria-label="Menu do Usuário"
+                  className="absolute right-0 top-full mt-2 w-64 max-h-[min(30rem,calc(100vh-5rem))] supports-[height:100dvh]:max-h-[min(30rem,calc(100dvh-5rem))] overflow-y-auto overscroll-contain rounded-2xl border border-purple-800/30 bg-[#130E24] p-2 shadow-2xl shadow-black/90 backdrop-blur-xl z-50 animate-in fade-in zoom-in-95 duration-100"
+                  style={{ touchAction: 'pan-y' }}
+                  onTouchMove={(e) => {
+                    e.stopPropagation();
+                  }}
+                >
                 {/* User info mini header inside menu */}
                 <div className="border-b border-purple-900/40 px-3 py-2.5 mb-1">
                   <div className="font-semibold text-sm text-white truncate">{currentUser.displayName}</div>
@@ -599,6 +645,19 @@ export const Header: React.FC<HeaderProps> = ({
                   >
                     <User className="h-4 w-4 text-purple-400" />
                     <span>Meu perfil</span>
+                  </button>
+
+                  {/* 1.1 Editar perfil e foto */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsUserMenuOpen(false);
+                      onOpenSettings('profile');
+                    }}
+                    className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-purple-200 hover:bg-purple-900/30 hover:text-white transition-colors cursor-pointer"
+                  >
+                    <Camera className="h-4 w-4 text-purple-400" />
+                    <span>Editar perfil e foto</span>
                   </button>
 
                   {/* 2. Configurações */}
@@ -725,7 +784,8 @@ export const Header: React.FC<HeaderProps> = ({
                   )}
                 </div>
               </div>
-            )}
+            </>
+          )}
           </div>
         </div>
       </div>

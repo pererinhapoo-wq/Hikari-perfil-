@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   MessageSquare, 
   ExternalLink, 
@@ -6,10 +6,23 @@ import {
   MessageCircle, 
   EyeOff, 
   Tv,
-  Calendar
+  Calendar,
+  ChevronDown
 } from 'lucide-react';
 import { HikariComment } from '../../types';
 import { useCurrentTime, formatRelativeTime, formatExactDateTime } from '../../utils/relativeTime';
+
+/**
+ * Leaf component that subscribes to useCurrentTime() so timer ticks do NOT
+ * cause the parent CommentsTab or all rendered comments to re-render.
+ */
+const CommentTimeSpan: React.FC<{
+  timestamp: number | undefined;
+  fallbackText?: string;
+}> = ({ timestamp, fallbackText = '' }) => {
+  const now = useCurrentTime();
+  return <>{formatRelativeTime(timestamp, now, fallbackText, false)}</>;
+};
 
 interface CommentsTabProps {
   comments: HikariComment[];
@@ -19,6 +32,8 @@ interface CommentsTabProps {
   highlightedCommentId?: string;
 }
 
+const COMMENTS_BATCH_SIZE = 12;
+
 export const CommentsTab: React.FC<CommentsTabProps> = ({
   comments,
   showCommentsOnProfile,
@@ -26,7 +41,44 @@ export const CommentsTab: React.FC<CommentsTabProps> = ({
   userName,
   highlightedCommentId
 }) => {
-  const now = useCurrentTime();
+  // Determine initial batch size, ensuring highlighted comment is visible if requested
+  const initialBatch = useMemo(() => {
+    if (!highlightedCommentId) return COMMENTS_BATCH_SIZE;
+    const idx = comments.findIndex((c) => c.id === highlightedCommentId);
+    return idx >= 0 ? Math.max(COMMENTS_BATCH_SIZE, idx + 1) : COMMENTS_BATCH_SIZE;
+  }, [comments, highlightedCommentId]);
+
+  const [visibleCount, setVisibleCount] = useState<number>(initialBatch);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+
+  // Reset or adjust visible count when comments list length or highlighted ID changes
+  useEffect(() => {
+    if (highlightedCommentId) {
+      const idx = comments.findIndex((c) => c.id === highlightedCommentId);
+      if (idx >= 0 && idx >= visibleCount) {
+        setVisibleCount(idx + 1);
+      }
+    }
+  }, [highlightedCommentId, comments, visibleCount]);
+
+  // Progressive infinite scroll via IntersectionObserver
+  useEffect(() => {
+    if (visibleCount >= comments.length) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          setVisibleCount((prev) => Math.min(comments.length, prev + COMMENTS_BATCH_SIZE));
+        }
+      },
+      { rootMargin: '300px 0px' }
+    );
+
+    const el = sentinelRef.current;
+    if (el) observer.observe(el);
+    return () => {
+      if (el) observer.unobserve(el);
+    };
+  }, [visibleCount, comments.length]);
 
   // If user disabled comments on profile and viewer is not the owner:
   if (!showCommentsOnProfile && !isOwnProfile) {
@@ -40,6 +92,9 @@ export const CommentsTab: React.FC<CommentsTabProps> = ({
       </div>
     );
   }
+
+  const visibleComments = comments.slice(0, visibleCount);
+  const remainingCount = Math.max(0, comments.length - visibleCount);
 
   return (
     <div className="space-y-4">
@@ -63,7 +118,7 @@ export const CommentsTab: React.FC<CommentsTabProps> = ({
         </div>
       ) : (
         <div className="space-y-3">
-          {comments.map((comment) => {
+          {visibleComments.map((comment) => {
             const isHighlighted = comment.id === highlightedCommentId;
             return (
               <div
@@ -96,58 +151,71 @@ export const CommentsTab: React.FC<CommentsTabProps> = ({
                     )}
                   </div>
 
-                <div className="flex items-center gap-3">
-                  <div
-                    className="flex items-center gap-1 text-[11px] text-purple-300/60"
-                    title={formatExactDateTime(comment.createdAtTimestamp) || undefined}
-                  >
-                    <Calendar className="h-3 w-3" />
-                    <span>{formatRelativeTime(comment.createdAtTimestamp, now, comment.createdAt, false)}</span>
+                  <div className="flex items-center gap-3">
+                    <div
+                      className="flex items-center gap-1 text-[11px] text-purple-300/60"
+                      title={formatExactDateTime(comment.createdAtTimestamp) || undefined}
+                    >
+                      <Calendar className="h-3 w-3" />
+                      <CommentTimeSpan timestamp={comment.createdAtTimestamp} fallbackText={comment.createdAt} />
+                    </div>
+
+                    {/* Link to open on Hikari */}
+                    <a
+                      href={comment.originUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={(e) => {
+                        e.preventDefault();
+                      }}
+                      className="flex items-center gap-1 rounded-lg bg-purple-950/60 border border-purple-800/40 px-2.5 py-1 text-xs font-medium text-purple-300 hover:bg-purple-800/50 hover:text-white transition-colors"
+                    >
+                      <span>Abrir no Hikari</span>
+                      <ExternalLink className="h-3 w-3" />
+                    </a>
                   </div>
+                </div>
 
-                  {/* Link to open on Hikari */}
-                  <a
-                    href={comment.originUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      alert(`Redirecionando para a discussão original no Hikari: ${comment.originUrl} (Integração prevista para a Etapa 3).`);
-                    }}
-                    className="flex items-center gap-1 rounded-lg bg-purple-950/60 border border-purple-800/40 px-2.5 py-1 text-xs font-medium text-purple-300 hover:bg-purple-800/50 hover:text-white transition-colors"
-                  >
-                    <span>Abrir no Hikari</span>
-                    <ExternalLink className="h-3 w-3" />
-                  </a>
+                {/* Discussion topic tag if present */}
+                {comment.discussionTopic && (
+                  <div className="mt-2 text-[11px] font-medium text-purple-400/80">
+                    Tópico: {comment.discussionTopic}
+                  </div>
+                )}
+
+                {/* Comment Body */}
+                <div className="mt-3 text-sm leading-relaxed text-purple-100/90 whitespace-pre-line">
+                  "{comment.content}"
+                </div>
+
+                {/* Footer: Likes, replies feedback */}
+                <div className="mt-4 flex items-center gap-4 text-xs text-purple-300/60 pt-2 border-t border-purple-900/20">
+                  <div className="flex items-center gap-1.5 font-mono tabular-nums">
+                    <ThumbsUp className="h-3.5 w-3.5 text-purple-400" />
+                    <span>{comment.likesCount} curtidas</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 font-mono tabular-nums">
+                    <MessageCircle className="h-3.5 w-3.5 text-purple-400" />
+                    <span>{comment.repliesCount} respostas</span>
+                  </div>
                 </div>
               </div>
+            );
+          })}
 
-              {/* Discussion topic tag if present */}
-              {comment.discussionTopic && (
-                <div className="mt-2 text-[11px] font-medium text-purple-400/80">
-                  Tópico: {comment.discussionTopic}
-                </div>
-              )}
-
-              {/* Comment Body */}
-              <div className="mt-3 text-sm leading-relaxed text-purple-100/90 whitespace-pre-line">
-                "{comment.content}"
-              </div>
-
-              {/* Footer: Likes, replies feedback */}
-              <div className="mt-4 flex items-center gap-4 text-xs text-purple-300/60 pt-2 border-t border-purple-900/20">
-                <div className="flex items-center gap-1.5 font-mono tabular-nums">
-                  <ThumbsUp className="h-3.5 w-3.5 text-purple-400" />
-                  <span>{comment.likesCount} curtidas</span>
-                </div>
-                <div className="flex items-center gap-1.5 font-mono tabular-nums">
-                  <MessageCircle className="h-3.5 w-3.5 text-purple-400" />
-                  <span>{comment.repliesCount} respostas</span>
-                </div>
-              </div>
+          {/* Sentinel and Progressive Loader */}
+          {remainingCount > 0 && (
+            <div ref={sentinelRef} className="py-4 text-center">
+              <button
+                type="button"
+                onClick={() => setVisibleCount((prev) => Math.min(comments.length, prev + COMMENTS_BATCH_SIZE))}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-purple-800/50 bg-[#16102a] hover:bg-purple-900/40 px-4 py-2 text-xs font-semibold text-purple-200 hover:text-white transition-all cursor-pointer shadow-md"
+              >
+                <span>Mostrar mais comentários ({remainingCount} restantes)</span>
+                <ChevronDown className="h-3.5 w-3.5" />
+              </button>
             </div>
-          );
-        })}
+          )}
         </div>
       )}
     </div>

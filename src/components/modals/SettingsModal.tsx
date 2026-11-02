@@ -107,16 +107,35 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   
   const [saveSuccess, setSaveSuccess] = useState(false);
 
-  // Connected accounts state
+function formatExternalAccountDate(rawDate?: string | null): string | null {
+  if (!rawDate || typeof rawDate !== 'string') return null;
+  const trimmed = rawDate.trim();
+  if (!trimmed) return null;
+  const d = new Date(trimmed);
+  if (isNaN(d.getTime())) {
+    return trimmed;
+  }
+  return d.toLocaleDateString('pt-BR', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  });
+}
+
+// Connected accounts state
   const [anilistConnected, setAnilistConnected] = useState(profile.externalAccounts.anilist.connected);
   const [anilistUsername, setAnilistUsername] = useState(profile.externalAccounts.anilist.username || '');
   const [anilistAvatarUrl, setAnilistAvatarUrl] = useState(profile.externalAccounts.anilist.avatarUrl || '');
   const [anilistLastSync, setAnilistLastSync] = useState(profile.externalAccounts.anilist.lastSync || '');
+  const [anilistAccountCreatedAt, setAnilistAccountCreatedAt] = useState(profile.externalAccounts.anilist.accountCreatedAt || '');
 
   const [malConnected, setMalConnected] = useState(profile.externalAccounts.mal.connected);
   const [malUsername, setMalUsername] = useState(profile.externalAccounts.mal.username || '');
   const [malAvatarUrl, setMalAvatarUrl] = useState(profile.externalAccounts.mal.avatarUrl || '');
   const [malLastSync, setMalLastSync] = useState(profile.externalAccounts.mal.lastSync || '');
+  const [malAccountCreatedAt, setMalAccountCreatedAt] = useState(
+    formatExternalAccountDate(profile.externalAccounts.mal.accountCreatedAt) || profile.externalAccounts.mal.accountCreatedAt || ''
+  );
 
   // MAL Server status & connection state
   const [malStatus, setMalStatus] = useState<MALServerStatus | null>(null);
@@ -205,10 +224,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
         const username = data.username.trim();
         const avatarUrl = data.avatarUrl.trim();
+        const rawJoinedAt = typeof data.joinedAt === 'string' ? data.joinedAt.trim() : undefined;
+        const formattedJoinedAt = formatExternalAccountDate(rawJoinedAt) || undefined;
 
         setMalConnected(true);
         setMalUsername(username);
         setMalAvatarUrl(avatarUrl);
+        if (formattedJoinedAt) {
+          setMalAccountCreatedAt(formattedJoinedAt);
+        }
         setMalAuthError(null);
         setIsStartingMALAuth(false);
         setMalSuccessMsg(`Conta @${username} do MyAnimeList conectada com sucesso!`);
@@ -219,6 +243,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               connected: true,
               username,
               avatarUrl,
+              accountCreatedAt: formattedJoinedAt || malAccountCreatedAt || undefined,
             },
           },
         });
@@ -345,6 +370,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setMalUsername('');
     setMalAvatarUrl('');
     setMalLastSync('');
+    setMalAccountCreatedAt('');
     setMalPreview(null);
     setRawMALEntries(null);
     setIsConfirmingDisconnectMAL(false);
@@ -410,6 +436,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         username: malUsername,
         avatarUrl: malAvatarUrl,
         lastSync: formattedDate,
+        accountCreatedAt: malAccountCreatedAt || undefined,
       });
     }
 
@@ -443,6 +470,33 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const bannerInputRef = useRef<HTMLInputElement>(null);
 
+  // Background scroll lock without position jumps, and Escape key dismissal
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const prevBodyOverflow = document.body.style.overflow;
+    const prevHtmlOverflow = document.documentElement.style.overflow;
+    const prevTouchAction = document.body.style.touchAction;
+
+    document.body.style.overflow = 'hidden';
+    document.documentElement.style.overflow = 'hidden';
+    document.body.style.touchAction = 'none';
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.body.style.overflow = prevBodyOverflow;
+      document.documentElement.style.overflow = prevHtmlOverflow;
+      document.body.style.touchAction = prevTouchAction;
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isOpen, onClose]);
+
   if (!isOpen) return null;
 
   const handleSave = () => {
@@ -463,13 +517,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           connected: anilistConnected, 
           username: anilistConnected ? anilistUsername : undefined,
           avatarUrl: anilistConnected ? anilistAvatarUrl : undefined,
-          lastSync: anilistConnected ? anilistLastSync : undefined
+          lastSync: anilistConnected ? anilistLastSync : undefined,
+          accountCreatedAt: anilistConnected ? (anilistAccountCreatedAt || undefined) : undefined
         },
         mal: { 
           connected: malConnected, 
           username: malConnected ? malUsername : undefined,
           avatarUrl: malConnected ? malAvatarUrl : undefined,
-          lastSync: malConnected ? malLastSync : undefined
+          lastSync: malConnected ? malLastSync : undefined,
+          accountCreatedAt: malConnected ? (malAccountCreatedAt || undefined) : undefined
         }
       }
     });
@@ -508,18 +564,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   return (
     <div 
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150 overscroll-contain"
-      onClick={onClose}
-      onTouchMove={(e) => {
-        if (e.target === e.currentTarget) {
-          e.preventDefault();
-        }
+      role="dialog"
+      aria-modal="true"
+      className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150 overflow-y-auto overscroll-contain"
+      style={{
+        paddingTop: 'max(0.625rem, env(safe-area-inset-top))',
+        paddingBottom: 'max(0.625rem, env(safe-area-inset-bottom))',
+        paddingLeft: 'max(0.625rem, env(safe-area-inset-left))',
+        paddingRight: 'max(0.625rem, env(safe-area-inset-right))',
       }}
+      onClick={onClose}
     >
       <div 
-        className="relative w-full max-w-2xl rounded-2xl border border-purple-900/40 bg-[#130E24] shadow-2xl flex flex-col h-[90vh] sm:h-[85vh] max-h-[820px] overflow-hidden overscroll-contain"
+        className="relative w-full max-w-2xl my-auto rounded-2xl border border-purple-900/40 bg-[#130E24] shadow-2xl flex flex-col h-[min(92dvh,820px)] sm:h-[85vh] max-h-[820px] overflow-hidden overscroll-contain"
         onClick={(e) => e.stopPropagation()}
-        onTouchMove={(e) => e.stopPropagation()}
+        style={{ touchAction: 'pan-y' }}
       >
         {/* Hidden File Inputs */}
         <input ref={avatarInputRef} type="file" accept="image/*" className="hidden" onChange={handleAvatarFile} />
@@ -1112,6 +1171,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             setAnilistUsername('');
                             setAnilistAvatarUrl('');
                             setAnilistLastSync('');
+                            setAnilistAccountCreatedAt('');
                             setAniListPreview(null);
                             setRawIncomingEntries(null);
                             setIsConfirmingDisconnect(false);
@@ -1160,11 +1220,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                                 <ExternalLink className="h-3 w-3" />
                               </a>
                             </div>
-                            <span className="text-[11px] text-purple-400/70 block mt-0.5">
-                              {anilistLastSync
-                                ? `Última sincronização: ${anilistLastSync}`
-                                : 'Nenhuma importação realizada ainda nesta sessão.'}
-                            </span>
+                            <div className="mt-1 space-y-0.5 text-[11px]">
+                              <div className="flex items-center gap-1.5 text-purple-300/80">
+                                <Calendar className="h-3.5 w-3.5 text-purple-400 shrink-0" />
+                                <span>
+                                  Criação da conta:{' '}
+                                  <span className="text-purple-200/90 font-medium">
+                                    Não disponibilizada pela plataforma
+                                  </span>
+                                </span>
+                              </div>
+                              <span className="text-purple-400/70 block">
+                                {anilistLastSync
+                                  ? `Última sincronização: ${anilistLastSync}`
+                                  : 'Nenhuma importação realizada ainda nesta sessão.'}
+                              </span>
+                            </div>
                           </div>
                         </div>
 
@@ -1724,11 +1795,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                                 <ExternalLink className="h-3 w-3" />
                               </a>
                             </div>
-                            <span className="text-[11px] text-purple-400/70 block mt-0.5">
-                              {malLastSync
-                                ? `Última sincronização: ${malLastSync}`
-                                : 'Nenhuma importação realizada ainda nesta sessão.'}
-                            </span>
+                            <div className="mt-1 space-y-0.5 text-[11px]">
+                              <div className="flex items-center gap-1.5 text-purple-300/80">
+                                <Calendar className="h-3.5 w-3.5 text-blue-400 shrink-0" />
+                                <span>
+                                  Criação da conta:{' '}
+                                  <strong className="text-purple-200/90 font-medium">
+                                    {malAccountCreatedAt || 'Informação indisponível'}
+                                  </strong>
+                                </span>
+                              </div>
+                              <span className="text-purple-400/70 block">
+                                {malLastSync
+                                  ? `Última sincronização: ${malLastSync}`
+                                  : 'Nenhuma importação realizada ainda nesta sessão.'}
+                              </span>
+                            </div>
                           </div>
                         </div>
 

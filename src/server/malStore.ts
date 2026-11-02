@@ -20,6 +20,7 @@ export interface StoredMALIntegrationRecord {
   encryptedTokens: EncryptedPayload;
   username: string;
   avatarUrl?: string;
+  joinedAt?: string;
   expiresAt: number;
   updatedAt: number;
   isRefreshing?: boolean;
@@ -31,6 +32,7 @@ export interface DecryptedMALIntegration {
   tokens: MALTokenSet;
   username: string;
   avatarUrl?: string;
+  joinedAt?: string;
   expiresAt: number;
   updatedAt: number;
   isRefreshing?: boolean;
@@ -191,6 +193,7 @@ export async function saveUserMALIntegration(
   metadata: {
     username: string;
     avatarUrl?: string;
+    joinedAt?: string;
     expiresAt: number;
   },
   encryptionKey: string | Buffer
@@ -207,6 +210,7 @@ export async function saveUserMALIntegration(
     encryptedTokens: encryptedPayload,
     username: metadata.username,
     avatarUrl: metadata.avatarUrl || undefined,
+    joinedAt: metadata.joinedAt || undefined,
     expiresAt: metadata.expiresAt,
     updatedAt: Date.now(),
     isRefreshing: false,

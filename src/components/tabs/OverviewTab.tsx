@@ -67,23 +67,23 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
   const isListPrivate = profile.privacySettings?.showAnimeList === false;
   const canOpenLists = canAccessAnimeLists ?? (Boolean(isOwnProfile) || !isListPrivate);
 
-  // Memoize deduplication of visible anime entries by ID
-  const uniqueAnimes = useMemo(() => {
-    return canOpenLists
-      ? Array.from(new Map(animes.map((a) => [a.id, a])).values())
-      : [];
+  // Extract watching and favorite subsets in a single fast O(N) pass without intermediate Map allocations
+  const { watchingAnimes, favorites } = useMemo(() => {
+    if (!canOpenLists || !animes.length) {
+      return { watchingAnimes: [], favorites: [] };
+    }
+    const seen = new Set<string>();
+    const watching: AnimeItem[] = [];
+    const favs: AnimeItem[] = [];
+    for (let i = 0; i < animes.length; i++) {
+      const a = animes[i];
+      if (seen.has(a.id)) continue;
+      seen.add(a.id);
+      if (a.status === 'watching') watching.push(a);
+      if (a.isFavorite) favs.push(a);
+    }
+    return { watchingAnimes: watching, favorites: favs };
   }, [canOpenLists, animes]);
-
-  // Memoize filtered subsets to avoid array allocations on re-render
-  const watchingAnimes = useMemo(
-    () => uniqueAnimes.filter((a) => a.status === 'watching'),
-    [uniqueAnimes]
-  );
-
-  const favorites = useMemo(
-    () => uniqueAnimes.filter((a) => a.isFavorite),
-    [uniqueAnimes]
-  );
 
   // Memoize stats calculation (reuses cached summary when available)
   const stats = useMemo(
@@ -242,7 +242,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                     y={0}
                     width={seg.width}
                     height={12}
-                    className={seg.fill}
+                    className={`${seg.fill} transition-all duration-500 ease-out motion-reduce:transition-none`}
                   />
                 ))}
               </svg>
@@ -262,12 +262,17 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                       data-testid={`anime-stat-${row.status}`}
                       data-status={row.status}
                       onClick={() => handleOpenStatusList(row.status)}
-                      className="group flex w-full items-center justify-between rounded-lg px-2 py-1 -mx-2 text-left transition-colors hover:bg-purple-900/30 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-purple-500/60 cursor-pointer"
+                      className="group flex w-full items-center justify-between rounded-lg px-2 py-1.5 -mx-2 text-left transition-all duration-200 hover:bg-purple-900/30 hover:pl-3 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-purple-500/60 cursor-pointer motion-reduce:transition-none motion-reduce:transform-none motion-reduce:hover:pl-2"
                       title={`Abrir lista ${row.label}`}
                     >
                       <span className="flex items-center gap-2.5">
-                        <span className={`h-2.5 w-2.5 rounded-full ${row.dotClass} shrink-0`} />
-                        <span className="text-purple-100 font-medium group-hover:text-white group-hover:underline underline-offset-2 transition-colors">
+                        <span className="relative flex h-2.5 w-2.5 shrink-0 items-center justify-center">
+                          {row.status === 'watching' && (
+                            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60 motion-reduce:hidden" />
+                          )}
+                          <span className={`relative inline-flex h-2.5 w-2.5 rounded-full ${row.dotClass} group-hover:scale-125 transition-transform duration-200 motion-reduce:transform-none shadow-xs`} />
+                        </span>
+                        <span className="text-purple-100 font-medium group-hover:text-white transition-colors">
                           {row.label}
                         </span>
                       </span>
@@ -285,7 +290,9 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                       title="Esta lista de animes é privada"
                     >
                       <div className="flex items-center gap-2.5">
-                        <span className={`h-2.5 w-2.5 rounded-full ${row.dotClass} shrink-0`} />
+                        <span className="relative flex h-2.5 w-2.5 shrink-0 items-center justify-center">
+                          <span className={`h-2.5 w-2.5 rounded-full ${row.dotClass} shrink-0`} />
+                        </span>
                         <span className="text-purple-100/85 font-medium">{row.label}</span>
                       </div>
                       <span className="font-mono font-semibold text-white tabular-nums">
@@ -304,10 +311,10 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                     data-testid="anime-stat-all"
                     data-status="all"
                     onClick={() => handleOpenStatusList('all')}
-                    className="group flex w-full items-center justify-between rounded-lg px-2 py-1 -mx-2 text-left transition-colors hover:bg-purple-900/30 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-purple-500/60 cursor-pointer"
+                    className="group flex w-full items-center justify-between rounded-lg px-2 py-1.5 -mx-2 text-left transition-all duration-200 hover:bg-purple-900/30 hover:pl-3 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-purple-500/60 cursor-pointer motion-reduce:transition-none motion-reduce:transform-none motion-reduce:hover:pl-2"
                     title="Abrir todas as entradas da lista"
                   >
-                    <span className="text-purple-300/80 font-medium group-hover:text-white group-hover:underline underline-offset-2 transition-colors">
+                    <span className="text-purple-300/80 font-medium group-hover:text-white transition-colors">
                       Total de entradas
                     </span>
                     <span className="font-mono font-semibold text-white tabular-nums group-hover:text-purple-200 transition-colors">

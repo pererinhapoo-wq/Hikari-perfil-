@@ -20,8 +20,8 @@ export interface UserProfile {
   showCommentsOnProfile: boolean;
   privacySettings: PrivacySettings;
   externalAccounts: {
-    anilist: { connected: boolean; username?: string; avatarUrl?: string; lastSync?: string };
-    mal: { connected: boolean; username?: string; avatarUrl?: string; lastSync?: string };
+    anilist: { connected: boolean; username?: string; avatarUrl?: string; lastSync?: string; accountCreatedAt?: string };
+    mal: { connected: boolean; username?: string; avatarUrl?: string; lastSync?: string; accountCreatedAt?: string };
   };
 }
 

@@ -2,14 +2,14 @@ import React, { useRef } from 'react';
 import { 
   Camera, 
   Trash2, 
-  Calendar, 
   Lock, 
   UserCheck, 
   UserPlus, 
   Clock, 
   Settings, 
   ShieldAlert,
-  UserX
+  UserX,
+  Loader2
 } from 'lucide-react';
 import { UserProfile } from '../types';
 
@@ -19,6 +19,7 @@ interface ProfileHeaderProps {
   isFollowing: boolean;
   isRequested: boolean;
   isBlocked: boolean;
+  isFollowPending?: boolean;
   onFollowToggle: () => void;
   onBlockToggle: () => void;
   onOpenSettings: (tab?: 'profile' | 'privacy' | 'connected' | 'security') => void;
@@ -35,6 +36,7 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
   isFollowing,
   isRequested,
   isBlocked,
+  isFollowPending = false,
   onFollowToggle,
   onBlockToggle,
   onOpenSettings,
@@ -138,11 +140,17 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
           <div className="flex flex-col sm:flex-row sm:items-end gap-4">
             {/* Avatar Container */}
             <div className="relative group shrink-0">
-              <div className="h-28 w-28 sm:h-36 sm:w-36 rounded-2xl overflow-hidden border-4 border-[#130E24] bg-[#1a1333] shadow-xl shadow-black/80 ring-2 ring-purple-600/40">
+              <div 
+                className={`h-28 w-28 sm:h-36 sm:w-36 rounded-2xl overflow-hidden border-4 border-[#130E24] bg-[#1a1333] shadow-xl shadow-black/80 ring-2 ring-purple-600/40 ${isOwnProfile ? 'cursor-pointer' : ''}`}
+                onClick={isOwnProfile ? () => onOpenSettings('profile') : undefined}
+                title={isOwnProfile ? 'Editar foto e informações do perfil' : profile.displayName}
+              >
                 {profile.avatarUrl ? (
                   <img
                     src={profile.avatarUrl}
                     alt={profile.displayName}
+                    loading="lazy"
+                    decoding="async"
                     referrerPolicy="no-referrer"
                     className="h-full w-full object-cover"
                   />
@@ -153,26 +161,45 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
                 )}
               </div>
 
-              {/* Avatar Controls for Owner */}
+              {/* Avatar Controls for Owner (Desktop Hover) */}
               {isOwnProfile && (
-                <div className="absolute inset-0 flex items-center justify-center gap-2 rounded-2xl bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity backdrop-blur-xs">
+                <div className="hidden sm:flex absolute inset-0 items-center justify-center gap-2 rounded-2xl bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity backdrop-blur-xs">
                   <button
-                    onClick={() => avatarInputRef.current?.click()}
-                    className="rounded-full bg-purple-600 p-2 text-white shadow-lg hover:bg-purple-500 transition-colors"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      avatarInputRef.current?.click();
+                    }}
+                    className="rounded-full bg-purple-600 p-2 text-white shadow-lg hover:bg-purple-500 transition-colors cursor-pointer"
                     title="Trocar foto de perfil"
                   >
                     <Camera className="h-4 w-4" />
                   </button>
                   {profile.avatarUrl && (
                     <button
-                      onClick={onRemoveAvatar}
-                      className="rounded-full bg-rose-600 p-2 text-white shadow-lg hover:bg-rose-500 transition-colors"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onRemoveAvatar();
+                      }}
+                      className="rounded-full bg-rose-600 p-2 text-white shadow-lg hover:bg-rose-500 transition-colors cursor-pointer"
                       title="Remover foto"
                     >
                       <Trash2 className="h-4 w-4" />
                     </button>
                   )}
                 </div>
+              )}
+
+              {/* Mobile Quick Camera Badge */}
+              {isOwnProfile && (
+                <button
+                  type="button"
+                  onClick={() => onOpenSettings('profile')}
+                  className="sm:hidden absolute bottom-1 right-1 rounded-full bg-purple-600 p-1.5 text-white shadow-lg border-2 border-[#130E24] hover:bg-purple-500 transition-colors cursor-pointer"
+                  title="Editar foto de perfil"
+                  aria-label="Editar foto de perfil"
+                >
+                  <Camera className="h-3.5 w-3.5" />
+                </button>
               )}
             </div>
 
@@ -201,34 +228,51 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
           <div className="flex flex-wrap items-center gap-2.5 pt-2 sm:pt-0">
             {isOwnProfile ? (
               <button
+                type="button"
                 onClick={() => onOpenSettings('profile')}
-                className="flex items-center gap-2 rounded-xl bg-purple-600/90 hover:bg-purple-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-purple-950 transition-all border border-purple-400/30"
+                className="group inline-flex items-center gap-2 rounded-xl border border-purple-500/40 bg-purple-950/70 hover:bg-purple-900/80 hover:border-purple-400 text-purple-100 hover:text-white px-4 py-2 text-xs sm:text-sm font-semibold transition-all duration-150 shadow-md shadow-purple-950/60 backdrop-blur-md active:scale-95 cursor-pointer"
+                title="Editar informações do perfil"
               >
-                <Settings className="h-4 w-4" />
+                <Settings className="h-4 w-4 text-purple-300 group-hover:rotate-45 transition-transform duration-300 motion-reduce:transform-none" />
                 <span>Editar Perfil</span>
               </button>
             ) : (
               <>
                 {/* Follow / Request to Follow button */}
                 <button
+                  type="button"
                   onClick={onFollowToggle}
-                  disabled={isBlocked}
-                  className={`group flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold transition-all shadow-md ${
+                  disabled={isBlocked || isFollowPending}
+                  className={`group flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold transition-all shadow-md active:scale-95 cursor-pointer disabled:cursor-not-allowed disabled:opacity-60 disabled:active:scale-100 ${
                     isBlocked
                       ? 'bg-neutral-800 text-neutral-400 cursor-not-allowed'
                       : isFollowing
-                      ? 'bg-[#1e1638] text-purple-200 border border-purple-700/50 hover:bg-rose-950/50 hover:text-rose-200 hover:border-rose-500/50'
+                      ? 'bg-[#1e1638] text-rose-200 border border-rose-500/40 hover:bg-rose-950/70 hover:text-white hover:border-rose-400/60 shadow-rose-950/40'
                       : isRequested
                       ? 'bg-amber-950/50 text-amber-200 border border-amber-600/50 hover:bg-rose-950/50 hover:text-rose-200 hover:border-rose-500/50'
                       : 'bg-purple-600 hover:bg-purple-500 text-white shadow-purple-900/50 border border-purple-400/40'
                   }`}
+                  title={
+                    isBlocked
+                      ? 'Usuário bloqueado'
+                      : isFollowing
+                      ? 'Deixar de seguir'
+                      : isRequested
+                      ? 'Cancelar solicitação'
+                      : profile.isPrivate
+                      ? 'Solicitar para Seguir'
+                      : 'Seguir'
+                  }
                 >
-                  {isFollowing ? (
+                  {isFollowPending ? (
                     <>
-                      <UserCheck className="h-4 w-4 text-purple-300 group-hover:hidden" />
-                      <UserX className="h-4 w-4 text-rose-300 hidden group-hover:inline" />
-                      <span className="group-hover:hidden">Seguindo</span>
-                      <span className="hidden group-hover:inline">Deixar de seguir</span>
+                      <Loader2 className="h-4 w-4 animate-spin text-purple-300" />
+                      <span>{isFollowing ? 'Removendo...' : 'Seguindo...'}</span>
+                    </>
+                  ) : isFollowing ? (
+                    <>
+                      <UserX className="h-4 w-4 text-rose-300" />
+                      <span>Deixar de seguir</span>
                     </>
                   ) : isRequested ? (
                     <>
@@ -268,8 +312,8 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
           </div>
         </div>
 
-        {/* Bio, Meta and Metrics Section */}
-        <div className="mt-5 space-y-4">
+        {/* Bio and Metrics Section */}
+        <div className="mt-4 space-y-3">
           {/* Bio text */}
           {profile.bio && (
             <p className="max-w-3xl text-sm leading-relaxed text-purple-200/90 whitespace-pre-line">
@@ -277,37 +321,32 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
             </p>
           )}
 
-          {/* Metadata Row: Date, Location, etc. */}
-          <div className="flex flex-wrap items-center gap-y-2 gap-x-4 text-xs text-purple-300/70">
-            {/* Real Account Creation Date (Mandatory, non-editable) */}
-            <div className="flex items-center gap-1.5">
-              <Calendar className="h-3.5 w-3.5 text-purple-400" />
-              <span>Membro desde <strong className="text-purple-200 font-medium">{profile.createdAt}</strong></span>
-            </div>
-          </div>
-
-          {/* Followers & Following Counters (Tabular figures, reactive) */}
-          <div className="flex items-center gap-6 border-t border-purple-900/30 pt-4">
+          {/* Followers & Following Redesigned Badges */}
+          <div className="flex flex-wrap items-center gap-2.5 pt-1">
             <button
+              type="button"
               onClick={() => onOpenFollowers('followers')}
-              className="group flex items-baseline gap-1.5 text-left focus:outline-none"
+              className="group inline-flex items-center gap-2 rounded-xl border border-purple-900/40 bg-[#16102a]/80 hover:bg-purple-950/80 hover:border-purple-500/50 px-3.5 py-1.5 sm:py-2 transition-all duration-150 cursor-pointer shadow-sm active:scale-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-500"
+              title="Ver lista de seguidores"
             >
-              <span className="font-mono text-lg font-bold text-white tabular-nums group-hover:text-purple-300 transition-colors">
+              <span className="font-mono text-base sm:text-lg font-bold text-white tabular-nums group-hover:text-purple-200 transition-colors">
                 {profile.followersCount.toLocaleString('pt-BR')}
               </span>
-              <span className="text-xs text-purple-400 group-hover:text-purple-200 transition-colors">
+              <span className="text-xs font-medium text-purple-400 group-hover:text-purple-300 transition-colors">
                 seguidores
               </span>
             </button>
 
             <button
+              type="button"
               onClick={() => onOpenFollowers('following')}
-              className="group flex items-baseline gap-1.5 text-left focus:outline-none"
+              className="group inline-flex items-center gap-2 rounded-xl border border-purple-900/40 bg-[#16102a]/80 hover:bg-purple-950/80 hover:border-purple-500/50 px-3.5 py-1.5 sm:py-2 transition-all duration-150 cursor-pointer shadow-sm active:scale-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-500"
+              title="Ver pessoas seguidas"
             >
-              <span className="font-mono text-lg font-bold text-white tabular-nums group-hover:text-purple-300 transition-colors">
+              <span className="font-mono text-base sm:text-lg font-bold text-white tabular-nums group-hover:text-purple-200 transition-colors">
                 {profile.followingCount.toLocaleString('pt-BR')}
               </span>
-              <span className="text-xs text-purple-400 group-hover:text-purple-200 transition-colors">
+              <span className="text-xs font-medium text-purple-400 group-hover:text-purple-300 transition-colors">
                 seguindo
               </span>
             </button>
