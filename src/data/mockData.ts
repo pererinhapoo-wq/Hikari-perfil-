@@ -10,7 +10,7 @@ import {
   FavoriteCompany,
   FavoritePerson,
   AUTHORIZED_ADMIN_UID
-} from '../types';
+} from '../types/index.js';
 
 export const CURRENT_USER: UserProfile = {
   id: 'usr_hikari_001',

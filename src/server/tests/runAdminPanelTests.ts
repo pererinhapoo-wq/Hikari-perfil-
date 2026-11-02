@@ -203,6 +203,68 @@ async function main() {
       assert.strictEqual(res.body.operator.isAdmin, true);
       assert.strictEqual(res.body.operator.role, 'owner');
     });
+
+    // 9. Endpoint POST /api/admin/verify exige token válido e bloqueia divergência de UID
+    await runTest('9. Endpoint /api/admin/verify: valida proprietário, nega comum/visitante e bloqueia divergência de UID', async () => {
+      // Sem token (mesmo enviando uid do proprietário no body!) -> 401
+      const noTokenRes = await api('/api/admin/verify', {
+        method: 'POST',
+        body: JSON.stringify({ uid: AUTHORIZED_ADMIN_UID }),
+      });
+      assert.strictEqual(noTokenRes.status, 401);
+      assert.strictEqual(noTokenRes.body.isAdmin, false);
+
+      // Proprietário autenticado com token + UID consistente -> 200 e isAdmin=true
+      const ownerVerifyRes = await api('/api/admin/verify', {
+        method: 'POST',
+        headers: { authorization: `Bearer test_token_${AUTHORIZED_ADMIN_UID}` },
+        body: JSON.stringify({
+          idToken: `test_token_${AUTHORIZED_ADMIN_UID}`,
+          uid: AUTHORIZED_ADMIN_UID,
+        }),
+      });
+      assert.strictEqual(ownerVerifyRes.status, 200);
+      assert.strictEqual(ownerVerifyRes.body.authenticated, true);
+      assert.strictEqual(ownerVerifyRes.body.isAdmin, true);
+
+      // Usuário comum autenticado -> 200 com isAdmin=false
+      const commonVerifyRes = await api('/api/admin/verify', {
+        method: 'POST',
+        headers: { authorization: 'Bearer test_token_usr_common_01' },
+        body: JSON.stringify({
+          idToken: 'test_token_usr_common_01',
+          uid: 'usr_common_01',
+        }),
+      });
+      assert.strictEqual(commonVerifyRes.status, 200);
+      assert.strictEqual(commonVerifyRes.body.authenticated, true);
+      assert.strictEqual(commonVerifyRes.body.isAdmin, false);
+
+      // Divergência entre UID do frontend e UID do token -> 403
+      const mismatchRes = await api('/api/admin/verify', {
+        method: 'POST',
+        headers: { authorization: 'Bearer test_token_usr_common_01' },
+        body: JSON.stringify({
+          idToken: 'test_token_usr_common_01',
+          uid: AUTHORIZED_ADMIN_UID,
+        }),
+      });
+      assert.strictEqual(mismatchRes.status, 403);
+      assert.strictEqual(mismatchRes.body.isAdmin, false);
+    });
+
+    // 10. Proteção contra divergência de x-client-uid em /api/admin/status
+    await runTest('10. Endpoint /api/admin/status: rejeita sessão quando x-client-uid diverge do token', async () => {
+      const mismatchStatus = await api('/api/admin/status', {
+        headers: {
+          authorization: `Bearer test_token_${AUTHORIZED_ADMIN_UID}`,
+          'x-client-uid': 'usr_outro_usuario',
+        },
+      });
+      assert.strictEqual(mismatchStatus.status, 200);
+      assert.strictEqual(mismatchStatus.body.authenticated, false);
+      assert.strictEqual(mismatchStatus.body.isAdmin, false);
+    });
   } finally {
     server.close();
   }

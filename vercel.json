@@ -12,7 +12,7 @@
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "/api"
+      "destination": "/api?__hikari_route=$1"
     },
     {
       "source": "/((?!api|assets|favicon).*)",

@@ -258,6 +258,144 @@ async function main() {
     assert.strictEqual(isValidSchema, false, 'O schema do Firestore REJEITA sumariamente documentos com campos administrativos');
   });
 
+  // Preparação de par de chaves RSA-2048 real para testes criptográficos RS256 de Firebase ID Tokens
+  const { publicKey, privateKey } = await import('node:crypto').then((c) =>
+    c.generateKeyPairSync('rsa', { modulusLength: 2048 })
+  );
+  const cryptoMod = await import('node:crypto');
+  const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  const kid = 'hikari-test-kid-rs256';
+  const projectId = 'hikari-user-profiles';
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  function signTestFirebaseJwt(
+    payload: Record<string, unknown>,
+    headerOverride?: Record<string, unknown>,
+    tamperSignature = false
+  ): string {
+    const header = headerOverride ?? { alg: 'RS256', typ: 'JWT', kid };
+    const hB64 = Buffer.from(JSON.stringify(header)).toString('base64url');
+    const pB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    if (header.alg === 'none') {
+      return `${hB64}.${pB64}.`;
+    }
+    const sig = cryptoMod
+      .sign('RSA-SHA256', Buffer.from(`${hB64}.${pB64}`), privateKey)
+      .toString('base64url');
+    const finalSig = tamperSignature ? `${sig.slice(0, -4)}AAAA` : sig;
+    return `${hB64}.${pB64}.${finalSig}`;
+  }
+
+  const certOptions = {
+    resolvePublicCerts: async () => ({ [kid]: publicKeyPem }),
+    expectedProjectId: projectId,
+    nowSeconds: nowSec,
+  };
+
+  // 13. JWT RS256 real assinado para a conta proprietária Aether
+  await runTest('13. JWT RS256 assinado válido do proprietário (TLJx2QuEv4QQYoduGqn0LDJxxRW2) concede acesso', async () => {
+    const validOwnerJwt = signTestFirebaseJwt({
+      iss: `https://securetoken.google.com/${projectId}`,
+      aud: projectId,
+      sub: AUTHORIZED_ADMIN_UID,
+      user_id: AUTHORIZED_ADMIN_UID,
+      iat: nowSec - 60,
+      exp: nowSec + 3600,
+      email: 'owner@hikari.example',
+    });
+
+    const res = await verifyAdminToken(validOwnerJwt, certOptions);
+    assert.strictEqual(res.isAdmin, true);
+    assert.strictEqual(res.uid, AUTHORIZED_ADMIN_UID);
+  });
+
+  // 14. JWT RS256 real assinado para usuário comum tentando falsificar nome/username/email/role/isAdmin
+  await runTest('14. JWT RS256 de usuário comum com name="Aether", role="owner" e isAdmin=true é estritamente negado', async () => {
+    const spoofedCommonJwt = signTestFirebaseJwt({
+      iss: `https://securetoken.google.com/${projectId}`,
+      aud: projectId,
+      sub: 'usr_common_impersonator_999',
+      user_id: 'usr_common_impersonator_999',
+      name: 'Aether',
+      username: 'aether',
+      email: 'aether@hikari.example',
+      role: 'owner',
+      isAdmin: true,
+      admin: true,
+      iat: nowSec - 60,
+      exp: nowSec + 3600,
+    });
+
+    const res = await verifyAdminToken(spoofedCommonJwt, certOptions);
+    assert.strictEqual(res.isAdmin, false);
+    assert.strictEqual(res.uid, 'usr_common_impersonator_999');
+  });
+
+  // 15. Rejeição estrita de token RS256 expirado (mesmo do proprietário)
+  await runTest('15. JWT RS256 expirado do proprietário é estritamente rejeitado', async () => {
+    const expiredOwnerJwt = signTestFirebaseJwt({
+      iss: `https://securetoken.google.com/${projectId}`,
+      aud: projectId,
+      sub: AUTHORIZED_ADMIN_UID,
+      user_id: AUTHORIZED_ADMIN_UID,
+      iat: nowSec - 7200,
+      exp: nowSec - 1,
+    });
+
+    const res = await verifyAdminToken(expiredOwnerJwt, certOptions);
+    assert.strictEqual(res.isAdmin, false);
+    assert.strictEqual(res.uid, undefined);
+    assert.ok(res.reason?.includes('expirado'));
+  });
+
+  // 16. Rejeição estrita de assinatura adulterada ou alg="none"
+  await runTest('16. JWT adulterado ou sem assinatura (alg=none) reivindicando UID proprietário é rejeitado', async () => {
+    const tamperedJwt = signTestFirebaseJwt(
+      {
+        iss: `https://securetoken.google.com/${projectId}`,
+        aud: projectId,
+        sub: AUTHORIZED_ADMIN_UID,
+        iat: nowSec - 60,
+        exp: nowSec + 3600,
+      },
+      undefined,
+      true
+    );
+    const noneJwt = signTestFirebaseJwt(
+      {
+        iss: `https://securetoken.google.com/${projectId}`,
+        aud: projectId,
+        sub: AUTHORIZED_ADMIN_UID,
+        iat: nowSec - 60,
+        exp: nowSec + 3600,
+      },
+      { alg: 'none', typ: 'JWT' }
+    );
+
+    const resTampered = await verifyAdminToken(tamperedJwt, certOptions);
+    assert.strictEqual(resTampered.isAdmin, false);
+    assert.strictEqual(resTampered.uid, undefined);
+
+    const resNone = await verifyAdminToken(noneJwt, certOptions);
+    assert.strictEqual(resNone.isAdmin, false);
+    assert.strictEqual(resNone.uid, undefined);
+  });
+
+  // 17. Rejeição de token emitido para outro projeto Firebase (aud/iss divergentes)
+  await runTest('17. JWT RS256 emitido para projeto Firebase externo é rejeitado mesmo com sub idêntico', async () => {
+    const wrongProjectJwt = signTestFirebaseJwt({
+      iss: 'https://securetoken.google.com/attacker-project-id',
+      aud: 'attacker-project-id',
+      sub: AUTHORIZED_ADMIN_UID,
+      iat: nowSec - 60,
+      exp: nowSec + 3600,
+    });
+
+    const res = await verifyAdminToken(wrongProjectJwt, certOptions);
+    assert.strictEqual(res.isAdmin, false);
+    assert.strictEqual(res.uid, undefined);
+  });
+
   console.log('----------------------------------------------------------------');
   console.log(`RESULTADO DOS TESTES: ${passed} aprovados, ${failed} reprovados.`);
   console.log('================================================================');

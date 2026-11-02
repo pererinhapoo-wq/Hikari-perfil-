@@ -1,4 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { 
   X, 
   User, 
@@ -483,35 +484,68 @@ function formatExternalAccountDate(rawDate?: string | null): string | null {
 
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const bannerInputRef = useRef<HTMLInputElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
-  // Background scroll lock without position jumps, and Escape key dismissal
+  // Escape key dismissal without re-triggering scroll lock on parent re-renders
   useEffect(() => {
     if (!isOpen) return;
-
-    const prevBodyOverflow = document.body.style.overflow;
-    const prevHtmlOverflow = document.documentElement.style.overflow;
-    const prevTouchAction = document.body.style.touchAction;
-
-    document.body.style.overflow = 'hidden';
-    document.documentElement.style.overflow = 'hidden';
-    document.body.style.touchAction = 'none';
-
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        onClose();
+        onCloseRef.current();
       }
     };
     document.addEventListener('keydown', handleKeyDown);
-
     return () => {
-      document.body.style.overflow = prevBodyOverflow;
-      document.documentElement.style.overflow = prevHtmlOverflow;
-      document.body.style.touchAction = prevTouchAction;
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isOpen, onClose]);
+  }, [isOpen]);
 
-  if (!isOpen) return null;
+  // Bloqueio do fundo apenas enquanto o modal está aberto e restauração exata do scroll ao fechar
+  useLayoutEffect(() => {
+    if (!isOpen || typeof window === 'undefined' || typeof document === 'undefined') return;
+
+    const savedScrollY =
+      window.scrollY || window.pageYOffset || document.documentElement.scrollTop || 0;
+    const savedScrollX =
+      window.scrollX || window.pageXOffset || document.documentElement.scrollLeft || 0;
+    const scrollBarWidth = Math.max(0, window.innerWidth - document.documentElement.clientWidth);
+
+    const prevPosition = document.body.style.position;
+    const prevTop = document.body.style.top;
+    const prevLeft = document.body.style.left;
+    const prevRight = document.body.style.right;
+    const prevWidth = document.body.style.width;
+    const prevOverflow = document.body.style.overflow;
+    const prevPaddingRight = document.body.style.paddingRight;
+
+    document.body.style.position = 'fixed';
+    document.body.style.top = `-${savedScrollY}px`;
+    document.body.style.left = '0';
+    document.body.style.right = '0';
+    document.body.style.width = '100%';
+    document.body.style.overflow = 'hidden';
+    if (scrollBarWidth > 0) {
+      document.body.style.paddingRight = `${scrollBarWidth}px`;
+    }
+
+    return () => {
+      document.body.style.position = prevPosition;
+      document.body.style.top = prevTop;
+      document.body.style.left = prevLeft;
+      document.body.style.right = prevRight;
+      document.body.style.width = prevWidth;
+      document.body.style.overflow = prevOverflow;
+      document.body.style.paddingRight = prevPaddingRight;
+      window.scrollTo({
+        top: savedScrollY,
+        left: savedScrollX,
+        behavior: 'instant' as ScrollBehavior,
+      });
+    };
+  }, [isOpen]);
+
+  if (!isOpen || typeof document === 'undefined') return null;
 
   const handleSave = () => {
     onSaveProfile({
@@ -564,6 +598,7 @@ function formatExternalAccountDate(rawDate?: string | null): string | null {
       };
       reader.readAsDataURL(file);
     }
+    e.target.value = '';
   };
 
   const handleBannerFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -577,9 +612,10 @@ function formatExternalAccountDate(rawDate?: string | null): string | null {
       };
       reader.readAsDataURL(file);
     }
+    e.target.value = '';
   };
 
-  return (
+  return createPortal(
     <div 
       role="dialog"
       aria-modal="true"
@@ -2438,6 +2474,7 @@ function formatExternalAccountDate(rawDate?: string | null): string | null {
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };

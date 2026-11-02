@@ -69,6 +69,7 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
       };
       reader.readAsDataURL(file);
     }
+    e.target.value = '';
   };
 
   const handleBannerChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -82,6 +83,7 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
       };
       reader.readAsDataURL(file);
     }
+    e.target.value = '';
   };
 
   return (

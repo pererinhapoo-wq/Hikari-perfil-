@@ -16,7 +16,7 @@ import { PrivateChatModal } from './components/chat/PrivateChatModal';
 import { AuthScreen } from './components/auth/AuthScreen';
 import { AdminPanel } from './components/admin/AdminPanel';
 import { AdminAccessDenied } from './components/admin/AdminAccessDenied';
-import { fetchAdminStatus } from './services/adminService';
+import { verifyAdminAccess } from './services/adminService';
 import {
   syncUserPrivacyContext,
   subscribeToConversationsList,
@@ -99,6 +99,13 @@ interface AuthSessionState {
   uid: string;
   workspace: UserPersonalWorkspace;
   firestoreStatus: FirestoreSyncStatus;
+}
+
+interface AdminVerificationState {
+  uid: string | null;
+  authorized: boolean;
+  token: string | null;
+  status: 'idle' | 'verifying' | 'resolved';
 }
 
 const NEUTRAL_LOADING_PROFILE: UserProfile = {
@@ -379,22 +386,30 @@ export default function App() {
   const highlightCommentTimerRef = useRef<number | null>(null);
   const highlightActivityTimerRef = useRef<number | null>(null);
 
-  // Admin Panel Navigation & Verification State
+  // Admin Panel Navigation & UID-bound Server Verification State
   const [currentView, setCurrentView] = useState<'app' | 'admin'>(() => {
     if (typeof window !== 'undefined' && window.location.pathname.startsWith('/admin')) {
       return 'admin';
     }
     return 'app';
   });
-  const [adminToken, setAdminToken] = useState<string | null>(null);
-  const [isAdminServerAuthorized, setIsAdminServerAuthorized] = useState<boolean | null>(null);
-  const [isVerifyingAdminServer, setIsVerifyingAdminServer] = useState<boolean>(false);
+  const [adminVerification, setAdminVerification] = useState<AdminVerificationState>({
+    uid: null,
+    authorized: false,
+    token: null,
+    status: 'idle',
+  });
+  const pendingAdminReturnRef = useRef<boolean>(false);
 
   // Sincronização da rota /admin com popstate do navegador
   useEffect(() => {
     const handlePopState = () => {
       if (typeof window !== 'undefined') {
         if (window.location.pathname.startsWith('/admin')) {
+          setAdminVerification((prev) => ({
+            ...prev,
+            status: 'idle',
+          }));
           setCurrentView('admin');
         } else {
           setCurrentView('app');
@@ -409,12 +424,18 @@ export default function App() {
     if (typeof window !== 'undefined' && window.location.pathname !== '/admin') {
       window.history.pushState(null, '', '/admin');
     }
-    setIsAdminServerAuthorized(null);
+    setAdminVerification({
+      uid: user?.uid ?? null,
+      authorized: false,
+      token: null,
+      status: isAuthenticated && user ? 'verifying' : 'idle',
+    });
     setCurrentView('admin');
-  }, []);
+  }, [isAuthenticated, user]);
 
   const handleReturnFromAdmin = useCallback(() => {
-    if (typeof window !== 'undefined' && window.location.pathname === '/admin') {
+    pendingAdminReturnRef.current = false;
+    if (typeof window !== 'undefined' && window.location.pathname.startsWith('/admin')) {
       window.history.pushState(null, '', '/');
     }
     setCurrentView('app');
@@ -434,52 +455,77 @@ export default function App() {
 
     // Se o cliente não está autenticado, bloqueia imediatamente sem expor dados
     if (!isAuthenticated || !user) {
-      setIsAdminServerAuthorized(false);
-      setAdminToken(null);
-      setIsVerifyingAdminServer(false);
+      setAdminVerification({
+        uid: null,
+        authorized: false,
+        token: null,
+        status: 'resolved',
+      });
       return;
     }
 
-    setIsVerifyingAdminServer(true);
+    const activeUid = user.uid;
+    setAdminVerification((prev) =>
+      prev.uid === activeUid && prev.status === 'verifying'
+        ? prev
+        : {
+            uid: activeUid,
+            authorized: false,
+            token: null,
+            status: 'verifying',
+          }
+    );
 
     async function checkServerAuthorization() {
       try {
         let tokenToVerify: string | null = null;
-        if (user) {
-          try {
-            // Força a renovação do Firebase ID Token para descartar tokens expirados do cache do navegador
-            tokenToVerify = await user.getIdToken(true);
-          } catch {
-            tokenToVerify = await user.getIdToken();
-          }
+        try {
+          // Renova o Firebase ID Token para garantir token válido e atualizado
+          tokenToVerify = await user!.getIdToken(true);
+        } catch {
+          tokenToVerify = await user!.getIdToken(false);
         }
 
         if (!tokenToVerify) {
           if (!cancelled) {
-            setIsAdminServerAuthorized(false);
-            setAdminToken(null);
+            setAdminVerification({
+              uid: activeUid,
+              authorized: false,
+              token: null,
+              status: 'resolved',
+            });
           }
           return;
         }
 
-        const res = await fetchAdminStatus(tokenToVerify);
+        const verification = await verifyAdminAccess(tokenToVerify, activeUid);
+        const isOwnerVerified =
+          activeUid === AUTHORIZED_ADMIN_UID &&
+          verification.authenticated === true &&
+          verification.isAdmin === true &&
+          Boolean(verification.token);
+
         if (!cancelled) {
-          setIsAdminServerAuthorized(Boolean(res.isAdmin));
-          setAdminToken(res.isAdmin ? tokenToVerify : null);
+          setAdminVerification({
+            uid: activeUid,
+            authorized: isOwnerVerified,
+            token: isOwnerVerified ? verification.token : null,
+            status: 'resolved',
+          });
         }
       } catch {
         if (!cancelled) {
-          setIsAdminServerAuthorized(false);
-          setAdminToken(null);
-        }
-      } finally {
-        if (!cancelled) {
-          setIsVerifyingAdminServer(false);
+          setAdminVerification({
+            uid: activeUid,
+            authorized: false,
+            token: null,
+            status: 'resolved',
+          });
         }
       }
     }
 
-    checkServerAuthorization();
+    void checkServerAuthorization();
 
     return () => {
       cancelled = true;
@@ -530,6 +576,20 @@ export default function App() {
       workspace: localWorkspace,
       firestoreStatus: 'idle',
     });
+
+    if (pendingAdminReturnRef.current) {
+      pendingAdminReturnRef.current = false;
+      if (typeof window !== 'undefined' && window.location.pathname !== '/admin') {
+        window.history.pushState(null, '', '/admin');
+      }
+      setAdminVerification({
+        uid: targetUid,
+        authorized: false,
+        token: null,
+        status: 'verifying',
+      });
+      setCurrentView('admin');
+    }
 
     void loadUserWorkspaceFromFirestore(targetUid).then((remote) => {
       if (cancelled) return;
@@ -761,9 +821,13 @@ export default function App() {
   const isViewingAppShell =
     !isLoading && ((isAuthenticated && isAuthWorkspaceReady) || (!isAuthenticated && isDemoPreview));
 
-  // Global background scroll lock for centered blocking modals only (never lock or shift page for notifications popover)
+  const handleCloseSettings = useCallback(() => {
+    setIsSettingsOpen(false);
+  }, []);
+
+  // Global background scroll lock for FollowersModal (SettingsModal manages its own portal & scroll restoration)
   useEffect(() => {
-    const isAnyModalOpen = isViewingAppShell && (isSettingsOpen || isFollowersOpen);
+    const isAnyModalOpen = isViewingAppShell && isFollowersOpen;
     if (isAnyModalOpen) {
       const scrollBarWidth = window.innerWidth - document.documentElement.clientWidth;
       const prevBodyOverflow = document.body.style.overflow;
@@ -783,7 +847,7 @@ export default function App() {
         }
       };
     }
-  }, [isViewingAppShell, isSettingsOpen, isFollowersOpen]);
+  }, [isViewingAppShell, isFollowersOpen]);
 
   // Sanitized public projections of other registered profiles (private anime lists are stripped to [])
   const authPublicProfilesMap = useMemo(() => {
@@ -1996,6 +2060,13 @@ export default function App() {
 
   // Real Logout handler: wipes personal memory immediately, terminates Firebase Auth session and returns to login screen
   const handleLogout = useCallback(async () => {
+    pendingAdminReturnRef.current = false;
+    setAdminVerification({
+      uid: null,
+      authorized: false,
+      token: null,
+      status: 'idle',
+    });
     setIsSettingsOpen(false);
     setIsFollowersOpen(false);
     setIsNotifOpen(false);
@@ -2286,9 +2357,16 @@ export default function App() {
     ]
   );
 
-  // Rota privada de administração (/admin) com validação mandatória de servidor
+  // Rota privada de administração (/admin) com validação mandatória de servidor vinculada ao UID autenticado
   if (currentView === 'admin') {
-    if (isLoading || isVerifyingAdminServer || (isAuthenticated && isAdminServerAuthorized === null)) {
+    const isWaitingForAdminCheck =
+      isLoading ||
+      adminVerification.status === 'verifying' ||
+      (isAuthenticated &&
+        user !== null &&
+        (adminVerification.uid !== user.uid || adminVerification.status !== 'resolved'));
+
+    if (isWaitingForAdminCheck) {
       return (
         <div className="min-h-screen bg-[#0A0713] flex flex-col items-center justify-center p-4">
           <Loader2 className="h-8 w-8 text-purple-500 animate-spin mb-3" />
@@ -2299,11 +2377,20 @@ export default function App() {
       );
     }
 
-    if (isAdminServerAuthorized && adminToken) {
+    const canRenderAdminPanel =
+      isAuthenticated &&
+      user !== null &&
+      user.uid === AUTHORIZED_ADMIN_UID &&
+      adminVerification.uid === user.uid &&
+      adminVerification.status === 'resolved' &&
+      adminVerification.authorized === true &&
+      Boolean(adminVerification.token);
+
+    if (canRenderAdminPanel && adminVerification.token) {
       return (
         <AdminPanel
           onReturnToApp={handleReturnFromAdmin}
-          idToken={adminToken}
+          idToken={adminVerification.token}
         />
       );
     }
@@ -2312,7 +2399,11 @@ export default function App() {
       <AdminAccessDenied
         onReturnToApp={handleReturnFromAdmin}
         onOpenAuth={() => {
-          handleReturnFromAdmin();
+          pendingAdminReturnRef.current = true;
+          if (typeof window !== 'undefined' && window.location.pathname.startsWith('/admin')) {
+            window.history.pushState(null, '', '/');
+          }
+          setCurrentView('app');
           setIsDemoPreview(false);
           setAuthInitialMode('login');
         }}
@@ -2585,7 +2676,7 @@ export default function App() {
           onUnblockUser={handleBlockToggle}
           onSyncAniList={handleSyncAniList}
           onSyncMAL={handleSyncMAL}
-          onClose={() => setIsSettingsOpen(false)}
+          onClose={handleCloseSettings}
           onSaveProfile={handleSaveProfile}
           onUpdateAvatar={handleUpdateAvatar}
           onUpdateBanner={handleUpdateBanner}

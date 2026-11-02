@@ -17,18 +17,26 @@ import {
 
 export const adminRouter = Router();
 
+// Impede cache intermediário ou de navegador em todas as respostas administrativas
+adminRouter.use((_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Vary', 'Authorization, x-admin-token');
+  next();
+});
+
 /**
  * Consulta de status de privilégio administrativo.
  * Zero vazamento de dados: não expõe UIDs ou configurações privadas para requisições anônimas.
+ * Nunca concede acesso por nome, username, email, role ou isAdmin enviados pelo cliente.
  */
 adminRouter.all('/status', async (req: Request, res: Response) => {
   const tokenCandidate =
     req.headers.authorization ||
     (req.headers['x-admin-token'] as string) ||
-    req.body?.idToken ||
-    (req.query?.idToken as string);
+    req.body?.idToken;
 
-  if (!tokenCandidate || typeof tokenCandidate !== 'string') {
+  if (!tokenCandidate || typeof tokenCandidate !== 'string' || !tokenCandidate.trim()) {
     res.json({
       authenticated: false,
       isAdmin: false,
@@ -37,42 +45,64 @@ adminRouter.all('/status', async (req: Request, res: Response) => {
   }
 
   const result = await verifyAdminToken(tokenCandidate);
+  const clientUid = typeof req.headers['x-client-uid'] === 'string' ? req.headers['x-client-uid'].trim() : '';
+
+  if (clientUid && result.uid && result.uid !== clientUid) {
+    res.json({
+      authenticated: false,
+      isAdmin: false,
+    });
+    return;
+  }
 
   res.json({
     authenticated: Boolean(result.uid),
-    isAdmin: Boolean(result.isAdmin),
+    isAdmin: Boolean(result.isAdmin && isAuthorizedAdmin(result.uid)),
   });
 });
 
 /**
- * Verificação direta de UID ou token para conferência segura de autorização.
+ * Verificação direta de token para conferência segura de autorização administrativa.
+ * Exige token criptográfico válido e rejeita divergências entre UID do cliente e UID do token.
  */
 adminRouter.post('/verify', async (req: Request, res: Response) => {
   const { uid, idToken } = req.body || {};
   const headerToken = req.headers.authorization || (req.headers['x-admin-token'] as string);
-  const effectiveToken = idToken || headerToken;
+  const effectiveToken = typeof idToken === 'string' && idToken.trim() ? idToken : headerToken;
 
-  // Se token foi fornecido, verifica criptograficamente
-  if (effectiveToken && typeof effectiveToken === 'string') {
-    const verification = await verifyAdminToken(effectiveToken);
-    res.json({
-      isAdmin: Boolean(verification.isAdmin),
-      authenticated: Boolean(verification.uid),
+  if (!effectiveToken || typeof effectiveToken !== 'string' || !effectiveToken.trim()) {
+    res.status(401).json({
+      authenticated: false,
+      isAdmin: false,
+      error: 'Token de autenticação (idToken) é obrigatório para validação.',
     });
     return;
   }
 
-  // Se apenas o UID foi consultado, verifica estritamente contra o identificador proprietário
-  if (uid && typeof uid === 'string') {
-    res.json({
-      isAdmin: isAuthorizedAdmin(uid),
-      authenticated: true,
+  const verification = await verifyAdminToken(effectiveToken);
+
+  if (!verification.uid) {
+    res.status(401).json({
+      authenticated: false,
+      isAdmin: false,
+      error: verification.reason || 'Token inválido ou expirado.',
     });
     return;
   }
 
-  res.status(400).json({
-    error: 'Parâmetro uid ou idToken é obrigatório para validação.',
+  // Se o cliente informou o UID autenticado localmente, garante que coincide com o UID validado no token
+  if (typeof uid === 'string' && uid.trim() && verification.uid !== uid.trim()) {
+    res.status(403).json({
+      authenticated: false,
+      isAdmin: false,
+      error: 'Divergência entre o UID autenticado no frontend e o UID validado no backend.',
+    });
+    return;
+  }
+
+  res.json({
+    authenticated: true,
+    isAdmin: Boolean(verification.isAdmin && isAuthorizedAdmin(verification.uid)),
   });
 });
 

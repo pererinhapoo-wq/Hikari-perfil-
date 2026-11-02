@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { 
   Bell, 
@@ -87,7 +87,11 @@ export const Header: React.FC<HeaderProps> = ({
 
   const userMenuRef = useRef<HTMLDivElement>(null);
   const userMenuDropdownRef = useRef<HTMLDivElement>(null);
-  const [userMenuCoords, setUserMenuCoords] = useState<{ top: number; right: number }>({ top: 64, right: 16 });
+  const [userMenuCoords, setUserMenuCoords] = useState<{
+    top: number;
+    right: number;
+    maxHeight: number;
+  }>({ top: 64, right: 16, maxHeight: 480 });
   const notifRef = useRef<HTMLDivElement>(null);
   const notifPanelRef = useRef<HTMLDivElement>(null);
   const notifListRef = useRef<HTMLDivElement>(null);
@@ -95,26 +99,48 @@ export const Header: React.FC<HeaderProps> = ({
 
   const unreadCount = notifications.filter(n => !n.isRead).length;
 
-  // Atualização em tempo real do posicionamento do menu da foto ancorado ao botão na viewport
-  useEffect(() => {
+  const computeUserMenuCoords = useCallback(() => {
+    if (typeof window === 'undefined' || !userMenuRef.current) {
+      return { top: 64, right: 16, maxHeight: 480 };
+    }
+    const rect = userMenuRef.current.getBoundingClientRect();
+    const viewportWidth = document.documentElement.clientWidth || window.innerWidth;
+    const viewportHeight = window.visualViewport?.height || window.innerHeight;
+    const menuWidth = 256;
+    const margin = 12;
+
+    const rawTop = Math.round(rect.bottom + 8);
+    const clampedTop = Math.max(margin, Math.min(rawTop, Math.max(margin, viewportHeight - 120)));
+
+    const rawRight = Math.round(viewportWidth - rect.right);
+    const maxRight = Math.max(margin, viewportWidth - menuWidth - margin);
+    const clampedRight = Math.max(margin, Math.min(rawRight, maxRight));
+
+    const availableHeight = Math.max(180, Math.floor(viewportHeight - clampedTop - margin));
+    const maxHeight = Math.min(480, availableHeight);
+
+    return { top: clampedTop, right: clampedRight, maxHeight };
+  }, []);
+
+  // Atualização síncrona e em tempo real do posicionamento do menu da foto ancorado ao botão na viewport
+  useLayoutEffect(() => {
     if (!isUserMenuOpen) return;
     const updatePosition = () => {
-      if (userMenuRef.current) {
-        const rect = userMenuRef.current.getBoundingClientRect();
-        setUserMenuCoords({
-          top: Math.round(rect.bottom + 8),
-          right: Math.round(Math.max(12, window.innerWidth - rect.right)),
-        });
-      }
+      setUserMenuCoords(computeUserMenuCoords());
     };
     updatePosition();
     window.addEventListener('resize', updatePosition);
     window.addEventListener('scroll', updatePosition, { passive: true });
+    const visualVp = window.visualViewport;
+    visualVp?.addEventListener('resize', updatePosition);
+    visualVp?.addEventListener('scroll', updatePosition);
     return () => {
       window.removeEventListener('resize', updatePosition);
       window.removeEventListener('scroll', updatePosition);
+      visualVp?.removeEventListener('resize', updatePosition);
+      visualVp?.removeEventListener('scroll', updatePosition);
     };
-  }, [isUserMenuOpen]);
+  }, [isUserMenuOpen, computeUserMenuCoords]);
 
   // Close dropdowns on outside click or tap
   useEffect(() => {
@@ -158,7 +184,7 @@ export const Header: React.FC<HeaderProps> = ({
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [isNotifOpen, onToggleNotif]);
 
-  // Lock background scrolling on mobile screens (< 768px) preserving current scroll offset
+  // Lock background scrolling on mobile screens (< 768px) preserving current scroll offset without detaching sticky header
   useEffect(() => {
     if (!isUserMenuOpen) return;
 
@@ -177,16 +203,31 @@ export const Header: React.FC<HeaderProps> = ({
       };
     }
 
-    const savedScrollY = window.scrollY;
-    const originalBodyOverflow = document.body.style.overflow;
+    const savedScrollY = window.scrollY || window.pageYOffset || 0;
 
-    document.body.style.overflow = 'hidden';
+    function preventBackgroundScroll(event: TouchEvent | WheelEvent) {
+      const target = event.target as Node | null;
+      const menuEl = userMenuDropdownRef.current;
+      if (menuEl && target && menuEl.contains(target)) {
+        if (menuEl.scrollHeight <= menuEl.clientHeight && event.cancelable) {
+          event.preventDefault();
+        }
+        return;
+      }
+      if (event.cancelable) {
+        event.preventDefault();
+      }
+    }
+
+    document.addEventListener('touchmove', preventBackgroundScroll, { passive: false });
+    document.addEventListener('wheel', preventBackgroundScroll, { passive: false });
 
     return () => {
-      document.body.style.overflow = originalBodyOverflow;
       document.removeEventListener('keydown', handleKeyDown);
-      if (typeof window !== 'undefined' && Math.abs(window.scrollY - savedScrollY) > 2) {
-        window.scrollTo({ top: savedScrollY, behavior: 'instant' as ScrollBehavior });
+      document.removeEventListener('touchmove', preventBackgroundScroll);
+      document.removeEventListener('wheel', preventBackgroundScroll);
+      if (typeof window !== 'undefined' && Math.abs(window.scrollY - savedScrollY) > 1) {
+        window.scrollTo({ top: savedScrollY, left: 0, behavior: 'instant' as ScrollBehavior });
       }
     };
   }, [isUserMenuOpen]);
@@ -661,7 +702,12 @@ export const Header: React.FC<HeaderProps> = ({
               onClick={() => {
                 onToggleNotif(false);
                 setIsSearchOpen(false);
-                setIsUserMenuOpen(!isUserMenuOpen);
+                if (!isUserMenuOpen) {
+                  setUserMenuCoords(computeUserMenuCoords());
+                  setIsUserMenuOpen(true);
+                } else {
+                  setIsUserMenuOpen(false);
+                }
               }}
               className="group flex items-center gap-2 rounded-full p-0.5 ring-2 ring-purple-600/40 hover:ring-purple-500 transition-all focus:outline-none cursor-pointer"
               aria-label="Menu do Usuário"
@@ -681,14 +727,17 @@ export const Header: React.FC<HeaderProps> = ({
               )}
             </button>
 
-            {/* Menu da foto de perfil: EXACTLY the 7 items requested */}
-            {isUserMenuOpen && createPortal(
+            {/* Menu da foto de perfil: renderizado via Portal no document.body para alinhamento perfeito com scroll */}
+            {isUserMenuOpen && typeof document !== 'undefined' && createPortal(
               <div className="fixed inset-0 z-50 pointer-events-none">
                 {/* Mobile-only visible backdrop for drawer/menu overlay dismiss. On desktop (md+), outside click is handled natively by document listener without intercepting invisible layers */}
                 <div
                   className="fixed inset-0 z-40 bg-black/50 backdrop-blur-xs md:hidden pointer-events-auto"
                   onClick={() => setIsUserMenuOpen(false)}
-                  onTouchEnd={() => setIsUserMenuOpen(false)}
+                  onTouchEnd={(e) => {
+                    e.preventDefault();
+                    setIsUserMenuOpen(false);
+                  }}
                   aria-hidden="true"
                 />
 
@@ -700,9 +749,10 @@ export const Header: React.FC<HeaderProps> = ({
                     position: 'fixed',
                     top: `${userMenuCoords.top}px`,
                     right: `${userMenuCoords.right}px`,
+                    maxHeight: `${userMenuCoords.maxHeight}px`,
                     touchAction: 'pan-y',
                   }}
-                  className="pointer-events-auto z-50 w-64 max-h-[min(30rem,calc(100vh-5rem))] supports-[height:100dvh]:max-h-[min(30rem,calc(100dvh-5rem))] overflow-y-auto overscroll-contain rounded-2xl border border-purple-800/30 bg-[#130E24] p-2 shadow-2xl shadow-black/90 backdrop-blur-xl animate-in fade-in zoom-in-95 duration-100"
+                  className="pointer-events-auto z-50 w-64 overflow-y-auto overscroll-contain rounded-2xl border border-purple-800/30 bg-[#130E24] p-2 shadow-2xl shadow-black/90 backdrop-blur-xl animate-in fade-in zoom-in-95 duration-100"
                   onTouchMove={(e) => {
                     e.stopPropagation();
                   }}
@@ -915,9 +965,10 @@ export const Header: React.FC<HeaderProps> = ({
                     </div>
                   )}
                 </div>
-              </div>
-            </>
-          )}
+                </div>
+              </div>,
+              document.body
+            )}
           </div>
         </div>
       </div>

@@ -145,6 +145,53 @@ async function runTests() {
     'Rotas da API nunca retornam o index.html do frontend SPA'
   );
 
+  // 1.10 Verificação crítica do rewrite da Vercel (/api/(.*) -> /api?__hikari_route=$1) para /api/admin/*
+  const ownerUid = 'TLJx2QuEv4QQYoduGqn0LDJxxRW2';
+  const rewrittenOwnerStatus = await simulateRequest(
+    'GET',
+    '/api?__hikari_route=admin/status',
+    {
+      Authorization: `Bearer test_token_${ownerUid}`,
+      'x-client-uid': ownerUid,
+    }
+  );
+  assert(rewrittenOwnerStatus.status === 200, 'Rewrite Vercel /api?__hikari_route=admin/status responde 200');
+  const rewrittenOwnerJson = JSON.parse(rewrittenOwnerStatus.body);
+  assert(
+    rewrittenOwnerJson.authenticated === true && rewrittenOwnerJson.isAdmin === true,
+    'Rewrite Vercel encaminha /api/admin/status ao adminRouter e confirma isAdmin=true para Aether'
+  );
+
+  const rewrittenVisitorStatus = await simulateRequest('GET', '/api?__hikari_route=admin/status');
+  const rewrittenVisitorJson = JSON.parse(rewrittenVisitorStatus.body);
+  assert(
+    rewrittenVisitorJson.authenticated === false && rewrittenVisitorJson.isAdmin === false,
+    'Rewrite Vercel /api/admin/status nega visitante anônimo (isAdmin=false)'
+  );
+
+  const rewrittenCommonOverview = await simulateRequest(
+    'GET',
+    '/api?__hikari_route=admin/overview',
+    { Authorization: 'Bearer test_token_usr_common' }
+  );
+  assert(
+    rewrittenCommonOverview.status === 403,
+    'Rewrite Vercel /api/admin/overview bloqueia usuário comum com HTTP 403'
+  );
+
+  const rewrittenOwnerVerify = await simulateRequest(
+    'POST',
+    '/api?__hikari_route=admin/verify',
+    { Authorization: `Bearer test_token_${ownerUid}` },
+    JSON.stringify({ idToken: `test_token_${ownerUid}`, uid: ownerUid })
+  );
+  assert(rewrittenOwnerVerify.status === 200, 'Rewrite Vercel POST /api/admin/verify responde 200 para Aether');
+  const rewrittenVerifyJson = JSON.parse(rewrittenOwnerVerify.body);
+  assert(
+    rewrittenVerifyJson.isAdmin === true,
+    'Rewrite Vercel POST /api/admin/verify confirma isAdmin=true para Aether'
+  );
+
   console.log(`\n========================================`);
   console.log(`Resultados dos Testes Vercel: ${passed} passaram, ${failed} falharam.`);
   console.log(`========================================\n`);
