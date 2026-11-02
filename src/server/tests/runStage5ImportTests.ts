@@ -12,6 +12,7 @@ import {
   saveImportCheckpoint,
   cancelImport,
   isImportInProgress,
+  startOrResumeImport,
   type ImportCheckpoint,
 } from '../../services/importSyncManager';
 import {
@@ -698,13 +699,594 @@ async function runStage5Tests() {
     recordTest(19, 'Ausência de regressões', false, String(err));
   }
 
+  // ==========================================================================
+  // HIKARI PERFIL — CORREÇÃO 1: TESTES DE CHECKPOINT E CONFIRMAÇÃO DE PERSISTÊNCIA
+  // ==========================================================================
+
+  const originalFetch = globalThis.fetch;
+
+  // TEST 20: Persistência bem-sucedida: checkpoint avança somente depois do commit
+  try {
+    const testProfile = 'chk_test_user_success';
+    let commitExecuted = false;
+    let cursorAtCommitTime: number | undefined = undefined;
+
+    // Mock AniList fetch: chunk 1 has 3 items, hasNextChunk: false
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const urlStr = String(input);
+      if (urlStr.includes('graphql.anilist.co')) {
+        const bodyStr = String(init?.body || '');
+        if (bodyStr.includes('MediaListCollection')) {
+          return new Response(
+            JSON.stringify({
+              data: {
+                MediaListCollection: {
+                  hasNextChunk: false,
+                  lists: [
+                    {
+                      name: 'Completed',
+                      entries: [
+                        {
+                          id: 101,
+                          status: 'COMPLETED',
+                          score: 9,
+                          progress: 12,
+                          repeat: 0,
+                          updatedAt: 1700000000,
+                          media: {
+                            id: 101,
+                            idMal: 101,
+                            title: { english: 'Anime 101', romaji: 'Anime 101' },
+                            coverImage: { extraLarge: 'https://cdn.anilist.co/101.jpg' },
+                            episodes: 12,
+                            duration: 24,
+                            startDate: { year: 2023 },
+                            genres: ['Ação'],
+                          },
+                        },
+                      ],
+                    },
+                  ],
+                },
+              },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        // Favorites query mock
+        return new Response(
+          JSON.stringify({
+            data: {
+              User: {
+                favourites: {
+                  anime: { nodes: [], pageInfo: { hasNextPage: false } },
+                  characters: { nodes: [], pageInfo: { hasNextPage: false } },
+                },
+              },
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return originalFetch(input, init);
+    };
+
+    const importRes = await startOrResumeImport({
+      profileId: testProfile,
+      provider: 'anilist',
+      accountIdentifier: 'otaku_chk_test',
+      onBatchCommitted: async () => {
+        commitExecuted = true;
+        // Verifica no localStorage se o checkpoint já avançou antes da resolução do commit
+        const chkDuringCommit = getImportCheckpoint(testProfile, 'anilist', 'otaku_chk_test');
+        cursorAtCommitTime = chkDuringCommit?.cursor;
+      },
+    });
+
+    const finalChk = getImportCheckpoint(testProfile, 'anilist', 'otaku_chk_test');
+    const pass =
+      commitExecuted &&
+      cursorAtCommitTime === 1 && // Durante o commit, o cursor persistido AINDA ERA 1
+      finalChk?.status === 'completed' &&
+      finalChk?.cursor === 2 && // Somente após commit avança para 2
+      (finalChk?.recordsConfirmed ?? 0) === 1 &&
+      importRes.success;
+
+    recordTest(
+      20,
+      'Persistência bem-sucedida: checkpoint avança somente depois do commit',
+      pass,
+      `Cursor durante commit = ${cursorAtCommitTime} (não avançado); cursor após commit confirmado = ${finalChk?.cursor}`
+    );
+  } catch (err) {
+    recordTest(20, 'Persistência bem-sucedida', false, String(err));
+  }
+
+  // TEST 21: Falha no callback: cursor permanece no último lote confirmado
+  try {
+    const testProfile = 'chk_test_user_fail';
+    let commitFailed = false;
+
+    // Mock AniList fetch com chunk 1
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const urlStr = String(input);
+      if (urlStr.includes('graphql.anilist.co')) {
+        const bodyStr = String(init?.body || '');
+        if (bodyStr.includes('MediaListCollection')) {
+          return new Response(
+            JSON.stringify({
+              data: {
+                MediaListCollection: {
+                  hasNextChunk: false,
+                  lists: [
+                    {
+                      name: 'Watching',
+                      entries: [
+                        {
+                          id: 201,
+                          status: 'CURRENT',
+                          score: 8,
+                          progress: 5,
+                          repeat: 0,
+                          updatedAt: 1700000000,
+                          media: {
+                            id: 201,
+                            title: { english: 'Anime 201', romaji: 'Anime 201' },
+                            coverImage: { extraLarge: 'https://cdn.anilist.co/201.jpg' },
+                            episodes: 24,
+                            startDate: { year: 2024 },
+                            genres: ['Aventura'],
+                          },
+                        },
+                      ],
+                    },
+                  ],
+                },
+              },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            data: {
+              User: {
+                favourites: {
+                  anime: { nodes: [], pageInfo: { hasNextPage: false } },
+                  characters: { nodes: [], pageInfo: { hasNextPage: false } },
+                },
+              },
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return originalFetch(input, init);
+    };
+
+    const importRes = await startOrResumeImport({
+      profileId: testProfile,
+      provider: 'anilist',
+      accountIdentifier: 'otaku_fail_test',
+      onBatchCommitted: async () => {
+        commitFailed = true;
+        throw new Error('SimulatedFirestoreWriteError: Connection timeout during batch commit');
+      },
+    });
+
+    const chkAfterFail = getImportCheckpoint(testProfile, 'anilist', 'otaku_fail_test');
+    const pass =
+      commitFailed &&
+      importRes.success === false &&
+      chkAfterFail?.status === 'error' &&
+      chkAfterFail?.cursor === 1 && // Cursor NÃO avançou para 2!
+      chkAfterFail?.recordsConfirmed === 0 && // Registros do lote que falhou NÃO foram confirmados
+      chkAfterFail?.errorMessage?.includes('SimulatedFirestoreWriteError');
+
+    recordTest(
+      21,
+      'Falha no callback: cursor permanece no último lote confirmado',
+      Boolean(pass),
+      `Cursor preservado no lote 1 (status=${chkAfterFail?.status}, erro="${chkAfterFail?.errorMessage}")`
+    );
+  } catch (err) {
+    recordTest(21, 'Falha no callback', false, String(err));
+  }
+
+  // TEST 22: Retomada após falha: o mesmo lote é reprocessado
+  try {
+    const testProfile = 'chk_test_user_fail'; // Usa o mesmo perfil do teste 21 que ficou em erro no cursor 1
+    const chkBeforeResume = getImportCheckpoint(testProfile, 'anilist', 'otaku_fail_test');
+
+    // Na retomada, o commit funcionará
+    const resumeRes = await startOrResumeImport({
+      profileId: testProfile,
+      provider: 'anilist',
+      accountIdentifier: 'otaku_fail_test',
+    });
+
+    const chkAfterResume = getImportCheckpoint(testProfile, 'anilist', 'otaku_fail_test');
+    const pass =
+      chkBeforeResume?.cursor === 1 && // Checkpoint antes da retomada estava no lote 1
+      chkBeforeResume?.status === 'error' &&
+      chkAfterResume?.status === 'completed' &&
+      chkAfterResume?.cursor === 2 && // Após sucesso agora avançou para 2
+      resumeRes.success === true;
+
+    recordTest(
+      22,
+      'Retomada após falha: o mesmo lote é reprocessado a partir do cursor preservado',
+      Boolean(pass),
+      `Cursor antes da retomada = ${chkBeforeResume?.cursor} -> conclusão com sucesso com cursor final = ${chkAfterResume?.cursor}`
+    );
+  } catch (err) {
+    recordTest(22, 'Retomada após falha', false, String(err));
+  }
+
+  // TEST 23: Repetição do lote: nenhum anime duplicado (idempotência estrita)
+  try {
+    const existing: AnimeItem[] = [
+      makeMockAnime('anime_rep_1', 'Repetitive Anime 1', 'completed', 12),
+      makeMockAnime('anime_rep_2', 'Repetitive Anime 2', 'watching', 6),
+    ];
+
+    const incoming: AniListAnimeEntry[] = [
+      {
+        anilistId: 9001,
+        title: 'Repetitive Anime 1',
+        posterUrl: 'https://cdn.anilist.co/cover1.jpg',
+        status: 'completed',
+        currentEpisode: 12,
+        totalEpisodes: 12,
+        rating: 9,
+        year: 2022,
+        genres: ['Action'],
+      },
+      {
+        anilistId: 9002,
+        title: 'Repetitive Anime 2',
+        posterUrl: 'https://cdn.anilist.co/cover2.jpg',
+        status: 'watching',
+        currentEpisode: 6,
+        totalEpisodes: 12,
+        rating: 8.5,
+        year: 2023,
+        genres: ['Adventure'],
+      },
+    ];
+
+    // Primeira mesclagem
+    const pass1 = mergeAniListImport(incoming, existing, true);
+    // Segunda mesclagem com a mesma lista de entrada (repetição do lote)
+    const pass2 = mergeAniListImport(incoming, pass1.mergedList, true);
+
+    const pass =
+      pass1.mergedList.length === 2 &&
+      pass2.mergedList.length === 2 &&
+      pass2.addedCount === 0 && // Zero animes novos adicionados na repetição
+      pass2.unchangedCount === 2; // Ambos detectados como idênticos e sem alterações espúrias
+
+    recordTest(
+      23,
+      'Repetição do lote: nenhum anime duplicado (idempotência estrita)',
+      pass,
+      `Tamanho inicial: 2 -> Lote repetido: 2 animes (adicionados: 0, inalterados: 2)`
+    );
+  } catch (err) {
+    recordTest(23, 'Repetição do lote', false, String(err));
+  }
+
+  // TEST 24: Falha após persistência, mas antes de salvar checkpoint: reprocessamento idempotente
+  try {
+    const testProfile = 'chk_test_crash_sim';
+    // O anime já gravado corresponde ao mesmo anilistId 201 retornado pelo mock
+    const animeBeforeCrash = [{
+      ...makeMockAnime('anilist_201', 'Anime 201', 'watching', 5),
+      anilistId: 201,
+    }];
+
+    // Simula que os dados já foram salvos no storage (como se houvesse crash logo antes de gravar checkpoint)
+    // O checkpoint em disco continua no cursor 1
+    saveImportCheckpoint({
+      profileId: testProfile,
+      provider: 'anilist',
+      accountIdentifier: 'otaku_crash',
+      status: 'error',
+      cursor: 1,
+      page: 1,
+      recordsReceived: 0,
+      recordsProcessed: 0,
+      recordsConfirmed: 0,
+    });
+
+    // Ao retomar, o lote 1 é executado sobre a lista que já continha os animes salvos
+    const rerun = await startOrResumeImport({
+      profileId: testProfile,
+      provider: 'anilist',
+      accountIdentifier: 'otaku_crash',
+      currentAnimes: animeBeforeCrash,
+    });
+
+    const pass =
+      rerun.success === true &&
+      rerun.mergedAnimes.length === 1 && // Não duplicou
+      rerun.mergedAnimes[0].anilistId === 201;
+
+    recordTest(
+      24,
+      'Falha após persistência, mas antes de salvar checkpoint: reprocessamento idempotente',
+      pass,
+      `Reprocessamento não gerou duplicatas (total: ${rerun.mergedAnimes.length} item preservado)`
+    );
+  } catch (err) {
+    recordTest(24, 'Falha pós-persistência idempotente', false, String(err));
+  }
+
+  // TEST 25: Cancelamento: nenhum lote não confirmado aparece como concluído
+  try {
+    const testProfile = 'chk_test_cancel_user';
+    saveImportCheckpoint({
+      profileId: testProfile,
+      provider: 'anilist',
+      accountIdentifier: 'otaku_cancel',
+      status: 'in_progress',
+      cursor: 3,
+      recordsReceived: 1000,
+      recordsProcessed: 1000,
+      recordsConfirmed: 500, // Apenas 500 foram confirmados
+    });
+
+    cancelImport(testProfile, 'anilist', 'otaku_cancel');
+    const chk = getImportCheckpoint(testProfile, 'anilist', 'otaku_cancel');
+
+    const pass = chk === null; // Checkpoint removido com segurança, nada marcado como 'completed'
+
+    recordTest(
+      25,
+      'Cancelamento: nenhum lote não confirmado aparece como concluído',
+      pass,
+      `Cancelamento removeu checkpoint ativo com segurança sem marcar status="completed"`
+    );
+  } catch (err) {
+    recordTest(25, 'Cancelamento seguro', false, String(err));
+  }
+
+  // TEST 26: Contadores: somente registros persistidos são contabilizados como confirmados
+  try {
+    const testProfile = 'chk_test_counters';
+    let confirmedInCallback = 0;
+
+    const res = await startOrResumeImport({
+      profileId: testProfile,
+      provider: 'anilist',
+      accountIdentifier: 'otaku_counters',
+      onBatchCommitted: async (batch) => {
+        const chk = Array.isArray(batch) ? null : batch.checkpoint;
+        confirmedInCallback = chk?.recordsConfirmed ?? 0;
+      },
+    });
+
+    const finalChk = getImportCheckpoint(testProfile, 'anilist', 'otaku_counters');
+    const pass =
+      res.success &&
+      confirmedInCallback === 1 &&
+      finalChk?.recordsConfirmed === 1 &&
+      finalChk?.recordsPersisted === 1;
+
+    recordTest(
+      26,
+      'Contadores: somente registros persistidos são contabilizados como confirmados',
+      Boolean(pass),
+      `recordsConfirmed=${finalChk?.recordsConfirmed}, recordsPersisted=${finalChk?.recordsPersisted}`
+    );
+  } catch (err) {
+    recordTest(26, 'Contadores confirmados', false, String(err));
+  }
+
+  // TEST 27: Regressão da importação MAL: paginação contínua e tratamento de lotes
+  try {
+    const testProfile = 'chk_test_mal_regress';
+    // Mock MAL endpoint com formato real da rota Hikari (/api/mal/animelist)
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const urlStr = String(input);
+      if (urlStr.includes('/api/mal/animelist')) {
+        return new Response(
+          JSON.stringify({
+            entries: [
+              {
+                malId: 777,
+                title: 'MAL Regress Anime',
+                posterUrl: 'https://cdn.myanimelist.net/777.jpg',
+                status: 'watching',
+                currentEpisode: 18,
+                totalEpisodes: 24,
+                rating: 9,
+                year: 2021,
+                genres: ['Shounen'],
+              },
+            ],
+            hasMore: false,
+            nextOffset: null,
+            totalCount: 1,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return originalFetch(input, init);
+    };
+
+    const malRes = await startOrResumeImport({
+      profileId: testProfile,
+      provider: 'mal',
+      accountIdentifier: 'mal_test_user',
+      idToken: 'valid_mock_firebase_id_token',
+    });
+
+    const chk = getImportCheckpoint(testProfile, 'mal', 'mal_test_user');
+    const pass =
+      malRes.success &&
+      malRes.mergedAnimes.length === 1 &&
+      malRes.mergedAnimes[0].malId === 777 &&
+      chk?.status === 'completed' &&
+      (chk?.recordsConfirmed ?? 0) === 1;
+
+    recordTest(
+      27,
+      'Regressão da importação MAL: paginação e persistência confirmada',
+      Boolean(pass),
+      `MAL importado com sucesso (status=${chk?.status}, malId=${malRes.mergedAnimes[0]?.malId})`
+    );
+  } catch (err) {
+    recordTest(27, 'Regressão MAL', false, String(err));
+  }
+
+  // TEST 28: Regressão da importação AniList: paginação contínua de chunks
+  try {
+    const testProfile = 'chk_test_al_regress';
+    let chunkCountCalled = 0;
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const urlStr = String(input);
+      if (urlStr.includes('graphql.anilist.co')) {
+        const bodyStr = String(init?.body || '');
+        if (bodyStr.includes('MediaListCollection')) {
+          chunkCountCalled++;
+          const hasMoreChunks = chunkCountCalled < 2; // 2 chunks no total
+          return new Response(
+            JSON.stringify({
+              data: {
+                MediaListCollection: {
+                  hasNextChunk: hasMoreChunks,
+                  lists: [
+                    {
+                      name: 'Completed',
+                      entries: [
+                        {
+                          id: 800 + chunkCountCalled,
+                          status: 'COMPLETED',
+                          score: 8,
+                          progress: 12,
+                          repeat: 0,
+                          updatedAt: 1700000000,
+                          media: {
+                            id: 800 + chunkCountCalled,
+                            title: { english: `AL Chunk ${chunkCountCalled}`, romaji: `AL Chunk ${chunkCountCalled}` },
+                            coverImage: { extraLarge: `https://cdn.anilist.co/${800 + chunkCountCalled}.jpg` },
+                            episodes: 12,
+                            startDate: { year: 2023 },
+                            genres: ['Fantasy'],
+                          },
+                        },
+                      ],
+                    },
+                  ],
+                },
+              },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            data: {
+              User: {
+                favourites: {
+                  anime: { nodes: [], pageInfo: { hasNextPage: false } },
+                  characters: { nodes: [], pageInfo: { hasNextPage: false } },
+                },
+              },
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return originalFetch(input, init);
+    };
+
+    const alRes = await startOrResumeImport({
+      profileId: testProfile,
+      provider: 'anilist',
+      accountIdentifier: 'al_multi_chunk_user',
+    });
+
+    const chk = getImportCheckpoint(testProfile, 'anilist', 'al_multi_chunk_user');
+    const pass =
+      alRes.success &&
+      chunkCountCalled === 2 &&
+      alRes.mergedAnimes.length === 2 &&
+      chk?.status === 'completed' &&
+      chk?.cursor === 3; // Chunk 1 -> Chunk 2 -> Finaliza com cursor 3
+
+    recordTest(
+      28,
+      'Regressão da importação AniList: paginação contínua de chunks',
+      Boolean(pass),
+      `2 chunks processados e confirmados consecutivamente (total de animes: ${alRes.mergedAnimes.length}, cursor final: ${chk?.cursor})`
+    );
+  } catch (err) {
+    recordTest(28, 'Regressão AniList', false, String(err));
+  }
+
+  // TEST 29: Preservação de notas, favoritos, status, histórico e pôsteres locais
+  try {
+    const localAnime: AnimeItem = {
+      id: 'local_custom_manual_01',
+      title: 'Manual Protected Anime',
+      titleRomaji: 'Manual Protected Anime',
+      posterUrl: 'https://images.unsplash.com/photo-custom?w=400',
+      status: 'watching',
+      currentEpisode: 7,
+      totalEpisodes: 24,
+      rating: 9.8,
+      isFavorite: true,
+      year: 2020,
+      genres: ['Supernatural'],
+      rewatchCount: 3,
+    };
+
+    const incomingMAL: MALAnimeEntry = {
+      malId: 99999,
+      title: 'Manual Protected Anime',
+      status: 'completed',
+      currentEpisode: 24,
+      totalEpisodes: 24,
+      rating: 0, // Sem nota na plataforma externa (0) -> preserva nota local 9.8
+      year: 2020,
+      genres: ['Supernatural'],
+      posterUrl: 'https://cdn.myanimelist.net/images/official.jpg',
+    };
+
+    const mergeRes = mergeMALImport([incomingMAL], [localAnime], false);
+    const item = mergeRes.mergedList[0];
+
+    const pass =
+      item !== undefined &&
+      item.id === 'local_custom_manual_01' && // ID original preservado
+      item.isFavorite === true && // Favorito manual preservado
+      item.rating === 9.8 && // Nota local preservada estritamente
+      item.rewatchCount === 3 && // Histórico de rewatch mantido
+      item.status === 'watching' && // Status local preservado
+      item.posterUrl === 'https://cdn.myanimelist.net/images/official.jpg'; // Capa oficial substituiu Unsplash genérica
+
+    recordTest(
+      29,
+      'Preservação de notas, favoritos, status, histórico e pôsteres locais',
+      pass,
+      `ID=${item?.id}, isFavorite=${item?.isFavorite}, rating=${item?.rating}, rewatch=${item?.rewatchCount}`
+    );
+  } catch (err) {
+    recordTest(29, 'Preservação de dados locais', false, String(err));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
   // RESUMO FINAL
   console.log('\n========================================================================');
   const allPassed = testResults.every((t) => t.passed);
   const passedCount = testResults.filter((t) => t.passed).length;
   console.log(`RESULTADO DA ETAPA 5: ${passedCount}/${testResults.length} TESTES PASSARAM`);
   if (allPassed) {
-    console.log('STATUS GERAL: ✅ ETAPA 5 VALIDADA COM SUCESSO');
+    console.log('STATUS GERAL: ✅ ETAPA 5 VALIDADA COM SUCESSO (TODOS OS 29 TESTES APROVADOS)');
   } else {
     console.log('STATUS GERAL: ❌ EXISTEM FALHAS NOS TESTES');
   }

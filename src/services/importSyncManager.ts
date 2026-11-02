@@ -36,6 +36,8 @@ export interface ImportCheckpoint {
   totalEstimated?: number | null;
   recordsReceived: number;
   recordsProcessed: number;
+  recordsConfirmed?: number;
+  recordsPersisted?: number;
   addedCount?: number;
   updatedCount?: number;
   unchangedCount?: number;
@@ -272,6 +274,8 @@ export function cancelImport(
       status: 'idle',
       recordsReceived: 0,
       recordsProcessed: 0,
+      recordsConfirmed: 0,
+      recordsPersisted: 0,
       updatedAtMs: Date.now(),
     },
   });
@@ -279,6 +283,7 @@ export function cancelImport(
 
 /**
  * Inicia ou retoma uma importação paginada incremental e resiliente para AniList ou MyAnimeList.
+ * Garante que o cursor do checkpoint só avance definitivamente após confirmação de persistência (onBatchCommitted).
  */
 export async function startOrResumeImport(
   options: StartImportOptions
@@ -324,24 +329,29 @@ export async function startOrResumeImport(
   const existingCheckpoint = getImportCheckpoint(profileId, provider, accountIdentifier);
   const isNewCheckpoint = !existingCheckpoint || existingCheckpoint.status === 'completed';
 
+  const initialCursor = provider === 'mal' ? 0 : 1;
+  const initialPoint = provider === 'mal' ? 'offset_0' : 'chunk_1';
+
   const checkpoint: ImportCheckpoint = isNewCheckpoint
     ? {
         version: 1,
         provider,
         accountIdentifier,
         profileId,
-        cursor: provider === 'mal' ? 0 : 1, // MAL usa offset (0, 1000..), AniList usa chunk (1, 2..)
-        page: provider === 'mal' ? 0 : 1,
+        cursor: initialCursor,
+        page: initialCursor,
         totalEstimated,
         recordsReceived: 0,
         recordsProcessed: 0,
+        recordsConfirmed: 0,
+        recordsPersisted: 0,
         addedCount: 0,
         updatedCount: 0,
         unchangedCount: 0,
         preservedFieldsCount: 0,
         status: 'in_progress',
         lastConfirmedCheckpoint: Date.now(),
-        lastConfirmedPoint: provider === 'mal' ? 'offset_0' : 'chunk_1',
+        lastConfirmedPoint: initialPoint,
         updatedAtMs: Date.now(),
         lastUpdated: new Date().toISOString(),
         errorMessage: null,
@@ -354,6 +364,10 @@ export async function startOrResumeImport(
         lastError: null,
         updatedAtMs: Date.now(),
         lastUpdated: new Date().toISOString(),
+        recordsReceived: existingCheckpoint.recordsReceived ?? 0,
+        recordsProcessed: existingCheckpoint.recordsProcessed ?? 0,
+        recordsConfirmed: existingCheckpoint.recordsConfirmed ?? existingCheckpoint.recordsProcessed ?? 0,
+        recordsPersisted: existingCheckpoint.recordsPersisted ?? existingCheckpoint.recordsProcessed ?? 0,
         addedCount: existingCheckpoint.addedCount ?? 0,
         updatedCount: existingCheckpoint.updatedCount ?? 0,
         unchangedCount: existingCheckpoint.unchangedCount ?? 0,
@@ -397,12 +411,16 @@ export async function startOrResumeImport(
         return { success: false, status: 'paused', mergedAnimes: workingAnimes, checkpoint };
       }
 
+      // PASSO 1: Receber o lote da API externa sem avançar o cursor de checkpoint confirmado
       let incomingBatch: (AnimeItem | AniListAnimeEntry | MALAnimeEntry)[] = [];
       let batchHasMore = false;
+      const currentBatchCursor = checkpoint.cursor ?? (provider === 'mal' ? 0 : 1);
+      let candidateNextCursor = currentBatchCursor;
+      let candidateNextPage = checkpoint.page ?? 1;
+      let candidateConfirmedPoint = checkpoint.lastConfirmedPoint || (provider === 'mal' ? `offset_${currentBatchCursor}` : `chunk_${currentBatchCursor}`);
 
-      // 3. Consulta do lote respeitando paginação real de cada plataforma
       if (provider === 'anilist') {
-        const chunkIndex = checkpoint.cursor ?? 1;
+        const chunkIndex = currentBatchCursor;
         const chunkRes: AniListChunkResult = await fetchAniListAnimeChunk(
           accountIdentifier,
           chunkIndex,
@@ -414,15 +432,15 @@ export async function startOrResumeImport(
         );
         incomingBatch = chunkRes.entries;
         batchHasMore = chunkRes.hasNextChunk;
-        checkpoint.cursor = chunkIndex + 1;
-        checkpoint.page = chunkIndex + 1;
-        checkpoint.lastConfirmedPoint = `chunk_${chunkIndex}`;
+        candidateNextCursor = chunkIndex + 1;
+        candidateNextPage = chunkIndex + 1;
+        candidateConfirmedPoint = `chunk_${chunkIndex}`;
       } else {
         // MyAnimeList
         if (!idToken) {
           throw new Error('Token de autenticação do Firebase ausente para consulta segura do MyAnimeList.');
         }
-        const offset = checkpoint.cursor ?? 0;
+        const offset = currentBatchCursor;
         const batchRes: MALBatchResult = await fetchMALAnimeListBatch(idToken, {
           offset,
           limit: 1000,
@@ -431,17 +449,19 @@ export async function startOrResumeImport(
         incomingBatch = batchRes.entries;
         batchHasMore = batchRes.hasMore;
         if (batchRes.nextOffset !== null) {
-          checkpoint.cursor = batchRes.nextOffset;
+          candidateNextCursor = batchRes.nextOffset;
         } else {
-          checkpoint.cursor = offset + incomingBatch.length;
+          candidateNextCursor = offset + incomingBatch.length;
         }
-        checkpoint.page = Math.floor((checkpoint.cursor || 0) / 1000) + 1;
-        checkpoint.lastConfirmedPoint = `offset_${offset}`;
+        candidateNextPage = Math.floor((candidateNextCursor || 0) / 1000) + 1;
+        candidateConfirmedPoint = `offset_${offset}`;
       }
 
-      checkpoint.recordsReceived += incomingBatch.length;
+      // Registros recebidos da API (telemetria em memória do lote)
+      const batchRecordsReceived = incomingBatch.length;
+      const candidateRecordsReceived = (checkpoint.recordsReceived ?? 0) + batchRecordsReceived;
 
-      // 4. Mesclagem segura e idempotente com preservação estrita de dados locais
+      // PASSO 2: Mesclagem segura e idempotente em memória preservando estritamente campos locais
       let mergeResult: {
         mergedList: AnimeItem[];
         addedCount: number;
@@ -464,42 +484,85 @@ export async function startOrResumeImport(
         );
       }
 
-      workingAnimes = mergeResult.mergedList;
-      checkpoint.recordsProcessed = workingAnimes.length;
-      checkpoint.addedCount = (checkpoint.addedCount ?? 0) + mergeResult.addedCount;
-      checkpoint.updatedCount = (checkpoint.updatedCount ?? 0) + mergeResult.updatedCount;
-      checkpoint.unchangedCount = (checkpoint.unchangedCount ?? 0) + mergeResult.unchangedCount;
-      checkpoint.preservedFieldsCount = (checkpoint.preservedFieldsCount ?? 0) + mergeResult.preservedFieldsCount;
-      checkpoint.lastConfirmedCheckpoint = Date.now();
-      checkpoint.updatedAtMs = Date.now();
-      checkpoint.lastUpdated = new Date().toISOString();
+      const nextWorkingAnimes = mergeResult.mergedList;
 
-      // Salva o progresso logo após a confirmação do lote
+      // PASSO 3: Preparar o próximo checkpoint como candidato NÃO confirmado
+      const candidateCheckpoint: ImportCheckpoint = {
+        ...checkpoint,
+        cursor: candidateNextCursor,
+        page: candidateNextPage,
+        recordsReceived: candidateRecordsReceived,
+        recordsProcessed: nextWorkingAnimes.length,
+        recordsConfirmed: nextWorkingAnimes.length,
+        recordsPersisted: nextWorkingAnimes.length,
+        addedCount: (checkpoint.addedCount ?? 0) + mergeResult.addedCount,
+        updatedCount: (checkpoint.updatedCount ?? 0) + mergeResult.updatedCount,
+        unchangedCount: (checkpoint.unchangedCount ?? 0) + mergeResult.unchangedCount,
+        preservedFieldsCount: (checkpoint.preservedFieldsCount ?? 0) + mergeResult.preservedFieldsCount,
+        lastConfirmedPoint: candidateConfirmedPoint,
+        lastConfirmedCheckpoint: Date.now(),
+        updatedAtMs: Date.now(),
+        lastUpdated: new Date().toISOString(),
+      };
+
+      // Checagem de interrupção ou cancelamento antes da persistência
+      if (activeCtrl.isCancelled) {
+        checkpoint.status = 'idle';
+        clearImportCheckpoint(profileId, provider, accountIdentifier);
+        activeControllers.delete(ctrlKey);
+        return { success: false, status: 'idle', mergedAnimes: workingAnimes, checkpoint };
+      }
+
+      if (activeCtrl.isPaused) {
+        checkpoint.status = 'paused';
+        saveImportCheckpoint(checkpoint);
+        activeControllers.delete(ctrlKey);
+        return { success: false, status: 'paused', mergedAnimes: workingAnimes, checkpoint };
+      }
+
+      // PASSO 4 & 5: Executar persistência incremental e confirmar gravações oficiais
+      // Se onBatchCommitted lançar erro, a execução salta para o catch SEM salvar o novo cursor.
+      if (onBatchCommitted) {
+        await onBatchCommitted({
+          checkpoint: { ...candidateCheckpoint },
+          mergedAnimes: nextWorkingAnimes,
+        });
+      }
+
+      // PASSO 6: Somente após a resolução com sucesso de onBatchCommitted o checkpoint avança
+      workingAnimes = nextWorkingAnimes;
+      checkpoint.cursor = candidateCheckpoint.cursor;
+      checkpoint.page = candidateCheckpoint.page;
+      checkpoint.recordsReceived = candidateCheckpoint.recordsReceived;
+      checkpoint.recordsProcessed = candidateCheckpoint.recordsProcessed;
+      checkpoint.recordsConfirmed = candidateCheckpoint.recordsConfirmed;
+      checkpoint.recordsPersisted = candidateCheckpoint.recordsPersisted;
+      checkpoint.addedCount = candidateCheckpoint.addedCount;
+      checkpoint.updatedCount = candidateCheckpoint.updatedCount;
+      checkpoint.unchangedCount = candidateCheckpoint.unchangedCount;
+      checkpoint.preservedFieldsCount = candidateCheckpoint.preservedFieldsCount;
+      checkpoint.lastConfirmedPoint = candidateCheckpoint.lastConfirmedPoint;
+      checkpoint.lastConfirmedCheckpoint = candidateCheckpoint.lastConfirmedCheckpoint;
+      checkpoint.updatedAtMs = candidateCheckpoint.updatedAtMs;
+      checkpoint.lastUpdated = candidateCheckpoint.lastUpdated;
+
       saveImportCheckpoint(checkpoint);
 
-      // 5. Notificação de progresso da interface
+      // PASSO 7: Atualizar o estado visual e comunicar o progresso confirmado
       const percentage =
         checkpoint.totalEstimated && checkpoint.totalEstimated > 0
-          ? Math.min(99, Math.round((checkpoint.recordsReceived / checkpoint.totalEstimated) * 100))
+          ? Math.min(99, Math.round(((checkpoint.recordsConfirmed ?? checkpoint.recordsProcessed) / checkpoint.totalEstimated) * 100))
           : null;
 
       const progressUpdate: ImportProgressUpdate = {
         checkpoint: { ...checkpoint },
-        currentBatchEntries: incomingBatch.length,
+        currentBatchEntries: batchRecordsReceived,
         percentage,
-        message: `${checkpoint.recordsReceived} animes recebidos (${mergeResult.addedCount} novos, ${mergeResult.updatedCount} atualizados)`,
+        message: `${checkpoint.recordsConfirmed ?? checkpoint.recordsProcessed} animes confirmados (${checkpoint.addedCount} novos, ${checkpoint.updatedCount} atualizados)`,
       };
 
       if (onProgress) {
         onProgress(progressUpdate);
-      }
-
-      // 6. Callback de persistência incremental em bloco (Firestore particionado + IndexedDB)
-      if (onBatchCommitted) {
-        await onBatchCommitted({
-          checkpoint: { ...checkpoint },
-          mergedAnimes: workingAnimes,
-        });
       }
 
       // Verificação de parada: API indicou fim definitivo da paginação
@@ -512,8 +575,11 @@ export async function startOrResumeImport(
       await new Promise((r) => setTimeout(r, 60));
     }
 
-    // 7. Conclusão oficial e confirmada de toda a lista
+    // 8. Conclusão oficial e confirmada de toda a lista após todos os lotes persistidos
     checkpoint.status = 'completed';
+    checkpoint.recordsConfirmed = workingAnimes.length;
+    checkpoint.recordsPersisted = workingAnimes.length;
+    checkpoint.recordsProcessed = workingAnimes.length;
     checkpoint.updatedAtMs = Date.now();
     checkpoint.lastUpdated = new Date().toISOString();
     saveImportCheckpoint(checkpoint);
@@ -554,7 +620,8 @@ export async function startOrResumeImport(
       return { success: false, status: 'paused', mergedAnimes: workingAnimes, checkpoint };
     }
 
-    const errorMsg = err instanceof Error ? err.message : 'Falha na comunicação com a API externa.';
+    // Em caso de falha durante a persistência, o checkpoint preserva o último cursor confirmado
+    const errorMsg = err instanceof Error ? err.message : 'Falha na comunicação ou persistência da importação.';
     checkpoint.status = 'error';
     checkpoint.errorMessage = errorMsg;
     checkpoint.lastError = errorMsg;
@@ -574,3 +641,5 @@ export async function startOrResumeImport(
     };
   }
 }
+
+export const startImport = startOrResumeImport;
