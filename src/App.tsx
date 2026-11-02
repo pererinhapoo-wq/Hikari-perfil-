@@ -12,7 +12,14 @@ import { ActivityTab } from './components/tabs/ActivityTab';
 import { PrivateProfileNotice } from './components/PrivateProfileNotice';
 import { FollowersModal } from './components/modals/FollowersModal';
 import { SettingsModal } from './components/modals/SettingsModal';
+import { PrivateChatModal } from './components/chat/PrivateChatModal';
 import { AuthScreen } from './components/auth/AuthScreen';
+import {
+  syncUserPrivacyContext,
+  subscribeToConversationsList,
+  canUserMessageRecipient,
+  type UserCheckContext,
+} from './services/chatService';
 import { 
   UserProfile, 
   ProfileTab, 
@@ -357,6 +364,9 @@ export default function App() {
   const [isFollowersOpen, setIsFollowersOpen] = useState(false);
   const [followersInitialTab, setFollowersInitialTab] = useState<'followers' | 'following' | 'requests'>('followers');
   const [isNotifOpen, setIsNotifOpen] = useState(false);
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [chatRecipientId, setChatRecipientId] = useState<string | null>(null);
+  const [unreadMessagesCount, setUnreadMessagesCount] = useState(0);
 
   // Highlight state for direct notification navigation
   const [highlightedCommentId, setHighlightedCommentId] = useState<string | undefined>(undefined);
@@ -867,6 +877,77 @@ export default function App() {
     },
     [canAccessActiveProfileAnimeList]
   );
+
+  // Synchronize user context with server for authoritative privacy and block checks
+  useEffect(() => {
+    if (!currentUser.id) return;
+    const currentFollowerIds = isAuthenticated
+      ? (activeAuthWorkspace?.followers ?? []).map((f) => f.id)
+      : demoFollowers.map((f) => f.id);
+
+    syncUserPrivacyContext({
+      id: currentUser.id,
+      username: currentUser.username,
+      displayName: currentUser.displayName,
+      avatarUrl: currentUser.avatarUrl,
+      allowDirectMessages: currentUser.privacySettings?.allowDirectMessages !== false,
+      directMessagesFrom: currentUser.privacySettings?.directMessagesFrom || 'everyone',
+      followingIds: Array.from(followingIds),
+      followerIds: currentFollowerIds,
+      blockedIds: Array.from(blockedIds),
+    });
+  }, [currentUser, followingIds, blockedIds, isAuthenticated, activeAuthWorkspace, demoFollowers]);
+
+  // Subscribe to unread messages count across all conversations
+  useEffect(() => {
+    if (!currentUser.id) return;
+    const unsubscribe = subscribeToConversationsList(currentUser.id, (convs) => {
+      const unreadTotal = convs.reduce((sum, c) => sum + (c.unreadCounts[currentUser.id] || 0), 0);
+      setUnreadMessagesCount(unreadTotal);
+    });
+    return () => unsubscribe();
+  }, [currentUser.id]);
+
+  // Validate whether the current user is allowed to message the currently viewed profile
+  const activeProfileDirectMessageCheck = useMemo(() => {
+    if (isOwnProfile) return { allowed: true };
+
+    const currentFollowerIds = isAuthenticated
+      ? (activeAuthWorkspace?.followers ?? []).map((f) => f.id)
+      : demoFollowers.map((f) => f.id);
+
+    const senderCtx: UserCheckContext = {
+      id: currentUser.id,
+      username: currentUser.username,
+      displayName: currentUser.displayName,
+      avatarUrl: currentUser.avatarUrl,
+      allowDirectMessages: currentUser.privacySettings?.allowDirectMessages !== false,
+      directMessagesFrom: currentUser.privacySettings?.directMessagesFrom || 'everyone',
+      followingIds: Array.from(followingIds),
+      followerIds: currentFollowerIds,
+      blockedIds: Array.from(blockedIds),
+    };
+
+    const recipientCtx: UserCheckContext = {
+      id: activeProfile.id,
+      username: activeProfile.username,
+      displayName: activeProfile.displayName,
+      avatarUrl: activeProfile.avatarUrl,
+      allowDirectMessages: activeProfile.privacySettings?.allowDirectMessages !== false,
+      directMessagesFrom: activeProfile.privacySettings?.directMessagesFrom || 'everyone',
+      followingIds: [],
+      followerIds: followingIds.has(activeProfile.id) ? [currentUser.id] : [],
+      blockedIds: blockedIds.has(activeProfile.id) ? [currentUser.id] : [],
+    };
+
+    return canUserMessageRecipient(senderCtx, recipientCtx);
+  }, [isOwnProfile, currentUser, activeProfile, followingIds, blockedIds, isAuthenticated, activeAuthWorkspace, demoFollowers]);
+
+  // Handler: Open chat modal with optional preselected recipient
+  const handleOpenChat = useCallback((targetRecipientId?: string) => {
+    setChatRecipientId(targetRecipientId || null);
+    setIsChatOpen(true);
+  }, []);
 
   // Handler: Follow / Request toggle
   const handleFollowToggle = async () => {
@@ -1539,7 +1620,10 @@ export default function App() {
         : `Removeu ${prevAnime.title} dos favoritos`,
       description: prevAnime.genres.slice(0, 2).join(' · '),
       timestamp: 'Agora',
-      createdAtTimestamp: actionNow
+      createdAtTimestamp: actionNow,
+      animeId: prevAnime.id,
+      animeTitle: prevAnime.title,
+      posterUrl: prevAnime.posterUrl
     };
 
     persistAndApply(nextAnimes, activity);
@@ -2143,6 +2227,8 @@ export default function App() {
         isAuthenticated={isAuthenticated}
         authenticatedEmail={isAuthenticated ? user?.email ?? null : null}
         onLogout={isAuthenticated ? handleLogout : undefined}
+        onOpenMessages={() => handleOpenChat()}
+        unreadMessagesCount={unreadMessagesCount}
         onOpenAuth={
           !isAuthenticated
             ? (mode = 'login') => {
@@ -2163,8 +2249,11 @@ export default function App() {
           isRequested={isRequestedActive}
           isBlocked={isBlockedActive}
           isFollowPending={isFollowPending}
+          canDirectMessage={activeProfileDirectMessageCheck.allowed}
+          directMessageDisabledReason={activeProfileDirectMessageCheck.reason}
           onFollowToggle={handleFollowToggle}
           onBlockToggle={handleBlockToggle}
+          onOpenDirectMessage={() => handleOpenChat(activeProfile.id)}
           onOpenSettings={(tab = 'profile') => {
             setSettingsInitialTab(tab);
             setIsSettingsOpen(true);
@@ -2332,6 +2421,9 @@ export default function App() {
           initialTab={settingsInitialTab}
           profile={currentUser}
           currentAnimes={animes}
+          blockedIds={Array.from(blockedIds)}
+          otherProfiles={authOtherProfilesMap}
+          onUnblockUser={handleBlockToggle}
           onSyncAniList={handleSyncAniList}
           onSyncMAL={handleSyncMAL}
           onClose={() => setIsSettingsOpen(false)}
@@ -2340,6 +2432,35 @@ export default function App() {
           onUpdateBanner={handleUpdateBanner}
           onRemoveAvatar={handleRemoveAvatar}
           onRemoveBanner={handleRemoveBanner}
+        />
+      )}
+
+      {/* Private Direct Messages Chat Drawer / Modal */}
+      {isChatOpen && (
+        <PrivateChatModal
+          isOpen={isChatOpen}
+          currentUser={currentUser}
+          otherProfiles={authOtherProfilesMap}
+          initialRecipientId={chatRecipientId}
+          userAnimes={animes}
+          followingIds={followingIds}
+          followersIds={new Set(
+            isAuthenticated
+              ? (activeAuthWorkspace?.followers ?? []).map((f) => f.id)
+              : demoFollowers.map((f) => f.id)
+          )}
+          blockedIds={blockedIds}
+          onClose={() => {
+            setIsChatOpen(false);
+            setChatRecipientId(null);
+          }}
+          onNavigateToProfile={(userId) => {
+            setIsChatOpen(false);
+            handleSelectProfile(userId);
+          }}
+          onSelectAnime={handleSelectAnimeFromSearch}
+          onToggleFollow={handleFollowToggle}
+          onToggleBlock={handleBlockToggle}
         />
       )}
     </div>

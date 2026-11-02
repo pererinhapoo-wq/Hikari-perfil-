@@ -42,16 +42,106 @@ service cloud.firestore {
           'showActivity',
           'showCommentsOnProfile'
         ])
-        && settings.keys().hasOnly([
-          'showAnimeList',
-          'showFavorites',
-          'showActivity',
-          'showCommentsOnProfile'
-        ])
+        && (
+          settings.keys().hasOnly([
+            'showAnimeList',
+            'showFavorites',
+            'showActivity',
+            'showCommentsOnProfile'
+          ])
+          || settings.keys().hasOnly([
+            'showAnimeList',
+            'showFavorites',
+            'showActivity',
+            'showCommentsOnProfile',
+            'allowDirectMessages',
+            'directMessagesFrom'
+          ])
+        )
         && settings.showAnimeList is bool
         && settings.showFavorites is bool
         && settings.showActivity is bool
-        && settings.showCommentsOnProfile is bool;
+        && settings.showCommentsOnProfile is bool
+        && (!('allowDirectMessages' in settings) || settings.allowDirectMessages is bool)
+        && (!('directMessagesFrom' in settings) || (settings.directMessagesFrom in ['everyone', 'followers', 'mutual']));
+    }
+
+    function isValidConversation(data) {
+      return data.keys().hasAll([
+          'id',
+          'participants',
+          'participantDetails',
+          'unreadCounts',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'participants',
+          'participantDetails',
+          'lastMessage',
+          'unreadCounts',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.participants is list
+        && data.participants.size() == 2
+        && isValidId(data.participants[0])
+        && isValidId(data.participants[1])
+        && data.participants[0] != data.participants[1]
+        && data.participantDetails is map
+        && data.unreadCounts is map
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMessage(data, convId) {
+      return data.keys().hasAll([
+          'id',
+          'conversationId',
+          'senderId',
+          'senderName',
+          'senderAvatarUrl',
+          'recipientId',
+          'text',
+          'type',
+          'isRead',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'conversationId',
+          'senderId',
+          'senderName',
+          'senderUsername',
+          'senderAvatarUrl',
+          'recipientId',
+          'text',
+          'type',
+          'mediaUrl',
+          'mediaMetadata',
+          'linkPreview',
+          'isRead',
+          'createdAt'
+        ])
+        && isValidId(data.id)
+        && data.conversationId == convId
+        && isValidId(data.senderId)
+        && isValidId(data.recipientId)
+        && data.senderId != data.recipientId
+        && data.senderId == request.auth.uid
+        && data.senderName is string
+        && data.senderName.size() >= 1
+        && data.senderName.size() <= 60
+        && data.senderAvatarUrl is string
+        && data.senderAvatarUrl.size() <= 2048
+        && data.text is string
+        && data.text.size() <= 2000
+        && data.type in ['text', 'image', 'gif', 'link']
+        && (!('mediaUrl' in data) || (data.mediaUrl is string && data.mediaUrl.size() <= 6000000))
+        && data.isRead is bool
+        && data.createdAt == request.time;
     }
 
     function isValidUserProfile(data, userId) {
@@ -436,6 +526,65 @@ service cloud.firestore {
           && incoming().updatedAtMs is int
           && incoming().updatedAtMs >= 0
           && incoming().updatedAt == request.time;
+        allow delete: if false;
+      }
+    }
+
+    // 8. Coleção de conversas privadas e mensagens diretas (acesso restrito aos 2 participantes)
+    match /conversations/{convId} {
+      allow get: if isSignedIn()
+        && isValidId(convId)
+        && (request.auth.uid in resource.data.participants);
+
+      allow list: if isSignedIn()
+        && (request.auth.uid in resource.data.participants);
+
+      allow create: if isSignedIn()
+        && isValidId(convId)
+        && isValidConversation(incoming())
+        && (request.auth.uid in incoming().participants)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn()
+        && isValidId(convId)
+        && isValidConversation(incoming())
+        && (request.auth.uid in resource.data.participants)
+        && incoming().participants == existing().participants
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'lastMessage',
+          'unreadCounts',
+          'updatedAt'
+        ]);
+
+      allow delete: if false;
+
+      // Subcoleção de mensagens individuais dentro da conversa
+      match /messages/{msgId} {
+        allow get: if isSignedIn()
+          && isValidId(convId)
+          && isValidId(msgId)
+          && (request.auth.uid in get(/databases/$(database)/documents/conversations/$(convId)).data.participants);
+
+        allow list: if isSignedIn()
+          && isValidId(convId)
+          && (request.auth.uid in get(/databases/$(database)/documents/conversations/$(convId)).data.participants);
+
+        allow create: if isSignedIn()
+          && isValidId(convId)
+          && isValidId(msgId)
+          && (request.auth.uid in get(/databases/$(database)/documents/conversations/$(convId)).data.participants)
+          && isValidMessage(incoming(), convId);
+
+        allow update: if isSignedIn()
+          && isValidId(convId)
+          && isValidId(msgId)
+          && (request.auth.uid in get(/databases/$(database)/documents/conversations/$(convId)).data.participants)
+          && incoming().diff(existing()).affectedKeys().hasOnly(['isRead'])
+          && incoming().isRead is bool;
+
         allow delete: if false;
       }
     }

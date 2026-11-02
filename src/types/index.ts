@@ -1,8 +1,12 @@
+export type DirectMessagesPrivacy = 'everyone' | 'followers' | 'mutual';
+
 export interface PrivacySettings {
   showAnimeList: boolean;
   showFavorites: boolean;
   showActivity: boolean;
   showCommentsOnProfile: boolean;
+  allowDirectMessages?: boolean;
+  directMessagesFrom?: DirectMessagesPrivacy;
 }
 
 export interface UserProfile {
@@ -93,6 +97,9 @@ export interface UserActivity {
   createdAtTimestamp?: number;
   score?: number;
   episode?: number;
+  animeId?: string;
+  animeTitle?: string;
+  posterUrl?: string;
 }
 
 export interface FollowUser {
@@ -141,3 +148,70 @@ export interface NotificationItem {
 }
 
 export type ProfileTab = 'overview' | 'animes' | 'comments' | 'about' | 'activity' | 'favorites';
+
+export type MessageType = 'text' | 'image' | 'gif' | 'link';
+
+export interface HikariLinkPreview {
+  url: string;
+  type: 'anime' | 'profile' | 'comment' | 'external';
+  title: string;
+  description?: string;
+  imageUrl?: string;
+  badge?: string;
+  extraInfo?: {
+    rating?: number;
+    status?: string;
+    episodes?: string;
+    year?: number;
+    genres?: string[];
+  };
+}
+
+export interface PrivateMessage {
+  id: string;
+  conversationId: string;
+  senderId: string;
+  senderName: string;
+  senderUsername?: string;
+  senderAvatarUrl: string;
+  recipientId: string;
+  text: string;
+  type: MessageType;
+  mediaUrl?: string;
+  mediaMetadata?: {
+    width?: number;
+    height?: number;
+    sizeBytes?: number;
+    mimeType?: string;
+  };
+  linkPreview?: HikariLinkPreview;
+  isRead: boolean;
+  createdAt: number;
+  status?: 'sending' | 'sent' | 'failed';
+}
+
+export interface ParticipantSummary {
+  id: string;
+  displayName: string;
+  username: string;
+  avatarUrl: string;
+  isOnline?: boolean;
+}
+
+export interface PrivateConversation {
+  id: string;
+  participants: string[];
+  participantDetails: Record<string, ParticipantSummary>;
+  lastMessage?: {
+    id: string;
+    text: string;
+    senderId: string;
+    senderName: string;
+    type: MessageType;
+    createdAt: number;
+    isRead: boolean;
+  };
+  unreadCounts: Record<string, number>;
+  createdAt: number;
+  updatedAt: number;
+}

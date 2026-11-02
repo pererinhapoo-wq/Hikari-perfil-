@@ -46,6 +46,8 @@ interface HeaderProps {
   authenticatedEmail?: string | null;
   onLogout?: () => void;
   onOpenAuth?: (mode?: 'login' | 'signup') => void;
+  onOpenMessages?: () => void;
+  unreadMessagesCount?: number;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -70,7 +72,9 @@ export const Header: React.FC<HeaderProps> = ({
   isAuthenticated = false,
   authenticatedEmail = null,
   onLogout,
-  onOpenAuth
+  onOpenAuth,
+  onOpenMessages,
+  unreadMessagesCount = 0
 }) => {
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -333,6 +337,29 @@ export const Header: React.FC<HeaderProps> = ({
             >
               <LogIn className="h-3.5 w-3.5" />
               <span>Entrar</span>
+            </button>
+          )}
+
+          {/* Direct Messages Button */}
+          {onOpenMessages && (
+            <button
+              type="button"
+              onClick={() => {
+                setIsUserMenuOpen(false);
+                setIsSearchOpen(false);
+                onToggleNotif(false);
+                onOpenMessages();
+              }}
+              className="relative flex h-9 w-9 items-center justify-center rounded-xl border border-purple-900/40 bg-[#130E24] text-purple-300 transition-all hover:border-purple-600/50 hover:bg-purple-900/20 hover:text-white focus:outline-none cursor-pointer"
+              aria-label="Mensagens Privadas"
+              title="Mensagens Privadas"
+            >
+              <MessageSquare className="h-4 w-4" />
+              {unreadMessagesCount > 0 && (
+                <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-purple-600 text-[10px] font-bold text-white shadow-sm shadow-purple-950">
+                  {unreadMessagesCount}
+                </span>
+              )}
             </button>
           )}
 
@@ -705,6 +732,28 @@ export const Header: React.FC<HeaderProps> = ({
                       </span>
                     )}
                   </button>
+
+                  {/* 4.1 Mensagens privadas */}
+                  {onOpenMessages && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsUserMenuOpen(false);
+                        onOpenMessages();
+                      }}
+                      className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-purple-200 hover:bg-purple-900/30 hover:text-white transition-colors cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <MessageSquare className="h-4 w-4 text-purple-400" />
+                        <span>Mensagens privadas</span>
+                      </div>
+                      {unreadMessagesCount > 0 && (
+                        <span className="rounded-full bg-purple-600 px-1.5 py-0.2 text-[10px] font-bold text-white">
+                          {unreadMessagesCount}
+                        </span>
+                      )}
+                    </button>
+                  )}
 
                   {/* 5. Contas conectadas */}
                   <button

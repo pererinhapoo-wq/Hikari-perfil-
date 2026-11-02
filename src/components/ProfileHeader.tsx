@@ -9,7 +9,8 @@ import {
   Settings, 
   ShieldAlert,
   UserX,
-  Loader2
+  Loader2,
+  MessageSquare
 } from 'lucide-react';
 import { UserProfile } from '../types';
 
@@ -20,8 +21,11 @@ interface ProfileHeaderProps {
   isRequested: boolean;
   isBlocked: boolean;
   isFollowPending?: boolean;
+  canDirectMessage?: boolean;
+  directMessageDisabledReason?: string;
   onFollowToggle: () => void;
   onBlockToggle: () => void;
+  onOpenDirectMessage?: () => void;
   onOpenSettings: (tab?: 'profile' | 'privacy' | 'connected' | 'security') => void;
   onOpenFollowers: (tab: 'followers' | 'following') => void;
   onUpdateAvatar: (url: string) => void;
@@ -37,8 +41,11 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
   isRequested,
   isBlocked,
   isFollowPending = false,
+  canDirectMessage = true,
+  directMessageDisabledReason,
   onFollowToggle,
   onBlockToggle,
+  onOpenDirectMessage,
   onOpenSettings,
   onOpenFollowers,
   onUpdateAvatar,
@@ -292,6 +299,26 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
                       <span>Seguir</span>
                     </>
                   )}
+                </button>
+
+                {/* Direct Message button respecting recipient privacy */}
+                <button
+                  type="button"
+                  onClick={onOpenDirectMessage}
+                  disabled={isBlocked || canDirectMessage === false}
+                  className={`group flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs sm:text-sm font-semibold border transition-all cursor-pointer shadow-md active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100 ${
+                    canDirectMessage === false || isBlocked
+                      ? 'bg-[#150f26] border-purple-950/60 text-purple-400/50'
+                      : 'bg-[#1e153b] border-purple-500/40 text-purple-200 hover:bg-purple-900/80 hover:text-white hover:border-purple-400'
+                  }`}
+                  title={
+                    isBlocked
+                      ? 'Usuário bloqueado'
+                      : directMessageDisabledReason || 'Enviar mensagem privada'
+                  }
+                >
+                  <MessageSquare className="h-4 w-4 text-purple-300 group-hover:scale-110 transition-transform" />
+                  <span>Mensagem</span>
                 </button>
 
                 {/* Block / Unblock toggle */}

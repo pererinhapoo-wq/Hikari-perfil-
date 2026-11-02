@@ -20,7 +20,8 @@ import {
   CheckCircle2,
   AlertTriangle,
   Layers,
-  Search
+  Search,
+  ShieldAlert
 } from 'lucide-react';
 import { UserProfile, AnimeItem } from '../../types';
 import {
@@ -66,6 +67,9 @@ interface SettingsModalProps {
     mergedAnimes: AnimeItem[],
     malAccount: UserProfile['externalAccounts']['mal']
   ) => void;
+  blockedIds?: string[];
+  otherProfiles?: Record<string, UserProfile>;
+  onUnblockUser?: (userId: string) => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -80,7 +84,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onRemoveAvatar,
   onRemoveBanner,
   onSyncAniList,
-  onSyncMAL
+  onSyncMAL,
+  blockedIds = [],
+  otherProfiles = {},
+  onUnblockUser
 }) => {
   const [prevInitialTab, setPrevInitialTab] = useState(initialTab);
   const [activeTab, setActiveTab] = useState<'profile' | 'privacy' | 'connected' | 'security'>(initialTab);
@@ -104,6 +111,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [showFavorites, setShowFavorites] = useState(profile.privacySettings?.showFavorites ?? true);
   const [showActivity, setShowActivity] = useState(profile.privacySettings?.showActivity ?? true);
   const [showCommentsOnProfile, setShowCommentsOnProfile] = useState(profile.privacySettings?.showCommentsOnProfile ?? profile.showCommentsOnProfile);
+  
+  // Direct messages privacy states
+  const [allowDirectMessages, setAllowDirectMessages] = useState(profile.privacySettings?.allowDirectMessages ?? true);
+  const [directMessagesFrom, setDirectMessagesFrom] = useState<'everyone' | 'followers' | 'mutual'>(
+    profile.privacySettings?.directMessagesFrom ?? 'everyone'
+  );
   
   const [saveSuccess, setSaveSuccess] = useState(false);
 
@@ -510,7 +523,9 @@ function formatExternalAccountDate(rawDate?: string | null): string | null {
         showAnimeList,
         showFavorites,
         showActivity,
-        showCommentsOnProfile
+        showCommentsOnProfile,
+        allowDirectMessages,
+        directMessagesFrom,
       },
       externalAccounts: {
         anilist: { 
@@ -1041,6 +1056,188 @@ function formatExternalAccountDate(rawDate?: string | null): string | null {
                       />
                     </button>
                   </div>
+                </div>
+
+                {/* Section: Direct Messages Privacy Control */}
+                <div className="space-y-3 pt-2 border-t border-purple-900/30">
+                  <div className="flex items-center gap-1.5">
+                    <MessageSquare className="h-4 w-4 text-purple-400" />
+                    <h4 className="text-xs font-semibold uppercase tracking-wider text-purple-400">
+                      Mensagens Privadas (Direct Messages)
+                    </h4>
+                  </div>
+
+                  {/* Toggle: Permitir recebimento de mensagens privadas */}
+                  <div className="flex items-start justify-between gap-4 rounded-xl border border-purple-900/30 bg-[#0A0713] p-3.5">
+                    <div className="space-y-0.5">
+                      <span className="text-xs font-bold text-white">Receber Mensagens Privadas</span>
+                      <p className="text-[11px] text-purple-300/70">
+                        Habilitar ou desativar completamente a caixa de entrada de conversas no perfil.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={allowDirectMessages}
+                      aria-label="Receber mensagens privadas"
+                      onClick={() => setAllowDirectMessages(!allowDirectMessages)}
+                      className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                        allowDirectMessages ? 'bg-purple-600' : 'bg-neutral-800'
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                          allowDirectMessages ? 'translate-x-5' : 'translate-x-0'
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  {/* Scope of Who Can Message */}
+                  {allowDirectMessages && (
+                    <div className="rounded-xl border border-purple-900/40 bg-[#0c0819] p-3.5 space-y-3 animate-in fade-in">
+                      <span className="text-xs font-bold text-white block">
+                        Quem pode enviar mensagens para você:
+                      </span>
+
+                      <div className="space-y-2">
+                        {/* Option 1: Everyone */}
+                        <label
+                          className={`flex items-start gap-3 p-2.5 rounded-xl border transition-all cursor-pointer ${
+                            directMessagesFrom === 'everyone'
+                              ? 'bg-purple-950/60 border-purple-500 text-white'
+                              : 'bg-[#0A0713] border-purple-900/30 text-purple-200/80 hover:border-purple-800/60'
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="directMessagesFrom"
+                            value="everyone"
+                            checked={directMessagesFrom === 'everyone'}
+                            onChange={() => setDirectMessagesFrom('everyone')}
+                            className="mt-0.5 text-purple-600 focus:ring-purple-500"
+                          />
+                          <div>
+                            <span className="text-xs font-bold block">Qualquer membro do Hikari</span>
+                            <span className="text-[11px] text-purple-300/60 block">
+                              Qualquer usuário da comunidade pode iniciar uma conversa com você.
+                            </span>
+                          </div>
+                        </label>
+
+                        {/* Option 2: Followers */}
+                        <label
+                          className={`flex items-start gap-3 p-2.5 rounded-xl border transition-all cursor-pointer ${
+                            directMessagesFrom === 'followers'
+                              ? 'bg-purple-950/60 border-purple-500 text-white'
+                              : 'bg-[#0A0713] border-purple-900/30 text-purple-200/80 hover:border-purple-800/60'
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="directMessagesFrom"
+                            value="followers"
+                            checked={directMessagesFrom === 'followers'}
+                            onChange={() => setDirectMessagesFrom('followers')}
+                            className="mt-0.5 text-purple-600 focus:ring-purple-500"
+                          />
+                          <div>
+                            <span className="text-xs font-bold block">Apenas seguidores</span>
+                            <span className="text-[11px] text-purple-300/60 block">
+                              Somente usuários que já seguem o seu perfil podem enviar mensagens.
+                            </span>
+                          </div>
+                        </label>
+
+                        {/* Option 3: Mutual */}
+                        <label
+                          className={`flex items-start gap-3 p-2.5 rounded-xl border transition-all cursor-pointer ${
+                            directMessagesFrom === 'mutual'
+                              ? 'bg-purple-950/60 border-purple-500 text-white'
+                              : 'bg-[#0A0713] border-purple-900/30 text-purple-200/80 hover:border-purple-800/60'
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="directMessagesFrom"
+                            value="mutual"
+                            checked={directMessagesFrom === 'mutual'}
+                            onChange={() => setDirectMessagesFrom('mutual')}
+                            className="mt-0.5 text-purple-600 focus:ring-purple-500"
+                          />
+                          <div>
+                            <span className="text-xs font-bold block">Apenas seguidores mútuos</span>
+                            <span className="text-[11px] text-purple-300/60 block">
+                              Ambos precisam se seguir para poder abrir ou enviar mensagens.
+                            </span>
+                          </div>
+                        </label>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Section: Blocked Users Management */}
+                <div className="space-y-3 pt-2 border-t border-purple-900/30">
+                  <div className="flex items-center gap-1.5">
+                    <ShieldAlert className="h-4 w-4 text-purple-400" />
+                    <h4 className="text-xs font-semibold uppercase tracking-wider text-purple-400">
+                      Usuários Bloqueados ({blockedIds.length})
+                    </h4>
+                  </div>
+
+                  {blockedIds.length > 0 ? (
+                    <div className="space-y-2 rounded-xl border border-purple-900/30 bg-[#0A0713] p-3 max-h-48 overflow-y-auto">
+                      {blockedIds.map((bId) => {
+                        const targetUser = otherProfiles[bId];
+                        const name = targetUser?.displayName || bId;
+                        const userAt = targetUser?.username || bId;
+
+                        return (
+                          <div
+                            key={bId}
+                            className="flex items-center justify-between gap-3 p-2 rounded-lg bg-[#140D24] border border-purple-950/60"
+                          >
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              {targetUser?.avatarUrl ? (
+                                <img
+                                  src={targetUser.avatarUrl}
+                                  alt={name}
+                                  className="h-8 w-8 rounded-lg object-cover border border-purple-900/40 shrink-0"
+                                />
+                              ) : (
+                                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-purple-900 text-xs font-bold text-white shrink-0">
+                                  {name.charAt(0)}
+                                </div>
+                              )}
+                              <div className="min-w-0">
+                                <span className="text-xs font-bold text-white truncate block">
+                                  {name}
+                                </span>
+                                <span className="text-[10px] text-purple-400/70 truncate block">
+                                  @{userAt}
+                                </span>
+                              </div>
+                            </div>
+
+                            {onUnblockUser && (
+                              <button
+                                type="button"
+                                onClick={() => onUnblockUser(bId)}
+                                className="rounded-lg bg-rose-950/60 hover:bg-rose-900 border border-rose-600/40 px-2.5 py-1 text-xs font-semibold text-rose-200 transition-colors cursor-pointer shrink-0"
+                              >
+                                Desbloquear
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-purple-900/20 bg-[#0A0713] p-3.5 text-xs text-purple-300/60 text-center">
+                      Nenhum usuário bloqueado no momento.
+                    </div>
+                  )}
                 </div>
 
                 {/* Persistence Notice */}

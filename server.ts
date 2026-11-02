@@ -3,6 +3,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { malRouter } from './src/server/malRoutes.js';
+import { chatRouter } from './src/server/chatRoutes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -10,12 +11,16 @@ const isProd = process.env.NODE_ENV === 'production';
 const PORT = 3000;
 
 const app = express();
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Montagem das rotas oficiais do MyAnimeList compartilhadas com o backend Vercel
 app.use('/api/mal', malRouter);
 app.use('/mal', malRouter);
+
+// Montagem das rotas de mensagens privadas do Hikari
+app.use('/api/chat', chatRouter);
+app.use('/chat', chatRouter);
 
 // Integração do Frontend com Vite em Desenvolvimento Local ou Produção
 async function startServer() {

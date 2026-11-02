@@ -1,0 +1,76 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Perfil público e controlado do usuário no Hikari",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "username": { "type": "string", "minLength": 3, "maxLength": 32, "pattern": "^[a-zA-Z0-9_]+$" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "avatarUrl": { "type": "string", "maxLength": 2048 },
+        "bannerUrl": { "type": "string", "maxLength": 2048 },
+        "bio": { "type": "string", "maxLength": 500 },
+        "isPrivate": { "type": "boolean" },
+        "showCommentsOnProfile": { "type": "boolean" },
+        "privacySettings": { "type": "object" },
+        "followersCount": { "type": "integer" },
+        "followingCount": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "username", "displayName", "avatarUrl", "bannerUrl", "bio", "isPrivate", "showCommentsOnProfile", "privacySettings", "followersCount", "followingCount", "createdAt", "updatedAt"]
+    },
+    "Conversation": {
+      "title": "Conversation",
+      "description": "Conversa privada entre dois participantes",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "participants": { "type": "array" },
+        "participantDetails": { "type": "object" },
+        "lastMessage": { "type": "object" },
+        "unreadCounts": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "participants", "participantDetails", "unreadCounts", "createdAt", "updatedAt"]
+    },
+    "Message": {
+      "title": "Message",
+      "description": "Mensagem direta de texto, imagem, GIF ou link",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "conversationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "senderUsername": { "type": "string", "maxLength": 32 },
+        "senderAvatarUrl": { "type": "string", "maxLength": 2048 },
+        "recipientId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "text": { "type": "string", "maxLength": 2000 },
+        "type": { "type": "string", "enum": ["text", "image", "gif", "link"] },
+        "mediaUrl": { "type": "string", "maxLength": 6000000 },
+        "mediaMetadata": { "type": "object" },
+        "linkPreview": { "type": "object" },
+        "isRead": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "conversationId", "senderId", "senderName", "senderAvatarUrl", "recipientId", "text", "type", "isRead", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Perfis públicos e metadados dos usuários"
+    },
+    "/conversations/{convId}": {
+      "schema": { "$ref": "#/entities/Conversation" },
+      "description": "Conversas privadas entre 2 participantes"
+    },
+    "/conversations/{convId}/messages/{msgId}": {
+      "schema": { "$ref": "#/entities/Message" },
+      "description": "Mensagens individuais de uma conversa"
+    }
+  }
+}

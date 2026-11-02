@@ -28,7 +28,9 @@ export const CURRENT_USER: UserProfile = {
     showAnimeList: true,
     showFavorites: true,
     showActivity: true,
-    showCommentsOnProfile: true
+    showCommentsOnProfile: true,
+    allowDirectMessages: true,
+    directMessagesFrom: 'everyone'
   },
   externalAccounts: {
     anilist: { connected: false, username: undefined, avatarUrl: undefined },
@@ -54,7 +56,9 @@ export const OTHER_USERS: Record<string, UserProfile> = {
       showAnimeList: true,
       showFavorites: true,
       showActivity: true,
-      showCommentsOnProfile: false
+      showCommentsOnProfile: false,
+      allowDirectMessages: true,
+      directMessagesFrom: 'followers'
     },
     externalAccounts: {
       anilist: { connected: false },
@@ -78,7 +82,61 @@ export const OTHER_USERS: Record<string, UserProfile> = {
       showAnimeList: true,
       showFavorites: true,
       showActivity: true,
-      showCommentsOnProfile: true
+      showCommentsOnProfile: true,
+      allowDirectMessages: true,
+      directMessagesFrom: 'everyone'
+    },
+    externalAccounts: {
+      anilist: { connected: false },
+      mal: { connected: false }
+    }
+  },
+  'usr_maya': {
+    id: 'usr_maya',
+    username: 'maya_sakura',
+    displayName: 'Maya Sakura',
+    avatarUrl: '',
+    bannerUrl: '/src/assets/images/hikari_profile_banner_1793518804213.jpg',
+    bio: 'Fã de slice-of-life, Kyoto Animation e mangás românticos.',
+    createdAt: '19 de setembro de 2023',
+    createdAtTimestamp: 1695124800000,
+    followersCount: 310,
+    followingCount: 140,
+    isPrivate: false,
+    showCommentsOnProfile: true,
+    privacySettings: {
+      showAnimeList: true,
+      showFavorites: true,
+      showActivity: true,
+      showCommentsOnProfile: true,
+      allowDirectMessages: true,
+      directMessagesFrom: 'mutual'
+    },
+    externalAccounts: {
+      anilist: { connected: false },
+      mal: { connected: false }
+    }
+  },
+  'usr_daiki': {
+    id: 'usr_daiki',
+    username: 'daiki_sub',
+    displayName: 'Daiki Tanaka',
+    avatarUrl: '',
+    bannerUrl: '/src/assets/images/hikari_profile_banner_1793518804213.jpg',
+    bio: 'Tradutor voluntário e caçador de referências nos encerramentos.',
+    createdAt: '22 de outubro de 2023',
+    createdAtTimestamp: 1697976000000,
+    followersCount: 154,
+    followingCount: 92,
+    isPrivate: false,
+    showCommentsOnProfile: true,
+    privacySettings: {
+      showAnimeList: true,
+      showFavorites: true,
+      showActivity: true,
+      showCommentsOnProfile: true,
+      allowDirectMessages: false,
+      directMessagesFrom: 'everyone'
     },
     externalAccounts: {
       anilist: { connected: false },
@@ -370,7 +428,11 @@ export const INITIAL_ACTIVITIES: UserActivity[] = [
     title: 'Assistiu ao episódio 10',
     description: 'Solo Leveling (Arise)',
     timestamp: 'Há 2 horas',
-    episode: 10
+    createdAtTimestamp: Date.now() - 2 * 3600 * 1000,
+    episode: 10,
+    animeId: 'anime_solo_leveling',
+    animeTitle: 'Solo Leveling (Arise)',
+    posterUrl: 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx151807-33eBWSZuVOdH.jpg'
   },
   {
     id: 'act_02',
@@ -378,28 +440,125 @@ export const INITIAL_ACTIVITIES: UserActivity[] = [
     title: 'Avaliou com nota 9.8 ★',
     description: 'Frieren: Beyond Journey\'s End',
     timestamp: 'Ontem',
-    score: 9.8
+    createdAtTimestamp: Date.now() - 26 * 3600 * 1000,
+    score: 9.8,
+    animeId: 'anime_frieren',
+    animeTitle: 'Frieren: Beyond Journey\'s End',
+    posterUrl: 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx154587-gviZ5zgQL7ee.jpg'
   },
   {
     id: 'act_03',
     type: 'completed_anime',
     title: 'Concluiu a obra',
     description: 'Cyberpunk: Edgerunners (10/10 eps)',
-    timestamp: 'Há 3 dias'
+    timestamp: 'Há 3 dias',
+    createdAtTimestamp: Date.now() - 72 * 3600 * 1000,
+    episode: 10,
+    animeId: 'anime_cyberpunk',
+    animeTitle: 'Cyberpunk: Edgerunners',
+    posterUrl: 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx120377-p4RwqR4rDlsG.jpg'
   },
   {
     id: 'act_04',
     type: 'commented',
     title: 'Publicou um comentário em discussão oficial',
     description: 'Frieren: Beyond Journey\'s End — Ep 26',
-    timestamp: 'Há 3 dias'
+    timestamp: 'Há 3 dias',
+    createdAtTimestamp: Date.now() - 74 * 3600 * 1000,
+    episode: 26,
+    animeId: 'anime_frieren',
+    animeTitle: 'Frieren: Beyond Journey\'s End',
+    posterUrl: 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx154587-gviZ5zgQL7ee.jpg'
   },
   {
     id: 'act_05',
     type: 'added_favorite',
     title: 'Adicionou aos Favoritos em destaque',
     description: 'Steins;Gate',
-    timestamp: 'Há 1 semana'
+    timestamp: 'Há 1 semana',
+    createdAtTimestamp: Date.now() - 7 * 24 * 3600 * 1000,
+    animeId: 'anime_steins_gate',
+    animeTitle: 'Steins;Gate',
+    posterUrl: 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx9253-7pdcPAuaTW5C.png'
+  },
+  {
+    id: 'act_06',
+    type: 'completed_anime',
+    title: 'Concluiu a obra',
+    description: 'Chainsaw Man (12/12 eps)',
+    timestamp: 'Há 10 dias',
+    createdAtTimestamp: Date.now() - 10 * 24 * 3600 * 1000,
+    episode: 12,
+    animeId: 'anime_chainsaw',
+    animeTitle: 'Chainsaw Man',
+    posterUrl: 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx127230-FloCoGoLob48.jpg'
+  },
+  {
+    id: 'act_07',
+    type: 'watched_ep',
+    title: 'Assistiu até o episódio 23',
+    description: 'Jujutsu Kaisen 2ª Temporada',
+    timestamp: 'Há 2 semanas',
+    createdAtTimestamp: Date.now() - 14 * 24 * 3600 * 1000,
+    episode: 23,
+    animeId: 'anime_jujutsu',
+    animeTitle: 'Jujutsu Kaisen 2ª Temporada',
+    posterUrl: 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx145064-0vg36FimA4rI.jpg'
+  },
+  {
+    id: 'act_08',
+    type: 'status_changed',
+    title: 'Moveu Kaiju No. 8 para Assistindo',
+    description: 'Progresso: 6/12 episódios',
+    timestamp: 'Há 2 semanas',
+    createdAtTimestamp: Date.now() - 16 * 24 * 3600 * 1000,
+    episode: 6,
+    animeId: 'anime_kaiju8',
+    animeTitle: 'Kaiju No. 8',
+    posterUrl: 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx153288-E2jR5k338o7R.jpg'
+  },
+  {
+    id: 'act_09',
+    type: 'added_anime',
+    title: 'Adicionou à lista Planejados',
+    description: 'Bleach: Thousand-Year Blood War',
+    timestamp: 'Há 3 semanas',
+    createdAtTimestamp: Date.now() - 21 * 24 * 3600 * 1000,
+    animeId: 'anime_bleach_tybw',
+    animeTitle: 'Bleach: Thousand-Year Blood War',
+    posterUrl: 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx114446-pG4r1S7z7k6n.jpg'
+  },
+  {
+    id: 'act_10',
+    type: 'rated',
+    title: 'Avaliou com nota 9.7 ★',
+    description: 'Neon Genesis Evangelion',
+    timestamp: 'Há 1 mês',
+    createdAtTimestamp: Date.now() - 30 * 24 * 3600 * 1000,
+    score: 9.7,
+    animeId: 'anime_evangelion',
+    animeTitle: 'Neon Genesis Evangelion',
+    posterUrl: 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx30-3W8YpG64z52X.png'
+  },
+  {
+    id: 'act_11',
+    type: 'status_changed',
+    title: 'Colocou Vinland Saga 2ª Temporada em espera',
+    description: 'Progresso: 14/24 episódios',
+    timestamp: 'Há 1 mês',
+    createdAtTimestamp: Date.now() - 35 * 24 * 3600 * 1000,
+    episode: 14,
+    animeId: 'anime_vinland',
+    animeTitle: 'Vinland Saga 2ª Temporada',
+    posterUrl: 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx136430-mQ9Dmg9nBvhT.jpg'
+  },
+  {
+    id: 'act_12',
+    type: 'commented',
+    title: 'Publicou uma mensagem de boas-vindas no mural da comunidade',
+    description: 'Participando dos tópicos sazonais de lançamentos de animes',
+    timestamp: 'Há 2 meses',
+    createdAtTimestamp: Date.now() - 60 * 24 * 3600 * 1000
   }
 ];
 

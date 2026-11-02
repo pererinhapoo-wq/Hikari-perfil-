@@ -19,6 +19,7 @@ import {
 import { FavoritesTab } from './FavoritesTab';
 import { useCurrentTime, formatRelativeTime, formatExactDateTime } from '../../utils/relativeTime';
 import { computeAnimeStats, type AnimeStatsSummary } from '../../utils/animeStats';
+import { ActivityPosterThumb } from '../common/ActivityPosterThumb';
 
 /**
  * Isolated leaf component that subscribes to useCurrentTime()
@@ -500,7 +501,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
               </button>
             </div>
 
-            <div className="mt-3 space-y-3">
+            <div className="mt-3 space-y-2.5">
               {activities.length === 0 ? (
                 <p className="text-xs text-purple-300/50 py-3 text-center">
                   Nenhuma atividade recente registrada.
@@ -509,25 +510,49 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                 activities.slice(0, 5).map((act) => {
                   const exactDate = formatExactDateTime(act.createdAtTimestamp);
                   return (
-                    <div key={act.id} className="relative flex items-start gap-2.5 text-xs">
-                      <div className="h-2 w-2 rounded-full bg-purple-500 shrink-0 mt-1.5 ring-2 ring-purple-900/60" />
-                      <div className="flex-1 min-w-0">
-                        <p className="font-medium text-white leading-snug break-words">
+                    <div
+                      key={act.id}
+                      onClick={() => onNavigateTab('activity')}
+                      className="group flex items-center gap-3 rounded-xl border border-purple-900/20 bg-[#16102a]/60 p-2 hover:border-purple-600/40 hover:bg-[#1a1333] transition-all cursor-pointer"
+                      title="Ver atividade na Linha do Tempo"
+                    >
+                      <ActivityPosterThumb
+                        activity={act}
+                        userAnimes={animes}
+                        size="sm"
+                      />
+                      <div className="flex-1 min-w-0 text-xs">
+                        <p className="font-semibold text-white group-hover:text-purple-200 transition-colors leading-snug break-words">
                           <span>{act.title}</span>
-                          <span
-                            className="text-purple-400/75 font-normal"
-                            title={exactDate || undefined}
-                          >
-                            {' '}— <RelativeTimeSpan timestamp={act.createdAtTimestamp} fallbackText={act.timestamp} lowercase={true} />
-                          </span>
                         </p>
                         {act.description && (
-                          <p className="text-[11px] text-purple-300/70 truncate mt-0.5">{act.description}</p>
+                          <p className="text-[11px] text-purple-300/75 truncate mt-0.5">
+                            {act.description}
+                          </p>
                         )}
+                        <div
+                          className="mt-1 flex items-center gap-1 text-[10px] text-purple-400/60 font-mono"
+                          title={exactDate || undefined}
+                        >
+                          <RelativeTimeSpan timestamp={act.createdAtTimestamp} fallbackText={act.timestamp} lowercase={false} />
+                        </div>
                       </div>
                     </div>
                   );
                 })
+              )}
+
+              {activities.length > 0 && (
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    onClick={() => onNavigateTab('activity')}
+                    className="w-full flex items-center justify-center gap-1.5 rounded-xl border border-purple-800/40 bg-purple-950/40 hover:bg-purple-900/50 px-3 py-2 text-xs font-semibold text-purple-200 hover:text-white transition-all cursor-pointer shadow-sm"
+                  >
+                    <span>Ver tudo na Linha do Tempo ({activities.length})</span>
+                    <ArrowRight className="h-3.5 w-3.5 text-purple-400" />
+                  </button>
+                </div>
               )}
             </div>
           </div>

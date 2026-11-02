@@ -30,8 +30,7 @@ class MemoryStorage {
 }
 
 const mockLocalStorage = new MemoryStorage();
-// @ts-expect-error polyfill for Node.js test environment
-globalThis.window = { localStorage: mockLocalStorage } as unknown as Window & typeof globalThis;
+(globalThis as unknown as { window: unknown }).window = { localStorage: mockLocalStorage };
 
 console.log('======================================================');
 console.log('TESTES DE SEGUIR E DEIXAR DE SEGUIR — HIKARI PERFIL');
