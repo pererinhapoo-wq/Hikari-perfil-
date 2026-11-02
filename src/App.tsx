@@ -18,6 +18,7 @@ import {
   ProfileTab, 
   AnimeItem, 
   AnimeStatus,
+  FavoriteCharacter,
   HikariComment, 
   UserActivity, 
   FollowUser, 
@@ -40,6 +41,7 @@ import {
 } from './data/mockData';
 import { inferOffsetMsFromLabel } from './utils/relativeTime';
 import { computeAnimeStats, EMPTY_ANIME_STATS } from './utils/animeStats';
+import { getLastFetchedAniListCharacters, mergeFavoriteCharacters } from './services/anilistService';
 import { useAuth } from './contexts/AuthContext';
 import {
   PUBLIC_PROFILES_STORAGE_KEY,
@@ -63,6 +65,7 @@ const DEMO_PROFILE_STORAGE_KEY = 'hikari_profile_user_data_v1';
 interface PersistedDemoProfileData {
   profileOverrides?: UserProfileOverrides;
   animes: AnimeItem[];
+  favoriteCharacters?: FavoriteCharacter[];
   comments: HikariComment[];
   activities: UserActivity[];
   notifications: NotificationItem[];
@@ -187,6 +190,9 @@ function loadInitialDemoProfileData(): PersistedDemoProfileData {
               ? parsed.profileOverrides
               : undefined,
           animes: parsed.animes,
+          favoriteCharacters: Array.isArray(parsed.favoriteCharacters)
+            ? (parsed.favoriteCharacters as FavoriteCharacter[])
+            : undefined,
           comments: parsed.comments,
           activities: parsed.activities,
           notifications: mergedNotifications
@@ -212,6 +218,7 @@ function loadInitialDemoProfileData(): PersistedDemoProfileData {
 
   return {
     animes: INITIAL_ANIMES,
+    favoriteCharacters: FAVORITE_CHARACTERS,
     comments: seededComments,
     activities: seededActivities,
     notifications: INITIAL_NOTIFICATIONS
@@ -249,6 +256,9 @@ export default function App() {
     };
   });
   const [demoAnimes, setDemoAnimes] = useState<AnimeItem[]>(initialDemoData.animes);
+  const [demoFavoriteCharacters, setDemoFavoriteCharacters] = useState<FavoriteCharacter[]>(
+    () => initialDemoData.favoriteCharacters ?? FAVORITE_CHARACTERS
+  );
   const [demoComments, setDemoComments] = useState<HikariComment[]>(initialDemoData.comments);
   const [demoActivities, setDemoActivities] = useState<UserActivity[]>(initialDemoData.activities);
   const [demoFollowers, setDemoFollowers] = useState<FollowUser[]>(INITIAL_FOLLOWERS);
@@ -693,7 +703,9 @@ export default function App() {
     ? isOwnProfile
       ? activeAuthWorkspace?.favoriteCharacters ?? []
       : []
-    : FAVORITE_CHARACTERS;
+    : isOwnProfile
+    ? demoFavoriteCharacters
+    : [];
   const displayedFavoriteCompanies = isAuthenticated
     ? isOwnProfile
       ? activeAuthWorkspace?.favoriteCompanies ?? []
@@ -1413,6 +1425,8 @@ export default function App() {
         createdAtTimestamp: actionNow,
       };
 
+      const fetchedCharacters = getLastFetchedAniListCharacters();
+
       if (isAuthenticated) {
         updateAuthWorkspace((prev) => {
           const prevAccounts = prev.profileOverrides.externalAccounts ?? {
@@ -1427,9 +1441,15 @@ export default function App() {
             ...prev.profileOverrides,
             externalAccounts: nextExternalAccounts,
           };
+          const nextFavoriteCharacters =
+            fetchedCharacters.length > 0
+              ? mergeFavoriteCharacters(prev.favoriteCharacters, fetchedCharacters)
+              : prev.favoriteCharacters;
+
           return {
             ...prev,
             animes: mergedAnimes,
+            favoriteCharacters: nextFavoriteCharacters,
             profileOverrides: nextProfileOverrides,
             activities: [syncActivity, ...prev.activities],
           };
@@ -1449,9 +1469,17 @@ export default function App() {
           anilist: anilistPatch,
         },
       };
+
+      const nextDemoCharacters =
+        fetchedCharacters.length > 0
+          ? mergeFavoriteCharacters(demoFavoriteCharacters, fetchedCharacters)
+          : demoFavoriteCharacters;
+
       setDemoProfile(nextDemoProfile);
       setDemoAnimes(mergedAnimes);
+      setDemoFavoriteCharacters(nextDemoCharacters);
       setDemoActivities((prev) => [syncActivity, ...prev]);
+
       if (isDemoPreview) {
         try {
           window.localStorage.setItem(
@@ -1461,6 +1489,7 @@ export default function App() {
                 ...nextDemoProfile,
               },
               animes: mergedAnimes,
+              favoriteCharacters: nextDemoCharacters,
               comments: demoComments,
               activities: [syncActivity, ...demoActivities],
               notifications: demoNotifications,
@@ -1471,10 +1500,22 @@ export default function App() {
         }
       }
     },
-    [isAuthenticated, demoProfile, demoActivities, isDemoPreview, demoComments, demoNotifications]
+    [
+      isAuthenticated,
+      demoProfile,
+      demoFavoriteCharacters,
+      demoActivities,
+      isDemoPreview,
+      demoComments,
+      demoNotifications,
+      updateAuthWorkspace,
+    ]
   );
 
   // Handler: Sync imported anime list from MyAnimeList
+  // Observação: Conforme verificação da API oficial v2 do MyAnimeList, a plataforma externa
+  // não expõe favoritos de animes ou personagens. Todos os favoritos manuais existentes
+  // no perfil são rigorosamente preservados sem qualquer alteração.
   const handleSyncMAL = useCallback(
     (
       mergedAnimes: AnimeItem[],
@@ -1507,6 +1548,8 @@ export default function App() {
           return {
             ...prev,
             animes: mergedAnimes,
+            // Preserva 100% dos personagens favoritos já cadastrados no perfil do usuário
+            favoriteCharacters: prev.favoriteCharacters,
             profileOverrides: nextProfileOverrides,
             activities: [syncActivity, ...prev.activities],
           };
@@ -1538,6 +1581,7 @@ export default function App() {
                 ...nextDemoProfile,
               },
               animes: mergedAnimes,
+              favoriteCharacters: demoFavoriteCharacters,
               comments: demoComments,
               activities: [syncActivity, ...demoActivities],
               notifications: demoNotifications,
@@ -1548,7 +1592,16 @@ export default function App() {
         }
       }
     },
-    [isAuthenticated, demoProfile, demoActivities, isDemoPreview, demoComments, demoNotifications]
+    [
+      isAuthenticated,
+      demoProfile,
+      demoFavoriteCharacters,
+      demoActivities,
+      isDemoPreview,
+      demoComments,
+      demoNotifications,
+      updateAuthWorkspace,
+    ]
   );
 
   // Real Logout handler: wipes personal memory immediately, terminates Firebase Auth session and returns to login screen

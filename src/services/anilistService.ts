@@ -1,4 +1,4 @@
-import { AnimeItem } from '../types';
+import { AnimeItem, FavoriteCharacter } from '../types';
 
 export interface AniListUser {
   id: number;
@@ -23,6 +23,13 @@ export interface AniListAnimeEntry {
   genres: string[];
   episodeDurationMinutes?: number;
   rewatchCount?: number;
+  isFavorite?: boolean;
+}
+
+export interface AniListFavoritesResult {
+  animeAnilistIds: number[];
+  animeMalIds: number[];
+  characters: FavoriteCharacter[];
 }
 
 export interface AniListDiffChange {
@@ -158,6 +165,38 @@ export const STATUS_LABELS_PT: Record<AnimeItem['status'], string> = {
 };
 
 /**
+ * Determina se a capa é genérica (comprovadamente do domínio images.unsplash.com) ou está ausente/vazia.
+ */
+export function isGenericOrMissingPoster(posterUrl?: string | null): boolean {
+  if (!posterUrl || typeof posterUrl !== 'string' || !posterUrl.trim()) {
+    return true;
+  }
+  const trimmed = posterUrl.trim().toLowerCase();
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.hostname === 'images.unsplash.com' || parsed.hostname.endsWith('.unsplash.com');
+  } catch {
+    return trimmed.includes('images.unsplash.com') || trimmed.includes('unsplash.com');
+  }
+}
+
+/**
+ * Valida se a capa recebida da plataforma externa é uma URL válida (HTTP/HTTPS) e não-vazia.
+ */
+export function isValidPosterUrl(url?: string | null): boolean {
+  if (!url || typeof url !== 'string') return false;
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+
+/**
  * Consulta a existência e informações de perfil de um usuário AniList.
  */
 export async function fetchAniListUser(username: string): Promise<AniListUser> {
@@ -242,8 +281,180 @@ export function normalizeAniListScore(score?: number | null): number {
   if (val > 10 && val <= 100) {
     val = val / 10;
   }
-  const rounded = Math.round(val * 10) / 10;
-  return Math.min(10, Math.max(0, rounded));
+  const normalized = Math.round((val + Number.EPSILON) * 100) / 100;
+  return Math.min(10, Math.max(0, normalized));
+}
+
+const FAVORITES_QUERY = `
+  query ($name: String) {
+    User(name: $name) {
+      id
+      favourites {
+        anime(page: 1, perPage: 50) {
+          nodes {
+            id
+            idMal
+            title {
+              userPreferred
+              romaji
+              english
+            }
+          }
+        }
+        characters(page: 1, perPage: 25) {
+          nodes {
+            id
+            name {
+              userPreferred
+              full
+              native
+            }
+            image {
+              large
+              medium
+            }
+            media(type: ANIME, sort: FAVOURITES_DESC, page: 1, perPage: 1) {
+              edges {
+                characterRole
+                node {
+                  id
+                  title {
+                    userPreferred
+                    romaji
+                    english
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+let lastFetchedAniListCharacters: FavoriteCharacter[] = [];
+
+export function getLastFetchedAniListCharacters(): FavoriteCharacter[] {
+  return [...lastFetchedAniListCharacters];
+}
+
+export function setLastFetchedAniListCharacters(chars: FavoriteCharacter[]): void {
+  lastFetchedAniListCharacters = [...chars];
+}
+
+export function mapAniListCharacter(raw: any): FavoriteCharacter {
+  const animeEdge = raw.media?.edges?.[0];
+  const animeTitle =
+    animeEdge?.node?.title?.userPreferred ||
+    animeEdge?.node?.title?.romaji ||
+    animeEdge?.node?.title?.english ||
+    'Anime';
+
+  let roleLabel = 'Protagonista';
+  if (animeEdge?.characterRole === 'SUPPORTING' || animeEdge?.characterRole === 'BACKGROUND') {
+    roleLabel = 'Personagem Secundário';
+  } else if (animeEdge?.characterRole === 'MAIN') {
+    roleLabel = 'Protagonista';
+  }
+
+  const name =
+    raw.name?.userPreferred ||
+    raw.name?.full ||
+    'Personagem';
+
+  return {
+    id: `char_al_${raw.id}`,
+    name,
+    originalName: raw.name?.native || undefined,
+    animeName: animeTitle,
+    role: roleLabel,
+    imageUrl: raw.image?.large || raw.image?.medium || '',
+  };
+}
+
+/**
+ * Mescla personagens favoritos locais com os favoritos importados do AniList,
+ * preservando a ordem original dos favoritos manuais e evitando duplicatas.
+ */
+export function mergeFavoriteCharacters(
+  existingCharacters: FavoriteCharacter[],
+  incomingCharacters: FavoriteCharacter[]
+): FavoriteCharacter[] {
+  const result: FavoriteCharacter[] = [...existingCharacters];
+  const seenIds = new Set(existingCharacters.map((c) => c.id));
+  const seenNames = new Set(
+    existingCharacters.map((c) => normalizeTitle(c.name)).filter(Boolean)
+  );
+
+  for (const inc of incomingCharacters) {
+    const normName = normalizeTitle(inc.name);
+    if (seenIds.has(inc.id) || (normName && seenNames.has(normName))) {
+      continue;
+    }
+    result.push(inc);
+    seenIds.add(inc.id);
+    if (normName) seenNames.add(normName);
+  }
+
+  return result;
+}
+
+/**
+ * Consulta os favoritos reais de animes e personagens da conta AniList.
+ */
+export async function fetchAniListFavorites(username: string): Promise<AniListFavoritesResult> {
+  const cleanUsername = username.trim();
+  if (!cleanUsername) {
+    return { animeAnilistIds: [], animeMalIds: [], characters: [] };
+  }
+
+  try {
+    const res = await fetch(ANILIST_GRAPHQL_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        query: FAVORITES_QUERY,
+        variables: { name: cleanUsername },
+      }),
+    });
+
+    if (!res.ok) {
+      return { animeAnilistIds: [], animeMalIds: [], characters: [] };
+    }
+
+    const json = await res.json();
+    const favData = json?.data?.User?.favourites;
+
+    const animeNodes = Array.isArray(favData?.anime?.nodes) ? favData.anime.nodes : [];
+    const animeAnilistIds: number[] = [];
+    const animeMalIds: number[] = [];
+
+    for (const node of animeNodes) {
+      if (typeof node?.id === 'number') {
+        animeAnilistIds.push(node.id);
+      }
+      if (typeof node?.idMal === 'number') {
+        animeMalIds.push(node.idMal);
+      }
+    }
+
+    const charNodes = Array.isArray(favData?.characters?.nodes) ? favData.characters.nodes : [];
+    const characters: FavoriteCharacter[] = charNodes.map((raw: any) => mapAniListCharacter(raw));
+
+    lastFetchedAniListCharacters = characters;
+
+    return {
+      animeAnilistIds,
+      animeMalIds,
+      characters,
+    };
+  } catch {
+    return { animeAnilistIds: [], animeMalIds: [], characters: [] };
+  }
 }
 
 /**
@@ -300,6 +511,17 @@ export async function fetchAniListAnimeList(username: string): Promise<AniListAn
   let currentChunk = 1;
   let hasMore = true;
   const maxChunks = 10; // Até 5.000 entradas (segurança contra loops)
+
+  // Consulta favoritos da conta para atribuir isFavorite e obter personagens favoritos
+  const favAnilistIds = new Set<number>();
+  const favMalIds = new Set<number>();
+  try {
+    const favResult = await fetchAniListFavorites(cleanUsername);
+    for (const id of favResult.animeAnilistIds) favAnilistIds.add(id);
+    for (const id of favResult.animeMalIds) favMalIds.add(id);
+  } catch {
+    // Falha silenciosa em favoritos não impede carregamento da lista
+  }
 
   while (hasMore && currentChunk <= maxChunks) {
     let res: Response;
@@ -411,6 +633,8 @@ export async function fetchAniListAnimeList(username: string): Promise<AniListAn
         ? 1
         : undefined;
 
+    const isFav = favAnilistIds.has(media.id) || (media.idMal ? favMalIds.has(media.idMal) : false);
+
     result.push({
       anilistId: media.id,
       malId: media.idMal || undefined,
@@ -425,6 +649,7 @@ export async function fetchAniListAnimeList(username: string): Promise<AniListAn
       genres,
       episodeDurationMinutes: duration,
       rewatchCount,
+      isFavorite: isFav,
     });
   }
 
@@ -437,17 +662,17 @@ export async function fetchAniListAnimeList(username: string): Promise<AniListAn
 export interface ExistingAnimeIndex {
   byAnilistId: Map<number, AnimeItem>;
   byMalId: Map<number, AnimeItem>;
-  byNormalizedTitle: Map<string, { item: AnimeItem; index: number }>;
+  byNormalizedTitle: Map<string, { item: AnimeItem; index: number }[]>;
 }
 
 /**
  * Constrói índices em Map em O(M) para evitar buscas lineares repetidas O(N x M).
- * Preserva o primeiro elemento encontrado na lista original para manter consistência com Array.find.
+ * Preserva as entradas na ordem da lista original para manter determinismo.
  */
 export function createExistingAnimeIndex(list: AnimeItem[]): ExistingAnimeIndex {
   const byAnilistId = new Map<number, AnimeItem>();
   const byMalId = new Map<number, AnimeItem>();
-  const byNormalizedTitle = new Map<string, { item: AnimeItem; index: number }>();
+  const byNormalizedTitle = new Map<string, { item: AnimeItem; index: number }[]>();
 
   for (let i = 0; i < list.length; i++) {
     const item = list[i];
@@ -458,13 +683,17 @@ export function createExistingAnimeIndex(list: AnimeItem[]): ExistingAnimeIndex 
       byMalId.set(item.malId, item);
     }
     const normTitle = normalizeTitle(item.title);
-    if (normTitle && !byNormalizedTitle.has(normTitle)) {
-      byNormalizedTitle.set(normTitle, { item, index: i });
+    if (normTitle) {
+      const arr = byNormalizedTitle.get(normTitle) || [];
+      arr.push({ item, index: i });
+      byNormalizedTitle.set(normTitle, arr);
     }
     if (item.titleRomaji) {
       const normRomaji = normalizeTitle(item.titleRomaji);
-      if (normRomaji && !byNormalizedTitle.has(normRomaji)) {
-        byNormalizedTitle.set(normRomaji, { item, index: i });
+      if (normRomaji && normRomaji !== normTitle) {
+        const arr = byNormalizedTitle.get(normRomaji) || [];
+        arr.push({ item, index: i });
+        byNormalizedTitle.set(normRomaji, arr);
       }
     }
   }
@@ -474,7 +703,8 @@ export function createExistingAnimeIndex(list: AnimeItem[]): ExistingAnimeIndex 
 
 /**
  * Localiza no índice em Map a correspondência exata para uma entrada externa em O(1),
- * respeitando a ordem de prioridade definida e evitando ambiguidades de títulos.
+ * respeitando a ordem de prioridade definida e evitando associar temporadas/remakes
+ * que compartilhem o mesmo título mas possuam IDs externos conflitantes.
  */
 export function findMatchingAnimeInIndex(
   incoming: { anilistId?: number; malId?: number; title: string; titleRomaji?: string },
@@ -506,20 +736,37 @@ export function findMatchingAnimeInIndex(
 
   if (!incTitleNorm && !incRomajiNorm) return undefined;
 
-  const matchTitle = incTitleNorm ? index.byNormalizedTitle.get(incTitleNorm) : undefined;
-  const matchRomaji = incRomajiNorm ? index.byNormalizedTitle.get(incRomajiNorm) : undefined;
-
-  if (matchTitle && matchRomaji) {
-    return matchTitle.index <= matchRomaji.index ? matchTitle.item : matchRomaji.item;
+  const candidates: { item: AnimeItem; index: number }[] = [];
+  if (incTitleNorm && index.byNormalizedTitle.has(incTitleNorm)) {
+    candidates.push(...(index.byNormalizedTitle.get(incTitleNorm) || []));
   }
-  return (matchTitle || matchRomaji)?.item;
+  if (incRomajiNorm && index.byNormalizedTitle.has(incRomajiNorm)) {
+    candidates.push(...(index.byNormalizedTitle.get(incRomajiNorm) || []));
+  }
+
+  // Ordena por índice de inserção original para manter determinismo
+  candidates.sort((a, b) => a.index - b.index);
+
+  for (const { item } of candidates) {
+    // Rejeita correspondência por título se ambos tiverem IDs externos conflitantes
+    // (ex: temporadas, filmes ou remakes diferentes que compartilham o mesmo título base)
+    if (incoming.anilistId && item.anilistId && incoming.anilistId !== item.anilistId) {
+      continue;
+    }
+    if (incoming.malId && item.malId && incoming.malId !== item.malId) {
+      continue;
+    }
+    return item;
+  }
+
+  return undefined;
 }
 
 /**
  * Localiza no array atual de animes do Hikari a correspondência exata para uma entrada vinda do AniList.
  * 1. Primeiro por identificador anilistId.
  * 2. Segundo por identificador malId (quando disponível).
- * 3. Terceiro por título normalizado sem ambiguidades.
+ * 3. Terceiro por título normalizado, sem associar temporadas ou obras com IDs conflitantes.
  */
 export function findMatchingExistingAnime(
   incoming: AniListAnimeEntry,
@@ -549,6 +796,14 @@ export function findMatchingExistingAnime(
   if (!incTitleNorm && !incRomajiNorm) return undefined;
 
   return existingList.find((ex) => {
+    // Rejeita correspondência se ambos tiverem IDs externos e forem conflitantes
+    if (incoming.anilistId && ex.anilistId && incoming.anilistId !== ex.anilistId) {
+      return false;
+    }
+    if (incoming.malId && ex.malId && incoming.malId !== ex.malId) {
+      return false;
+    }
+
     const exTitleNorm = normalizeTitle(ex.title);
     const exRomajiNorm = ex.titleRomaji ? normalizeTitle(ex.titleRomaji) : '';
 
@@ -617,6 +872,24 @@ export function calculateAniListImportPreview(
         });
       }
 
+      if (!matched.isFavorite && incoming.isFavorite) {
+        changes.push({
+          field: 'isFavorite',
+          label: 'Favorito',
+          oldVal: 'Não destacado',
+          newVal: 'Destacado no AniList',
+        });
+      }
+
+      if (isGenericOrMissingPoster(matched.posterUrl) && isValidPosterUrl(incoming.posterUrl)) {
+        changes.push({
+          field: 'posterUrl',
+          label: 'Capa',
+          oldVal: 'Capa genérica',
+          newVal: 'Capa oficial sincronizada',
+        });
+      }
+
       const matchRecord: AniListMatchedItem = {
         incoming,
         existing: matched,
@@ -651,7 +924,8 @@ export function calculateAniListImportPreview(
 /**
  * Mescla as entradas do AniList com a lista existente de forma segura:
  * - Não cria duplicatas.
- * - Preserva campos locais (isFavorite, posters personalizados existentes, IDs locais, animes manuais).
+ * - Preserva campos locais (isFavorite manual mantido, posters personalizados, IDs locais, animes manuais).
+ * - Sincroniza animes favoritados na conta AniList sem nunca desmarcar favoritos locais.
  * - Atualiza status e progresso de correspondências apenas se solicitado (updateExistingProgress).
  * - Utiliza índice Map para desempenho O(N + M).
  */
@@ -689,6 +963,23 @@ export function mergeAniListImport(
         anilistId: incoming.anilistId,
         malId: incoming.malId || currentEntry.malId,
       };
+
+      // Preserva favoritos manuais locais se já marcados no Hikari Perfil OU sincroniza favorito do AniList
+      const wasFavorite = Boolean(currentEntry.isFavorite);
+      const incomingFavorite = Boolean(incoming.isFavorite);
+      if (!wasFavorite && incomingFavorite) {
+        updatedItem.isFavorite = true;
+        changed = true;
+      } else {
+        updatedItem.isFavorite = wasFavorite;
+      }
+
+      // Substituição de capas genéricas do Unsplash ou ausentes por capa oficial válida recebida
+      // Preserva capas oficiais existentes e imagens personalizadas pelo usuário
+      if (isGenericOrMissingPoster(currentEntry.posterUrl) && isValidPosterUrl(incoming.posterUrl)) {
+        updatedItem.posterUrl = incoming.posterUrl;
+        changed = true;
+      }
 
       if (updateExistingProgress) {
         if (currentEntry.status !== incoming.status) {
@@ -746,7 +1037,7 @@ export function mergeAniListImport(
         currentEpisode: incoming.currentEpisode,
         totalEpisodes: incoming.totalEpisodes,
         rating: normalizeAniListScore(incoming.rating),
-        isFavorite: false, // Preserva favoritos manuais; novos iniciam false
+        isFavorite: Boolean(incoming.isFavorite),
         year: incoming.year,
         genres: incoming.genres,
         episodeDurationMinutes: incoming.episodeDurationMinutes,
@@ -766,13 +1057,17 @@ export function mergeAniListImport(
         existingIndex.byMalId.set(newItem.malId, newItem);
       }
       const normTitle = normalizeTitle(newItem.title);
-      if (normTitle && !existingIndex.byNormalizedTitle.has(normTitle)) {
-        existingIndex.byNormalizedTitle.set(normTitle, { item: newItem, index: nextIndex++ });
+      if (normTitle) {
+        const arr = existingIndex.byNormalizedTitle.get(normTitle) || [];
+        arr.push({ item: newItem, index: nextIndex++ });
+        existingIndex.byNormalizedTitle.set(normTitle, arr);
       }
       if (newItem.titleRomaji) {
         const normRomaji = normalizeTitle(newItem.titleRomaji);
-        if (normRomaji && !existingIndex.byNormalizedTitle.has(normRomaji)) {
-          existingIndex.byNormalizedTitle.set(normRomaji, { item: newItem, index: nextIndex++ });
+        if (normRomaji && normRomaji !== normTitle) {
+          const arr = existingIndex.byNormalizedTitle.get(normRomaji) || [];
+          arr.push({ item: newItem, index: nextIndex++ });
+          existingIndex.byNormalizedTitle.set(normRomaji, arr);
         }
       }
     }

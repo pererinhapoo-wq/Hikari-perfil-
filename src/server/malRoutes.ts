@@ -713,17 +713,26 @@ malRouter.get('/animelist', requireFirebaseAuth, async (req: AuthenticatedExpres
 
     const allEntries: MALEntryRaw[] = [];
     let nextUrl: string | null =
-      'https://api.myanimelist.net/v2/users/@me/animelist?fields=list_status{status,score,num_episodes_watched,is_rewatching,num_times_rewatched},num_episodes,alternative_titles,genres,start_date,media_type,average_episode_duration&limit=100&offset=0';
+      'https://api.myanimelist.net/v2/users/@me/animelist?fields=list_status{status,score,num_episodes_watched,is_rewatching,num_times_rewatched},num_episodes,alternative_titles,genres,start_date,media_type,average_episode_duration&limit=1000&offset=0';
 
     let pageCount = 0;
-    const maxPages = 20;
+    const maxPages = 20; // Com limit=1000, suporta até 20.000 entradas em poucas requisições
 
     while (nextUrl && pageCount < maxPages) {
-      let listRes = await fetch(nextUrl, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      });
+      let listRes: Response;
+      try {
+        listRes = await fetch(nextUrl, {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+          signal: AbortSignal.timeout(12000),
+        });
+      } catch (fetchErr) {
+        return res.status(504).json({
+          error: 'MAL_TIMEOUT',
+          message: `Tempo limite de conexão esgotado ao consultar o MyAnimeList: ${fetchErr instanceof Error ? fetchErr.message : 'timeout'}`,
+        });
+      }
 
       if (listRes.status === 401) {
         try {
@@ -738,6 +747,7 @@ malRouter.get('/animelist', requireFirebaseAuth, async (req: AuthenticatedExpres
             headers: {
               Authorization: `Bearer ${accessToken}`,
             },
+            signal: AbortSignal.timeout(12000),
           });
         } catch {
           return res.status(401).json({
@@ -761,11 +771,20 @@ malRouter.get('/animelist', requireFirebaseAuth, async (req: AuthenticatedExpres
         });
       }
 
-      const listJson: MALListResponse = await listRes.json();
       if (!listRes.ok) {
         return res.status(listRes.status).json({
           error: 'MAL_API_ERROR',
           message: 'Erro ao consultar animes no MyAnimeList.',
+        });
+      }
+
+      let listJson: MALListResponse;
+      try {
+        listJson = await listRes.json();
+      } catch {
+        return res.status(502).json({
+          error: 'MAL_API_ERROR',
+          message: 'Resposta em formato inválido retornada pelo MyAnimeList.',
         });
       }
 
@@ -775,6 +794,15 @@ malRouter.get('/animelist', requireFirebaseAuth, async (req: AuthenticatedExpres
 
       nextUrl = listJson.paging?.next || null;
       pageCount++;
+    }
+
+    // Se o limite de páginas for atingido e ainda existirem mais entradas pendentes,
+    // não retorna sucesso incompleto mascarando falha de paginação.
+    if (nextUrl) {
+      return res.status(500).json({
+        error: 'MAL_LIST_TOO_LARGE',
+        message: 'A lista de animes no MyAnimeList excede o limite máximo suportado para importação em uma única operação.',
+      });
     }
 
     const mappedEntries = allEntries.map((item) => {

@@ -4,7 +4,11 @@ import {
   ExistingAnimeIndex,
   createExistingAnimeIndex,
   findMatchingAnimeInIndex,
+  isGenericOrMissingPoster,
+  isValidPosterUrl,
 } from './anilistService';
+
+export { isGenericOrMissingPoster, isValidPosterUrl };
 
 export interface MALAnimeEntry {
   malId: number;
@@ -68,8 +72,8 @@ export function normalizeMALScore(score?: number | null): number {
   if (val > 10 && val <= 100) {
     val = val / 10;
   }
-  const rounded = Math.round(val * 10) / 10;
-  return Math.min(10, Math.max(0, rounded));
+  const normalized = Math.round((val + Number.EPSILON) * 100) / 100;
+  return Math.min(10, Math.max(0, normalized));
 }
 
 /**
@@ -253,6 +257,14 @@ export function findMatchingExistingAnimeForMAL(
   if (!incTitleNorm && !incRomajiNorm) return undefined;
 
   return existingList.find((ex) => {
+    // Rejeita correspondência se ambos tiverem IDs externos e forem conflitantes
+    if (incoming.malId && ex.malId && incoming.malId !== ex.malId) {
+      return false;
+    }
+    if (incoming.anilistId && ex.anilistId && incoming.anilistId !== ex.anilistId) {
+      return false;
+    }
+
     const exTitleNorm = normalizeTitle(ex.title);
     const exRomajiNorm = ex.titleRomaji ? normalizeTitle(ex.titleRomaji) : '';
 
@@ -309,12 +321,24 @@ export function calculateMALImportPreview(
         });
       }
 
-      if (incoming.rating > 0 && matched.rating !== incoming.rating) {
+      const incomingRating = normalizeMALScore(incoming.rating);
+      const existingRating = normalizeMALScore(matched.rating);
+
+      if (existingRating !== incomingRating) {
         changes.push({
           field: 'rating',
           label: 'Nota',
-          oldVal: matched.rating > 0 ? `${matched.rating}/10` : 'Sem nota',
-          newVal: `${incoming.rating}/10`,
+          oldVal: existingRating > 0 ? `${existingRating}/10` : 'Sem nota',
+          newVal: incomingRating > 0 ? `${incomingRating}/10` : 'Sem nota',
+        });
+      }
+
+      if (isGenericOrMissingPoster(matched.posterUrl) && isValidPosterUrl(incoming.posterUrl)) {
+        changes.push({
+          field: 'posterUrl',
+          label: 'Capa',
+          oldVal: 'Capa genérica',
+          newVal: 'Capa oficial sincronizada',
         });
       }
 
@@ -387,7 +411,18 @@ export function mergeMALImport(
         ...currentEntry,
         malId: incoming.malId,
         anilistId: currentEntry.anilistId || incoming.anilistId,
+        // Limitação técnica da API v2 oficial do MyAnimeList:
+        // A API REST v2 do MAL (/v2/users/@me/animelist) não disponibiliza favoritos do usuário (animes ou personagens).
+        // Preserva estritamente os favoritos manuais já marcados no Hikari Perfil sem alteração ou remoção.
+        isFavorite: currentEntry.isFavorite,
       };
+
+      // Substituição de capas genéricas do Unsplash ou ausentes por capa oficial válida recebida
+      // Preserva capas oficiais existentes e imagens personalizadas pelo usuário
+      if (isGenericOrMissingPoster(currentEntry.posterUrl) && isValidPosterUrl(incoming.posterUrl)) {
+        updatedItem.posterUrl = incoming.posterUrl;
+        changed = true;
+      }
 
       if (updateExistingProgress) {
         if (currentEntry.status !== incoming.status) {
@@ -402,8 +437,10 @@ export function mergeMALImport(
           updatedItem.totalEpisodes = incoming.totalEpisodes;
           changed = true;
         }
-        if (incoming.rating > 0 && currentEntry.rating !== incoming.rating) {
-          updatedItem.rating = incoming.rating;
+        const incomingRating = normalizeMALScore(incoming.rating);
+        const existingRating = normalizeMALScore(currentEntry.rating);
+        if (existingRating !== incomingRating) {
+          updatedItem.rating = incomingRating;
           changed = true;
         }
         if (incoming.rewatchCount && currentEntry.rewatchCount !== incoming.rewatchCount) {
@@ -433,6 +470,9 @@ export function mergeMALImport(
         .toString(36)
         .substring(2, 6)}`;
 
+      // Importante: Nunca considerar nota 10 como favorito. A API oficial do MAL não
+      // expõe favoritos do usuário; portanto novos animes importados sempre iniciam
+      // com isFavorite = false, aguardando destaque manual no Hikari.
       const newItem: AnimeItem = {
         id: generatedId,
         title: incoming.title,
@@ -441,7 +481,7 @@ export function mergeMALImport(
         status: incoming.status,
         currentEpisode: incoming.currentEpisode,
         totalEpisodes: incoming.totalEpisodes,
-        rating: incoming.rating,
+        rating: normalizeMALScore(incoming.rating),
         isFavorite: false,
         year: incoming.year,
         genres: incoming.genres,
@@ -462,13 +502,17 @@ export function mergeMALImport(
         existingIndex.byAnilistId.set(newItem.anilistId, newItem);
       }
       const normTitle = normalizeTitle(newItem.title);
-      if (normTitle && !existingIndex.byNormalizedTitle.has(normTitle)) {
-        existingIndex.byNormalizedTitle.set(normTitle, { item: newItem, index: nextIndex++ });
+      if (normTitle) {
+        const arr = existingIndex.byNormalizedTitle.get(normTitle) || [];
+        arr.push({ item: newItem, index: nextIndex++ });
+        existingIndex.byNormalizedTitle.set(normTitle, arr);
       }
       if (newItem.titleRomaji) {
         const normRomaji = normalizeTitle(newItem.titleRomaji);
-        if (normRomaji && !existingIndex.byNormalizedTitle.has(normRomaji)) {
-          existingIndex.byNormalizedTitle.set(normRomaji, { item: newItem, index: nextIndex++ });
+        if (normRomaji && normRomaji !== normTitle) {
+          const arr = existingIndex.byNormalizedTitle.get(normRomaji) || [];
+          arr.push({ item: newItem, index: nextIndex++ });
+          existingIndex.byNormalizedTitle.set(normRomaji, arr);
         }
       }
     }
