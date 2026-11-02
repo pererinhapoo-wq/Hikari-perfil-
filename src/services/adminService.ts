@@ -115,15 +115,14 @@ export interface AdminSecurityData {
 }
 
 async function getAdminHeaders(idToken?: string | null): Promise<HeadersInit> {
-  const headers: HeadersInit = {
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
 
-  if (idToken) {
-    headers['Authorization'] = `Bearer ${idToken.trim()}`;
-  } else {
-    // Fallback para teste/sessão direta do proprietário autorizado
-    headers['Authorization'] = `Bearer test_token_${AUTHORIZED_ADMIN_UID}`;
+  if (idToken && typeof idToken === 'string' && idToken.trim().length > 0) {
+    const clean = idToken.trim();
+    headers['Authorization'] = clean.startsWith('Bearer ') ? clean : `Bearer ${clean}`;
+    headers['x-admin-token'] = clean.replace(/^Bearer\s+/i, '');
   }
 
   return headers;

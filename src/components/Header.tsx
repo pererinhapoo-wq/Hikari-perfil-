@@ -86,6 +86,8 @@ export const Header: React.FC<HeaderProps> = ({
   const [isSearchOpen, setIsSearchOpen] = useState(false);
 
   const userMenuRef = useRef<HTMLDivElement>(null);
+  const userMenuDropdownRef = useRef<HTMLDivElement>(null);
+  const [userMenuCoords, setUserMenuCoords] = useState<{ top: number; right: number }>({ top: 64, right: 16 });
   const notifRef = useRef<HTMLDivElement>(null);
   const notifPanelRef = useRef<HTMLDivElement>(null);
   const notifListRef = useRef<HTMLDivElement>(null);
@@ -93,11 +95,36 @@ export const Header: React.FC<HeaderProps> = ({
 
   const unreadCount = notifications.filter(n => !n.isRead).length;
 
-  // Close dropdowns on outside click
+  // Atualização em tempo real do posicionamento do menu da foto ancorado ao botão na viewport
   useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
+    if (!isUserMenuOpen) return;
+    const updatePosition = () => {
+      if (userMenuRef.current) {
+        const rect = userMenuRef.current.getBoundingClientRect();
+        setUserMenuCoords({
+          top: Math.round(rect.bottom + 8),
+          right: Math.round(Math.max(12, window.innerWidth - rect.right)),
+        });
+      }
+    };
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, { passive: true });
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition);
+    };
+  }, [isUserMenuOpen]);
+
+  // Close dropdowns on outside click or tap
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent | TouchEvent) {
       const target = event.target as Node;
-      if (userMenuRef.current && !userMenuRef.current.contains(target)) {
+      if (
+        userMenuRef.current &&
+        !userMenuRef.current.contains(target) &&
+        (!userMenuDropdownRef.current || !userMenuDropdownRef.current.contains(target))
+      ) {
         setIsUserMenuOpen(false);
       }
       if (
@@ -112,7 +139,11 @@ export const Header: React.FC<HeaderProps> = ({
       }
     }
     document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    document.addEventListener('touchstart', handleClickOutside, { passive: true });
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('touchstart', handleClickOutside);
+    };
   }, [onToggleNotif]);
 
   // Close notifications panel on Escape key
@@ -127,17 +158,9 @@ export const Header: React.FC<HeaderProps> = ({
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [isNotifOpen, onToggleNotif]);
 
-  // Lock background scrolling cleanly while user menu is open (Item 2)
+  // Lock background scrolling on mobile screens (< 768px) preserving current scroll offset
   useEffect(() => {
     if (!isUserMenuOpen) return;
-
-    const originalBodyOverflow = document.body.style.overflow;
-    const originalHtmlOverflow = document.documentElement.style.overflow;
-    const originalTouchAction = document.body.style.touchAction;
-
-    document.body.style.overflow = 'hidden';
-    document.documentElement.style.overflow = 'hidden';
-    document.body.style.touchAction = 'none';
 
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
@@ -146,11 +169,25 @@ export const Header: React.FC<HeaderProps> = ({
     }
     document.addEventListener('keydown', handleKeyDown);
 
+    // Only lock background scroll on mobile screens (under 768px)
+    const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
+    if (!isMobile) {
+      return () => {
+        document.removeEventListener('keydown', handleKeyDown);
+      };
+    }
+
+    const savedScrollY = window.scrollY;
+    const originalBodyOverflow = document.body.style.overflow;
+
+    document.body.style.overflow = 'hidden';
+
     return () => {
       document.body.style.overflow = originalBodyOverflow;
-      document.documentElement.style.overflow = originalHtmlOverflow;
-      document.body.style.touchAction = originalTouchAction;
       document.removeEventListener('keydown', handleKeyDown);
+      if (typeof window !== 'undefined' && Math.abs(window.scrollY - savedScrollY) > 2) {
+        window.scrollTo({ top: savedScrollY, behavior: 'instant' as ScrollBehavior });
+      }
     };
   }, [isUserMenuOpen]);
 
@@ -621,9 +658,14 @@ export const Header: React.FC<HeaderProps> = ({
           <div ref={userMenuRef} className="relative">
             <button
               type="button"
-              onClick={() => setIsUserMenuOpen(!isUserMenuOpen)}
+              onClick={() => {
+                onToggleNotif(false);
+                setIsSearchOpen(false);
+                setIsUserMenuOpen(!isUserMenuOpen);
+              }}
               className="group flex items-center gap-2 rounded-full p-0.5 ring-2 ring-purple-600/40 hover:ring-purple-500 transition-all focus:outline-none cursor-pointer"
               aria-label="Menu do Usuário"
+              aria-expanded={isUserMenuOpen}
             >
               {currentUser.avatarUrl ? (
                 <img
@@ -640,22 +682,27 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
 
             {/* Menu da foto de perfil: EXACTLY the 7 items requested */}
-            {isUserMenuOpen && (
-              <>
-                {/* Backdrop to prevent underlying touch movement and dismiss on outside click */}
+            {isUserMenuOpen && createPortal(
+              <div className="fixed inset-0 z-50 pointer-events-none">
+                {/* Mobile-only visible backdrop for drawer/menu overlay dismiss. On desktop (md+), outside click is handled natively by document listener without intercepting invisible layers */}
                 <div
-                  className="fixed inset-0 z-40 bg-black/20 md:bg-transparent"
+                  className="fixed inset-0 z-40 bg-black/50 backdrop-blur-xs md:hidden pointer-events-auto"
                   onClick={() => setIsUserMenuOpen(false)}
-                  onTouchMove={(e) => {
-                    e.preventDefault();
-                  }}
+                  onTouchEnd={() => setIsUserMenuOpen(false)}
+                  aria-hidden="true"
                 />
 
                 <div
+                  ref={userMenuDropdownRef}
                   role="menu"
                   aria-label="Menu do Usuário"
-                  className="absolute right-0 top-full mt-2 w-64 max-h-[min(30rem,calc(100vh-5rem))] supports-[height:100dvh]:max-h-[min(30rem,calc(100dvh-5rem))] overflow-y-auto overscroll-contain rounded-2xl border border-purple-800/30 bg-[#130E24] p-2 shadow-2xl shadow-black/90 backdrop-blur-xl z-50 animate-in fade-in zoom-in-95 duration-100"
-                  style={{ touchAction: 'pan-y' }}
+                  style={{
+                    position: 'fixed',
+                    top: `${userMenuCoords.top}px`,
+                    right: `${userMenuCoords.right}px`,
+                    touchAction: 'pan-y',
+                  }}
+                  className="pointer-events-auto z-50 w-64 max-h-[min(30rem,calc(100vh-5rem))] supports-[height:100dvh]:max-h-[min(30rem,calc(100dvh-5rem))] overflow-y-auto overscroll-contain rounded-2xl border border-purple-800/30 bg-[#130E24] p-2 shadow-2xl shadow-black/90 backdrop-blur-xl animate-in fade-in zoom-in-95 duration-100"
                   onTouchMove={(e) => {
                     e.stopPropagation();
                   }}

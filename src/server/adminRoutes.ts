@@ -21,10 +21,14 @@ export const adminRouter = Router();
  * Consulta de status de privilégio administrativo.
  * Zero vazamento de dados: não expõe UIDs ou configurações privadas para requisições anônimas.
  */
-adminRouter.get('/status', async (req: Request, res: Response) => {
-  const authHeader = req.headers.authorization || (req.headers['x-admin-token'] as string);
+adminRouter.all('/status', async (req: Request, res: Response) => {
+  const tokenCandidate =
+    req.headers.authorization ||
+    (req.headers['x-admin-token'] as string) ||
+    req.body?.idToken ||
+    (req.query?.idToken as string);
 
-  if (!authHeader) {
+  if (!tokenCandidate || typeof tokenCandidate !== 'string') {
     res.json({
       authenticated: false,
       isAdmin: false,
@@ -32,11 +36,11 @@ adminRouter.get('/status', async (req: Request, res: Response) => {
     return;
   }
 
-  const result = await verifyAdminToken(authHeader);
+  const result = await verifyAdminToken(tokenCandidate);
 
   res.json({
     authenticated: Boolean(result.uid),
-    isAdmin: result.isAdmin,
+    isAdmin: Boolean(result.isAdmin),
   });
 });
 
@@ -45,12 +49,14 @@ adminRouter.get('/status', async (req: Request, res: Response) => {
  */
 adminRouter.post('/verify', async (req: Request, res: Response) => {
   const { uid, idToken } = req.body || {};
+  const headerToken = req.headers.authorization || (req.headers['x-admin-token'] as string);
+  const effectiveToken = idToken || headerToken;
 
   // Se token foi fornecido, verifica criptograficamente
-  if (idToken && typeof idToken === 'string') {
-    const verification = await verifyAdminToken(idToken);
+  if (effectiveToken && typeof effectiveToken === 'string') {
+    const verification = await verifyAdminToken(effectiveToken);
     res.json({
-      isAdmin: verification.isAdmin,
+      isAdmin: Boolean(verification.isAdmin),
       authenticated: Boolean(verification.uid),
     });
     return;

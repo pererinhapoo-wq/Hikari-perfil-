@@ -409,6 +409,7 @@ export default function App() {
     if (typeof window !== 'undefined' && window.location.pathname !== '/admin') {
       window.history.pushState(null, '', '/admin');
     }
+    setIsAdminServerAuthorized(null);
     setCurrentView('admin');
   }, []);
 
@@ -426,6 +427,19 @@ export default function App() {
       return;
     }
 
+    // Se a autenticação ainda estiver carregando, aguarda a resolução do estado
+    if (isLoading) {
+      return;
+    }
+
+    // Se o cliente não está autenticado, bloqueia imediatamente sem expor dados
+    if (!isAuthenticated || !user) {
+      setIsAdminServerAuthorized(false);
+      setAdminToken(null);
+      setIsVerifyingAdminServer(false);
+      return;
+    }
+
     setIsVerifyingAdminServer(true);
 
     async function checkServerAuthorization() {
@@ -433,10 +447,19 @@ export default function App() {
         let tokenToVerify: string | null = null;
         if (user) {
           try {
-            tokenToVerify = await user.getIdToken();
+            // Força a renovação do Firebase ID Token para descartar tokens expirados do cache do navegador
+            tokenToVerify = await user.getIdToken(true);
           } catch {
-            tokenToVerify = null;
+            tokenToVerify = await user.getIdToken();
           }
+        }
+
+        if (!tokenToVerify) {
+          if (!cancelled) {
+            setIsAdminServerAuthorized(false);
+            setAdminToken(null);
+          }
+          return;
         }
 
         const res = await fetchAdminStatus(tokenToVerify);
@@ -461,7 +484,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [currentView, user]);
+  }, [currentView, user, isLoading, isAuthenticated]);
 
   useEffect(() => {
     return () => {
@@ -745,6 +768,7 @@ export default function App() {
       const scrollBarWidth = window.innerWidth - document.documentElement.clientWidth;
       const prevBodyOverflow = document.body.style.overflow;
       const prevPaddingRight = document.body.style.paddingRight;
+      const savedScrollY = window.scrollY;
 
       document.body.style.overflow = 'hidden';
       if (scrollBarWidth > 0) {
@@ -754,6 +778,9 @@ export default function App() {
       return () => {
         document.body.style.overflow = prevBodyOverflow;
         document.body.style.paddingRight = prevPaddingRight;
+        if (typeof window !== 'undefined' && Math.abs(window.scrollY - savedScrollY) > 2) {
+          window.scrollTo({ top: savedScrollY, behavior: 'instant' as ScrollBehavior });
+        }
       };
     }
   }, [isViewingAppShell, isSettingsOpen, isFollowersOpen]);
@@ -2259,27 +2286,9 @@ export default function App() {
     ]
   );
 
-  // Synchronous render gate: never render a profile shell while auth is loading OR while authSession.uid hasn't matched user.uid
-  if (isLoading || (isAuthenticated && (!user || !isAuthWorkspaceReady || !authenticatedProfile))) {
-    return (
-      <div
-        data-testid="auth-loading-state"
-        className="min-h-screen bg-[#0A0713] text-[#EDE8F5] flex flex-col items-center justify-center gap-4 px-4"
-      >
-        <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-tr from-purple-700 via-purple-600 to-indigo-500 shadow-lg shadow-purple-950/60 ring-1 ring-purple-400/30">
-          <span className="text-xl font-black tracking-tighter text-white">光</span>
-        </div>
-        <div className="flex items-center gap-2.5 text-sm font-medium text-purple-200">
-          <Loader2 className="h-4 w-4 animate-spin text-purple-400" />
-          <span>Verificando sessão...</span>
-        </div>
-      </div>
-    );
-  }
-
   // Rota privada de administração (/admin) com validação mandatória de servidor
   if (currentView === 'admin') {
-    if (isVerifyingAdminServer) {
+    if (isLoading || isVerifyingAdminServer || (isAuthenticated && isAdminServerAuthorized === null)) {
       return (
         <div className="min-h-screen bg-[#0A0713] flex flex-col items-center justify-center p-4">
           <Loader2 className="h-8 w-8 text-purple-500 animate-spin mb-3" />
@@ -2290,7 +2299,7 @@ export default function App() {
       );
     }
 
-    if (isAdminServerAuthorized) {
+    if (isAdminServerAuthorized && adminToken) {
       return (
         <AdminPanel
           onReturnToApp={handleReturnFromAdmin}
@@ -2309,6 +2318,24 @@ export default function App() {
         }}
         isAuthenticated={isAuthenticated}
       />
+    );
+  }
+
+  // Synchronous render gate: never render a profile shell while auth is loading OR while authSession.uid hasn't matched user.uid
+  if (isLoading || (isAuthenticated && (!user || !isAuthWorkspaceReady || !authenticatedProfile))) {
+    return (
+      <div
+        data-testid="auth-loading-state"
+        className="min-h-screen bg-[#0A0713] text-[#EDE8F5] flex flex-col items-center justify-center gap-4 px-4"
+      >
+        <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-tr from-purple-700 via-purple-600 to-indigo-500 shadow-lg shadow-purple-950/60 ring-1 ring-purple-400/30">
+          <span className="text-xl font-black tracking-tighter text-white">光</span>
+        </div>
+        <div className="flex items-center gap-2.5 text-sm font-medium text-purple-200">
+          <Loader2 className="h-4 w-4 animate-spin text-purple-400" />
+          <span>Verificando sessão...</span>
+        </div>
+      </div>
     );
   }
 
