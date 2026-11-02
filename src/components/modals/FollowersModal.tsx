@@ -78,6 +78,12 @@ export const FollowersModal: React.FC<FollowersModalProps> = ({
     };
   }, [isOpen, onClose]);
 
+  const [displayLimit, setDisplayLimit] = useState(50);
+
+  useEffect(() => {
+    setDisplayLimit(50);
+  }, [activeTab, searchQuery]);
+
   if (!isOpen) return null;
 
   const currentList = activeTab === 'followers' 
@@ -246,64 +252,78 @@ export const FollowersModal: React.FC<FollowersModalProps> = ({
               Nenhum usuário encontrado.
             </div>
           ) : (
-            filteredUsers.map((user) => (
-              <div
-                key={user.id}
-                className="flex items-center justify-between gap-3 rounded-xl border border-purple-900/30 bg-[#17112c]/60 p-3 hover:bg-[#1a1333] transition-colors"
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  {user.avatarUrl ? (
-                    <img
-                      src={user.avatarUrl}
-                      alt={user.displayName}
-                      referrerPolicy="no-referrer"
-                      className="h-9 w-9 rounded-full object-cover border border-purple-500/30 shrink-0"
-                    />
-                  ) : (
-                    <div className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-purple-700 to-indigo-800 text-xs font-bold text-white border border-purple-500/30 shrink-0 select-none">
-                      {(user.displayName || user.username || 'U').charAt(0).toUpperCase()}
+            <>
+              {filteredUsers.slice(0, displayLimit).map((user) => (
+                <div
+                  key={user.id}
+                  className="flex items-center justify-between gap-3 rounded-xl border border-purple-900/30 bg-[#17112c]/60 p-3 hover:bg-[#1a1333] transition-colors"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    {user.avatarUrl ? (
+                      <img
+                        src={user.avatarUrl}
+                        alt={user.displayName}
+                        referrerPolicy="no-referrer"
+                        className="h-9 w-9 rounded-full object-cover border border-purple-500/30 shrink-0"
+                      />
+                    ) : (
+                      <div className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-purple-700 to-indigo-800 text-xs font-bold text-white border border-purple-500/30 shrink-0 select-none">
+                        {(user.displayName || user.username || 'U').charAt(0).toUpperCase()}
+                      </div>
+                    )}
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-white truncate">{user.displayName}</div>
+                      <div className="text-[11px] text-purple-400 truncate">@{user.username}</div>
+                      <div className="text-[10px] text-purple-300/60 truncate max-w-xs">{user.bio}</div>
                     </div>
-                  )}
-                  <div className="min-w-0">
-                    <div className="text-xs font-bold text-white truncate">{user.displayName}</div>
-                    <div className="text-[11px] text-purple-400 truncate">@{user.username}</div>
-                    <div className="text-[10px] text-purple-300/60 truncate max-w-xs">{user.bio}</div>
+                  </div>
+
+                  {/* Actions */}
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {activeTab === 'following' && isOwnProfile && (
+                      <button
+                        onClick={() => onUnfollow(user.id)}
+                        className="rounded-lg border border-purple-800/40 bg-purple-950/60 hover:bg-rose-950/80 hover:text-rose-200 hover:border-rose-500/50 px-2.5 py-1.5 text-xs font-medium text-purple-300 transition-colors"
+                      >
+                        Deixar de seguir
+                      </button>
+                    )}
+
+                    {activeTab === 'followers' && isOwnProfile && (
+                      <button
+                        onClick={() => onRemoveFollower(user.id)}
+                        className="rounded-lg border border-purple-900/40 bg-purple-950/40 hover:bg-rose-950/80 hover:text-rose-300 px-2.5 py-1.5 text-xs font-medium text-purple-300 transition-colors"
+                        title="Remover seguidor"
+                      >
+                        Remover
+                      </button>
+                    )}
+
+                    {isOwnProfile && (
+                      <button
+                        onClick={() => onBlockUser(user.id)}
+                        className="rounded-lg p-1.5 text-purple-400 hover:bg-rose-950/50 hover:text-rose-300 transition-colors"
+                        title="Bloquear usuário"
+                      >
+                        <ShieldAlert className="h-4 w-4" />
+                      </button>
+                    )}
                   </div>
                 </div>
+              ))}
 
-                {/* Actions */}
-                <div className="flex items-center gap-1.5 shrink-0">
-                  {activeTab === 'following' && isOwnProfile && (
-                    <button
-                      onClick={() => onUnfollow(user.id)}
-                      className="rounded-lg border border-purple-800/40 bg-purple-950/60 hover:bg-rose-950/80 hover:text-rose-200 hover:border-rose-500/50 px-2.5 py-1.5 text-xs font-medium text-purple-300 transition-colors"
-                    >
-                      Deixar de seguir
-                    </button>
-                  )}
-
-                  {activeTab === 'followers' && isOwnProfile && (
-                    <button
-                      onClick={() => onRemoveFollower(user.id)}
-                      className="rounded-lg border border-purple-900/40 bg-purple-950/40 hover:bg-rose-950/80 hover:text-rose-300 px-2.5 py-1.5 text-xs font-medium text-purple-300 transition-colors"
-                      title="Remover seguidor"
-                    >
-                      Remover
-                    </button>
-                  )}
-
-                  {isOwnProfile && (
-                    <button
-                      onClick={() => onBlockUser(user.id)}
-                      className="rounded-lg p-1.5 text-purple-400 hover:bg-rose-950/50 hover:text-rose-300 transition-colors"
-                      title="Bloquear usuário"
-                    >
-                      <ShieldAlert className="h-4 w-4" />
-                    </button>
-                  )}
+              {filteredUsers.length > displayLimit && (
+                <div className="pt-2 text-center">
+                  <button
+                    type="button"
+                    onClick={() => setDisplayLimit((prev) => prev + 50)}
+                    className="w-full rounded-xl border border-purple-800/40 bg-purple-950/40 py-2 text-xs font-medium text-purple-300 hover:bg-purple-900/50 hover:text-white transition-colors"
+                  >
+                    Carregar mais conexões ({displayLimit} de {filteredUsers.length})
+                  </button>
                 </div>
-              </div>
-            ))
+              )}
+            </>
           )}
         </div>
       </div>

@@ -65,10 +65,8 @@ function generateMockAnime(id: string, title: string, status: AnimeItem['status'
     totalEpisodes: 24,
     rating: 8.5,
     year: 2024,
-    format: 'TV',
     genres: ['Action', 'Fantasy'],
     isFavorite: false,
-    synopsis: `Sinopse de ${title}`,
   };
 }
 
@@ -117,14 +115,14 @@ async function runStage4TestSuite(): Promise<boolean> {
   const mockComments: HikariComment[] = [
     {
       id: 'comm_1',
-      author: 'Hikari',
-      avatarUrl: 'https://images.unsplash.com/avatar',
+      animeId: 'ani_1',
       animeTitle: 'Frieren: Beyond Journey\'s End',
       content: 'Uma obra-prima absoluta da animação moderna!',
       createdAt: 'Há 1 dia',
       createdAtTimestamp: Date.now() - 86_400_000,
       likesCount: 42,
       repliesCount: 3,
+      originUrl: 'https://hikari.anim/frieren/12',
     },
   ];
 

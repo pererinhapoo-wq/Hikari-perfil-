@@ -191,6 +191,58 @@ export async function fetchMALAuthUrl(
   };
 }
 
+export interface MALBatchResult {
+  entries: MALAnimeEntry[];
+  totalCount: number;
+  hasMore: boolean;
+  nextOffset: number | null;
+}
+
+/**
+ * Consulta um lote específico da lista de animes do usuário conectado no MyAnimeList com suporte a paginação incremental por offset/limit.
+ */
+export async function fetchMALAnimeListBatch(
+  idToken: string,
+  options?: { offset?: number; limit?: number; signal?: AbortSignal }
+): Promise<MALBatchResult> {
+  const offset = options?.offset ?? 0;
+  const limit = options?.limit ?? 1000;
+  const res = await fetch(`/api/mal/animelist?offset=${offset}&limit=${limit}`, {
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+    },
+    signal: options?.signal,
+  });
+  const data = await res.json();
+
+  if (!res.ok) {
+    if (res.status === 401) {
+      throw new Error(
+        data.message || 'Sessão de autenticação expirada ou inválida. Faça login novamente.'
+      );
+    }
+    if (res.status === 403) {
+      throw new Error(
+        data.message || 'Nenhuma conta MyAnimeList vinculada à sua sessão. Conecte sua conta primeiro.'
+      );
+    }
+    if (res.status === 429) {
+      throw new Error(
+        'Limite de requisições atingido no MyAnimeList. Aguarde alguns instantes e tente novamente.'
+      );
+    }
+    throw new Error(data.message || data.error || 'Erro ao consultar a lista de animes no MyAnimeList.');
+  }
+
+  const entries = Array.isArray(data.entries) ? (data.entries as MALAnimeEntry[]) : [];
+  return {
+    entries,
+    totalCount: typeof data.totalCount === 'number' ? data.totalCount : entries.length,
+    hasMore: Boolean(data.hasMore),
+    nextOffset: typeof data.nextOffset === 'number' ? data.nextOffset : null,
+  };
+}
+
 /**
  * Consulta a lista de animes do usuário conectado no MyAnimeList através da rota de backend protegida.
  * Exige Firebase ID Token e obtém animes vinculados estritamente à identidade do usuário autenticado.
@@ -406,15 +458,26 @@ export function calculateMALImportPreview(
  * - Atualiza status e progresso de correspondências apenas se solicitado (updateExistingProgress).
  * - Utiliza índice Map para desempenho O(N + M).
  */
+export interface MALMergeReport {
+  mergedList: AnimeItem[];
+  addedCount: number;
+  updatedCount: number;
+  unchangedCount: number;
+  preservedFieldsCount: number;
+}
+
+/**
+ * Mescla as entradas do MyAnimeList com a lista existente de forma segura:
+ * - Não cria duplicatas.
+ * - Preserva campos locais (isFavorite, posters personalizados existentes, IDs locais, animes manuais, anilistId).
+ * - Atualiza status e progresso de correspondências apenas se solicitado (updateExistingProgress).
+ * - Utiliza índice Map para desempenho O(N + M).
+ */
 export function mergeMALImport(
   incomingEntries: MALAnimeEntry[],
   currentList: AnimeItem[],
   updateExistingProgress: boolean = true
-): {
-  mergedList: AnimeItem[];
-  addedCount: number;
-  updatedCount: number;
-} {
+): MALMergeReport {
   const resultMap = new Map<string, AnimeItem>();
   for (const item of currentList) {
     resultMap.set(item.id, { ...item });
@@ -425,6 +488,8 @@ export function mergeMALImport(
 
   let addedCount = 0;
   let updatedCount = 0;
+  let unchangedCount = 0;
+  let preservedFieldsCount = 0;
 
   for (const incoming of incomingEntries) {
     const matched = findMatchingAnimeInIndex(incoming, existingIndex, 'mal_first');
@@ -443,11 +508,17 @@ export function mergeMALImport(
         isFavorite: currentEntry.isFavorite,
       };
 
+      if (currentEntry.isFavorite) {
+        preservedFieldsCount++;
+      }
+
       // Substituição de capas genéricas do Unsplash ou ausentes por capa oficial válida recebida
       // Preserva capas oficiais existentes e imagens personalizadas pelo usuário
       if (isGenericOrMissingPoster(currentEntry.posterUrl) && isValidPosterUrl(incoming.posterUrl)) {
         updatedItem.posterUrl = incoming.posterUrl;
         changed = true;
+      } else if (!isGenericOrMissingPoster(currentEntry.posterUrl)) {
+        preservedFieldsCount++;
       }
 
       if (updateExistingProgress) {
@@ -476,10 +547,15 @@ export function mergeMALImport(
         if (incoming.episodeDurationMinutes && !currentEntry.episodeDurationMinutes) {
           updatedItem.episodeDurationMinutes = incoming.episodeDurationMinutes;
         }
+      } else {
+        // Se updateExistingProgress for false, todos os dados locais são estritamente preservados
+        preservedFieldsCount += 3;
       }
 
       if (changed) {
         updatedCount++;
+      } else {
+        unchangedCount++;
       }
 
       resultMap.set(matched.id, updatedItem);
@@ -548,5 +624,7 @@ export function mergeMALImport(
     mergedList: Array.from(resultMap.values()),
     addedCount,
     updatedCount,
+    unchangedCount,
+    preservedFieldsCount,
   };
 }

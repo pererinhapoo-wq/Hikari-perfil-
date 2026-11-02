@@ -53,6 +53,15 @@ import {
   recordExternalSyncSuccess,
   clearExternalSyncCooldown,
 } from '../../utils/syncCooldown';
+import { ImportProgressCard } from './ImportProgressCard';
+import {
+  getImportCheckpoint,
+  startOrResumeImport,
+  pauseImport,
+  cancelImport,
+  subscribeImportEvents,
+  type ImportCheckpoint,
+} from '../../services/importSyncManager';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -211,6 +220,111 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [updateExistingProgressMAL, setUpdateExistingProgressMAL] = useState(true);
   const [isImportingMAL, setIsImportingMAL] = useState(false);
   const [malSuccessMsg, setMalSuccessMsg] = useState<string | null>(null);
+
+  // Stage 5 Incremental Import Checkpoints & Sync
+  const [aniListCheckpoint, setAniListCheckpoint] = useState<ImportCheckpoint | null>(null);
+  const [malCheckpoint, setMalCheckpoint] = useState<ImportCheckpoint | null>(null);
+
+  useEffect(() => {
+    if (!isOpen || activeTab !== 'connected') return;
+
+    const alAccount = anilistUsername || profile.id;
+    const malAccount = malUsername || profile.id;
+
+    if (anilistConnected && alAccount) {
+      setAniListCheckpoint(getImportCheckpoint(profile.id, 'anilist', alAccount));
+    }
+    if (malConnected && malAccount) {
+      setMalCheckpoint(getImportCheckpoint(profile.id, 'mal', malAccount));
+    }
+
+    const unsubscribe = subscribeImportEvents((event) => {
+      if (event.checkpoint.profileId !== profile.id) return;
+
+      if (event.checkpoint.provider === 'anilist') {
+        setAniListCheckpoint({ ...event.checkpoint });
+        if (event.type === 'completed') {
+          const now = new Date();
+          const formatted = `${now.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })} às ${now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+          setAnilistLastSync(formatted);
+          setImportSuccessMsg(
+            `Importação completa do AniList concluída com sucesso! ${event.checkpoint.addedCount} novos animes adicionados e ${event.checkpoint.updatedCount} animes atualizados.`
+          );
+        }
+      } else if (event.checkpoint.provider === 'mal') {
+        setMalCheckpoint({ ...event.checkpoint });
+        if (event.type === 'completed') {
+          const now = new Date();
+          const formatted = `${now.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })} às ${now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+          setMalLastSync(formatted);
+          setMalSuccessMsg(
+            `Importação completa do MyAnimeList concluída com sucesso! ${event.checkpoint.addedCount} novos animes adicionados e ${event.checkpoint.updatedCount} animes atualizados.`
+          );
+        }
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [isOpen, activeTab, anilistConnected, malConnected, profile.id, anilistUsername, malUsername]);
+
+  const handleStartAniListIncremental = async () => {
+    const account = anilistUsername || profile.id;
+    try {
+      await startOrResumeImport({
+        profileId: profile.id,
+        provider: 'anilist',
+        accountIdentifier: account,
+        existingAnimes: currentAnimes,
+        updateExistingProgress: true,
+        onBatchCommitted: (batch) => {
+          const list = Array.isArray(batch) ? batch : batch.mergedAnimes;
+          if (onSyncAniList) {
+            onSyncAniList(list, {
+              connected: true,
+              username: anilistUsername,
+              avatarUrl: anilistAvatarUrl,
+              lastSync: new Date().toISOString(),
+            });
+          }
+        },
+      });
+    } catch (err) {
+      console.error('Falha ao iniciar sincronização incremental AniList:', err);
+    }
+  };
+
+  const handleStartMALIncremental = async () => {
+    const account = malUsername || profile.id;
+    try {
+      let idToken: string | undefined;
+      if (user) {
+        idToken = await user.getIdToken();
+      }
+      await startOrResumeImport({
+        profileId: profile.id,
+        provider: 'mal',
+        accountIdentifier: account,
+        existingAnimes: currentAnimes,
+        updateExistingProgress: updateExistingProgressMAL,
+        idToken,
+        onBatchCommitted: (batch) => {
+          const list = Array.isArray(batch) ? batch : batch.mergedAnimes;
+          if (onSyncMAL) {
+            onSyncMAL(list, {
+              connected: true,
+              username: malUsername,
+              avatarUrl: malAvatarUrl,
+              lastSync: new Date().toISOString(),
+            });
+          }
+        },
+      });
+    } catch (err) {
+      console.error('Falha ao iniciar sincronização incremental MAL:', err);
+    }
+  };
 
   // Check MAL server status lazily only when the Connected Accounts tab is opened
   useEffect(() => {
@@ -1669,9 +1783,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             ) : (
                               <>
                                 <Download className="h-3.5 w-3.5" />
-                                <span>Consultar e Importar Lista</span>
+                                <span>Prévia e Importar</span>
                               </>
                             )}
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={aniListCheckpoint?.status === 'in_progress'}
+                            onClick={handleStartAniListIncremental}
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors cursor-pointer disabled:cursor-not-allowed"
+                            title="Importa toda a biblioteca do AniList em lotes incrementais com checkpoint retomável"
+                          >
+                            <RefreshCw className={`h-3.5 w-3.5 ${aniListCheckpoint?.status === 'in_progress' ? 'animate-spin' : ''}`} />
+                            <span>
+                              {aniListCheckpoint?.status === 'paused'
+                                ? 'Retomar Importação'
+                                : aniListCheckpoint?.status === 'error'
+                                ? 'Tentar Novamente'
+                                : 'Sincronização Completa'}
+                            </span>
                           </button>
                         </div>
                       </div>
@@ -1686,6 +1817,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           <div className="flex-1">
                             <span className="leading-relaxed">{collectionError}</span>
                           </div>
+                        </div>
+                      )}
+
+                      {/* Stage 5: AniList Resumable Incremental Progress Card */}
+                      {aniListCheckpoint && aniListCheckpoint.status !== 'idle' && (
+                        <div className="pt-2">
+                          <ImportProgressCard
+                            checkpoint={aniListCheckpoint}
+                            onPause={() => pauseImport(profile.id, 'anilist', anilistUsername || profile.id)}
+                            onResume={handleStartAniListIncremental}
+                            onCancel={() => cancelImport(profile.id, 'anilist', anilistUsername || profile.id)}
+                            onRetry={handleStartAniListIncremental}
+                            onDismiss={() => setAniListCheckpoint(null)}
+                          />
                         </div>
                       )}
                     </div>
@@ -2228,9 +2373,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             ) : (
                               <>
                                 <Download className="h-3.5 w-3.5" />
-                                <span>Consultar e Importar Lista</span>
+                                <span>Prévia e Importar</span>
                               </>
                             )}
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={malCheckpoint?.status === 'in_progress'}
+                            onClick={handleStartMALIncremental}
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-[#2E51A2] hover:bg-[#254388] disabled:opacity-50 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors cursor-pointer disabled:cursor-not-allowed"
+                            title="Importa toda a biblioteca do MyAnimeList sem limites artificiais de página em lotes incrementais com checkpoint retomável"
+                          >
+                            <RefreshCw className={`h-3.5 w-3.5 ${malCheckpoint?.status === 'in_progress' ? 'animate-spin' : ''}`} />
+                            <span>
+                              {malCheckpoint?.status === 'paused'
+                                ? 'Retomar Importação'
+                                : malCheckpoint?.status === 'error'
+                                ? 'Tentar Novamente'
+                                : 'Sincronização Completa'}
+                            </span>
                           </button>
                         </div>
                       </div>
@@ -2245,6 +2407,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           <div className="flex-1">
                             <span className="leading-relaxed">{malListError}</span>
                           </div>
+                        </div>
+                      )}
+
+                      {/* Stage 5: MAL Resumable Incremental Progress Card */}
+                      {malCheckpoint && malCheckpoint.status !== 'idle' && (
+                        <div className="pt-2">
+                          <ImportProgressCard
+                            checkpoint={malCheckpoint}
+                            onPause={() => pauseImport(profile.id, 'mal', malUsername || profile.id)}
+                            onResume={handleStartMALIncremental}
+                            onCancel={() => cancelImport(profile.id, 'mal', malUsername || profile.id)}
+                            onRetry={handleStartMALIncremental}
+                            onDismiss={() => setMalCheckpoint(null)}
+                          />
                         </div>
                       )}
                     </div>

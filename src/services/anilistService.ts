@@ -262,12 +262,16 @@ export function normalizeAniListScore(score?: number | null): number {
   return Math.min(10, Math.max(0, normalized));
 }
 
-const FAVORITES_QUERY = `
-  query ($name: String) {
+const FAVORITES_ANIME_PAGE_QUERY = `
+  query ($name: String, $page: Int) {
     User(name: $name) {
       id
       favourites {
-        anime(page: 1, perPage: 50) {
+        anime(page: $page, perPage: 50) {
+          pageInfo {
+            hasNextPage
+            total
+          }
           nodes {
             id
             idMal
@@ -278,7 +282,21 @@ const FAVORITES_QUERY = `
             }
           }
         }
-        characters(page: 1, perPage: 25) {
+      }
+    }
+  }
+`;
+
+const FAVORITES_CHARACTERS_PAGE_QUERY = `
+  query ($name: String, $page: Int) {
+    User(name: $name) {
+      id
+      favourites {
+        characters(page: $page, perPage: 25) {
+          pageInfo {
+            hasNextPage
+            total
+          }
           nodes {
             id
             name {
@@ -309,6 +327,59 @@ const FAVORITES_QUERY = `
     }
   }
 `;
+
+// Helper: Requisição com retry e backoff exponencial com jitter para a API GraphQL do AniList
+async function fetchAniListWithRetry(
+  query: string,
+  variables: Record<string, unknown>,
+  signal?: AbortSignal,
+  maxRetries = 3
+): Promise<Response> {
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    try {
+      const res = await fetch(ANILIST_GRAPHQL_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({ query, variables }),
+        signal,
+      });
+
+      if (res.status === 429) {
+        if (attempt > maxRetries) return res;
+        const retryAfterHeader = res.headers.get('retry-after');
+        let waitMs = 1500 * Math.pow(2, attempt - 1) + Math.random() * 500;
+        if (retryAfterHeader) {
+          const parsedSeconds = parseInt(retryAfterHeader, 10);
+          if (!isNaN(parsedSeconds) && parsedSeconds > 0) {
+            waitMs = Math.min(parsedSeconds * 1000, 10000);
+          }
+        }
+        await new Promise((r) => setTimeout(r, waitMs));
+        continue;
+      }
+
+      if (res.status >= 500 && res.status <= 504) {
+        if (attempt > maxRetries) return res;
+        const waitMs = 1000 * Math.pow(2, attempt - 1) + Math.random() * 400;
+        await new Promise((r) => setTimeout(r, waitMs));
+        continue;
+      }
+
+      return res;
+    } catch (err) {
+      if (attempt > maxRetries) {
+        throw err;
+      }
+      const waitMs = 1000 * Math.pow(2, attempt - 1) + Math.random() * 400;
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
+}
 
 export function mapAniListCharacter(raw: any): FavoriteCharacter {
   const animeEdge = raw.media?.edges?.[0];
@@ -341,142 +412,308 @@ export function mapAniListCharacter(raw: any): FavoriteCharacter {
 }
 
 /**
- * Consulta os favoritos reais de animes e personagens da conta AniList.
+ * Consulta os favoritos reais de animes e personagens da conta AniList,
+ * paginando através de TODAS as páginas de favoritos sem limitação artificial da página 1.
  */
-export async function fetchAniListFavorites(username: string): Promise<AniListFavoritesResult> {
+export async function fetchAniListFavorites(
+  username: string,
+  options?: { signal?: AbortSignal }
+): Promise<AniListFavoritesResult> {
   const cleanUsername = username.trim();
   if (!cleanUsername) {
     return { animeAnilistIds: [], animeMalIds: [], characters: [] };
   }
 
-  try {
-    const res = await fetch(ANILIST_GRAPHQL_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({
-        query: FAVORITES_QUERY,
-        variables: { name: cleanUsername },
-      }),
-    });
+  const animeAnilistIds: number[] = [];
+  const animeMalIds: number[] = [];
+  const characters: FavoriteCharacter[] = [];
 
-    if (!res.ok) {
-      return { animeAnilistIds: [], animeMalIds: [], characters: [] };
-    }
+  // 1. Paginação completa de animes favoritos
+  let animePage = 1;
+  let hasMoreAnime = true;
+  while (hasMoreAnime) {
+    try {
+      const res = await fetchAniListWithRetry(
+        FAVORITES_ANIME_PAGE_QUERY,
+        { name: cleanUsername, page: animePage },
+        options?.signal
+      );
+      if (!res.ok) break;
 
-    const json = await res.json();
-    const favData = json?.data?.User?.favourites;
+      const json = await res.json();
+      const animeFav = json?.data?.User?.favourites?.anime;
+      const nodes = Array.isArray(animeFav?.nodes) ? animeFav.nodes : [];
 
-    const animeNodes = Array.isArray(favData?.anime?.nodes) ? favData.anime.nodes : [];
-    const animeAnilistIds: number[] = [];
-    const animeMalIds: number[] = [];
-
-    for (const node of animeNodes) {
-      if (typeof node?.id === 'number') {
-        animeAnilistIds.push(node.id);
+      for (const node of nodes) {
+        if (typeof node?.id === 'number') animeAnilistIds.push(node.id);
+        if (typeof node?.idMal === 'number') animeMalIds.push(node.idMal);
       }
-      if (typeof node?.idMal === 'number') {
-        animeMalIds.push(node.idMal);
-      }
+
+      hasMoreAnime = Boolean(animeFav?.pageInfo?.hasNextPage);
+      animePage++;
+    } catch {
+      break;
     }
-
-    const charNodes = Array.isArray(favData?.characters?.nodes) ? favData.characters.nodes : [];
-    const characters: FavoriteCharacter[] = charNodes.map((raw: any) => mapAniListCharacter(raw));
-
-    setLastFetchedAniListCharacters(characters);
-
-    return {
-      animeAnilistIds,
-      animeMalIds,
-      characters,
-    };
-  } catch {
-    return { animeAnilistIds: [], animeMalIds: [], characters: [] };
   }
+
+  // 2. Paginação completa de personagens favoritos
+  let charPage = 1;
+  let hasMoreChar = true;
+  while (hasMoreChar) {
+    try {
+      const res = await fetchAniListWithRetry(
+        FAVORITES_CHARACTERS_PAGE_QUERY,
+        { name: cleanUsername, page: charPage },
+        options?.signal
+      );
+      if (!res.ok) break;
+
+      const json = await res.json();
+      const charFav = json?.data?.User?.favourites?.characters;
+      const nodes = Array.isArray(charFav?.nodes) ? charFav.nodes : [];
+
+      for (const node of nodes) {
+        characters.push(mapAniListCharacter(node));
+      }
+
+      hasMoreChar = Boolean(charFav?.pageInfo?.hasNextPage);
+      charPage++;
+    } catch {
+      break;
+    }
+  }
+
+  setLastFetchedAniListCharacters(characters);
+
+  return {
+    animeAnilistIds,
+    animeMalIds,
+    characters,
+  };
+}
+
+export interface AniListChunkResult {
+  entries: AniListAnimeEntry[];
+  hasNextChunk: boolean;
+  chunkIndex: number;
+}
+
+interface RawMediaListEntry {
+  id: number;
+  mediaId: number;
+  status: string;
+  score?: number;
+  progress?: number;
+  repeat?: number;
+  media: {
+    id: number;
+    idMal?: number | null;
+    title: {
+      userPreferred?: string;
+      romaji?: string;
+      english?: string;
+      native?: string;
+    };
+    coverImage?: {
+      extraLarge?: string;
+      large?: string;
+      medium?: string;
+    };
+    episodes?: number | null;
+    duration?: number | null;
+    startDate?: {
+      year?: number | null;
+    };
+    seasonYear?: number | null;
+    genres?: string[];
+  };
+}
+
+interface RawListCollection {
+  hasNextChunk: boolean;
+  lists?: {
+    name: string;
+    isCustomList: boolean;
+    status?: string;
+    entries?: RawMediaListEntry[];
+  }[];
+}
+
+function parseRawMediaListEntries(
+  entries: RawMediaListEntry[],
+  favAnilistIds: Set<number>,
+  favMalIds: Set<number>
+): AniListAnimeEntry[] {
+  const result: AniListAnimeEntry[] = [];
+  const seenMediaIds = new Set<number>();
+
+  for (const entry of entries) {
+    if (!entry || !entry.media || !entry.media.id || seenMediaIds.has(entry.media.id)) {
+      continue;
+    }
+    seenMediaIds.add(entry.media.id);
+
+    const media = entry.media;
+    const title =
+      media.title.userPreferred ||
+      media.title.romaji ||
+      media.title.english ||
+      'Anime sem título';
+
+    const titleRomaji = media.title.romaji || undefined;
+    const posterUrl =
+      media.coverImage?.large ||
+      media.coverImage?.extraLarge ||
+      media.coverImage?.medium ||
+      '';
+
+    const status = mapAniListStatus(entry.status);
+    const currentEpisode = typeof entry.progress === 'number' ? Math.max(0, entry.progress) : 0;
+    const totalEpisodes =
+      typeof media.episodes === 'number' && media.episodes > 0 ? media.episodes : 0;
+    const rating = normalizeAniListScore(entry.score);
+    const year =
+      media.startDate?.year ||
+      media.seasonYear ||
+      new Date().getFullYear();
+    const genres = Array.isArray(media.genres) ? media.genres : [];
+    const duration =
+      typeof media.duration === 'number' && media.duration > 0 ? media.duration : undefined;
+    const rewatchCount =
+      typeof entry.repeat === 'number' && entry.repeat > 0
+        ? entry.repeat
+        : entry.status === 'REPEATING'
+        ? 1
+        : undefined;
+
+    const isFav = favAnilistIds.has(media.id) || (media.idMal ? favMalIds.has(media.idMal) : false);
+
+    result.push({
+      anilistId: media.id,
+      malId: media.idMal || undefined,
+      title,
+      titleRomaji,
+      posterUrl,
+      status,
+      currentEpisode,
+      totalEpisodes,
+      rating,
+      year,
+      genres,
+      episodeDurationMinutes: duration,
+      rewatchCount,
+      isFavorite: isFav,
+    });
+  }
+
+  return result;
 }
 
 /**
- * Consulta a lista completa de animes do usuário no AniList com suporte a paginação por chunks.
+ * Consulta um único chunk de animes do AniList (500 itens por chunk) para processamento em lotes incrementais.
  */
-export async function fetchAniListAnimeList(username: string): Promise<AniListAnimeEntry[]> {
+export async function fetchAniListAnimeChunk(
+  username: string,
+  chunk: number,
+  options?: {
+    signal?: AbortSignal;
+    favAnilistIds?: Set<number>;
+    favMalIds?: Set<number>;
+  }
+): Promise<AniListChunkResult> {
   const cleanUsername = username.trim();
   if (!cleanUsername) {
     throw new Error('Informe o nome de usuário do AniList.');
   }
 
-  interface RawMediaListEntry {
-    id: number;
-    mediaId: number;
-    status: string;
-    score?: number;
-    progress?: number;
-    repeat?: number;
-    media: {
-      id: number;
-      idMal?: number | null;
-      title: {
-        userPreferred?: string;
-        romaji?: string;
-        english?: string;
-        native?: string;
-      };
-      coverImage?: {
-        extraLarge?: string;
-        large?: string;
-        medium?: string;
-      };
-      episodes?: number | null;
-      duration?: number | null;
-      startDate?: {
-        year?: number | null;
-      };
-      seasonYear?: number | null;
-      genres?: string[];
-    };
+  const res = await fetchAniListWithRetry(
+    COLLECTION_CHUNK_QUERY,
+    { userName: cleanUsername, chunk },
+    options?.signal
+  );
+
+  if (res.status === 429) {
+    throw new Error(
+      'Limite de requisições excedido no AniList. Aguarde alguns instantes e tente novamente.'
+    );
   }
 
-  interface RawListCollection {
-    hasNextChunk: boolean;
-    lists?: {
-      name: string;
-      isCustomList: boolean;
-      status?: string;
-      entries?: RawMediaListEntry[];
-    }[];
+  const json = await res.json();
+  if (json.errors && Array.isArray(json.errors) && json.errors.length > 0) {
+    const msg = json.errors[0]?.message || '';
+    if (msg.toLowerCase().includes('private')) {
+      throw new Error(
+        'A lista de animes deste perfil no AniList está configurada como privada. Torne-a pública para importar.'
+      );
+    }
+    if (msg.toLowerCase().includes('not found')) {
+      throw new Error(`Usuário "${cleanUsername}" não encontrado no AniList.`);
+    }
+    throw new Error(`Erro retornado pelo AniList: ${msg}`);
+  }
+
+  const collection = json?.data?.MediaListCollection as RawListCollection | undefined;
+  if (!collection) {
+    return { entries: [], hasNextChunk: false, chunkIndex: chunk };
+  }
+
+  const rawEntries: RawMediaListEntry[] = [];
+  if (Array.isArray(collection.lists)) {
+    for (const list of collection.lists) {
+      if (Array.isArray(list.entries)) {
+        rawEntries.push(...list.entries);
+      }
+    }
+  }
+
+  const favAnilistIds = options?.favAnilistIds ?? new Set<number>();
+  const favMalIds = options?.favMalIds ?? new Set<number>();
+
+  const mapped = parseRawMediaListEntries(rawEntries, favAnilistIds, favMalIds);
+  return {
+    entries: mapped,
+    hasNextChunk: Boolean(collection.hasNextChunk),
+    chunkIndex: chunk,
+  };
+}
+
+/**
+ * Consulta a lista completa de animes do usuário no AniList com suporte a paginação contínua por chunks
+ * até a confirmação explícita de fim (hasNextChunk === false), SEM limite artificial de 5.000 animes.
+ */
+export async function fetchAniListAnimeList(
+  username: string,
+  options?: { signal?: AbortSignal }
+): Promise<AniListAnimeEntry[]> {
+  const cleanUsername = username.trim();
+  if (!cleanUsername) {
+    throw new Error('Informe o nome de usuário do AniList.');
   }
 
   const entriesMap = new Map<number, RawMediaListEntry>();
   let currentChunk = 1;
   let hasMore = true;
-  const maxChunks = 10; // Até 5.000 entradas (segurança contra loops)
 
   // Consulta favoritos da conta para atribuir isFavorite e obter personagens favoritos
   const favAnilistIds = new Set<number>();
   const favMalIds = new Set<number>();
   try {
-    const favResult = await fetchAniListFavorites(cleanUsername);
+    const favResult = await fetchAniListFavorites(cleanUsername, options);
     for (const id of favResult.animeAnilistIds) favAnilistIds.add(id);
     for (const id of favResult.animeMalIds) favMalIds.add(id);
   } catch {
-    // Falha silenciosa em favoritos não impede carregamento da lista
+    // Falha em favoritos não impede carregamento da lista
   }
 
-  while (hasMore && currentChunk <= maxChunks) {
+  // Paginação completa por chunks: continua até hasNextChunk === false
+  while (hasMore) {
     let res: Response;
     try {
-      res = await fetch(ANILIST_GRAPHQL_ENDPOINT, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
-        body: JSON.stringify({
-          query: COLLECTION_CHUNK_QUERY,
-          variables: { userName: cleanUsername, chunk: currentChunk },
-        }),
-      });
+      res = await fetchAniListWithRetry(
+        COLLECTION_CHUNK_QUERY,
+        { userName: cleanUsername, chunk: currentChunk },
+        options?.signal
+      );
     } catch {
       throw new Error(
         'Falha de rede ao consultar a lista de animes no AniList. Verifique sua conexão.'
@@ -514,7 +751,6 @@ export async function fetchAniListAnimeList(username: string): Promise<AniListAn
         if (Array.isArray(list.entries)) {
           for (const entry of list.entries) {
             if (entry && entry.media && entry.media.id) {
-              // Previne duplicatas que existam em listas personalizadas diferentes do mesmo usuário
               if (!entriesMap.has(entry.media.id)) {
                 entriesMap.set(entry.media.id, entry);
               }
@@ -528,72 +764,7 @@ export async function fetchAniListAnimeList(username: string): Promise<AniListAn
     currentChunk++;
   }
 
-  // Converte as entradas brutas para o modelo padronizado
-  const result: AniListAnimeEntry[] = [];
-
-  for (const entry of entriesMap.values()) {
-    const media = entry.media;
-    const title =
-      media.title.userPreferred ||
-      media.title.romaji ||
-      media.title.english ||
-      'Anime sem título';
-
-    const titleRomaji = media.title.romaji || undefined;
-
-    const posterUrl =
-      media.coverImage?.large ||
-      media.coverImage?.extraLarge ||
-      media.coverImage?.medium ||
-      '';
-
-    const status = mapAniListStatus(entry.status);
-
-    const currentEpisode = typeof entry.progress === 'number' ? Math.max(0, entry.progress) : 0;
-    const totalEpisodes =
-      typeof media.episodes === 'number' && media.episodes > 0 ? media.episodes : 0;
-
-    // Normalização de nota: AniList POINT_10_DECIMAL retorna 0 a 10 (0 = sem nota)
-    const rating = normalizeAniListScore(entry.score);
-
-    const year =
-      media.startDate?.year ||
-      media.seasonYear ||
-      new Date().getFullYear();
-
-    const genres = Array.isArray(media.genres) ? media.genres : [];
-
-    const duration =
-      typeof media.duration === 'number' && media.duration > 0 ? media.duration : undefined;
-
-    const rewatchCount =
-      typeof entry.repeat === 'number' && entry.repeat > 0
-        ? entry.repeat
-        : entry.status === 'REPEATING'
-        ? 1
-        : undefined;
-
-    const isFav = favAnilistIds.has(media.id) || (media.idMal ? favMalIds.has(media.idMal) : false);
-
-    result.push({
-      anilistId: media.id,
-      malId: media.idMal || undefined,
-      title,
-      titleRomaji,
-      posterUrl,
-      status,
-      currentEpisode,
-      totalEpisodes,
-      rating,
-      year,
-      genres,
-      episodeDurationMinutes: duration,
-      rewatchCount,
-      isFavorite: isFav,
-    });
-  }
-
-  return result;
+  return parseRawMediaListEntries(Array.from(entriesMap.values()), favAnilistIds, favMalIds);
 }
 
 /**
@@ -869,15 +1040,27 @@ export function calculateAniListImportPreview(
  * - Atualiza status e progresso de correspondências apenas se solicitado (updateExistingProgress).
  * - Utiliza índice Map para desempenho O(N + M).
  */
+export interface AniListMergeReport {
+  mergedList: AnimeItem[];
+  addedCount: number;
+  updatedCount: number;
+  unchangedCount: number;
+  preservedFieldsCount: number;
+}
+
+/**
+ * Mescla as entradas do AniList com a lista existente de forma segura:
+ * - Não cria duplicatas.
+ * - Preserva campos locais (isFavorite manual mantido, posters personalizados, IDs locais, animes manuais).
+ * - Sincroniza animes favoritados na conta AniList sem nunca desmarcar favoritos locais.
+ * - Atualiza status e progresso de correspondências apenas se solicitado (updateExistingProgress).
+ * - Utiliza índice Map para desempenho O(N + M).
+ */
 export function mergeAniListImport(
   incomingEntries: AniListAnimeEntry[],
   currentList: AnimeItem[],
   updateExistingProgress: boolean = true
-): {
-  mergedList: AnimeItem[];
-  addedCount: number;
-  updatedCount: number;
-} {
+): AniListMergeReport {
   // Mapa de trabalho iniciando com os animes já existentes para preservar a ordem e dados manuais
   const resultMap = new Map<string, AnimeItem>();
   for (const item of currentList) {
@@ -889,6 +1072,8 @@ export function mergeAniListImport(
 
   let addedCount = 0;
   let updatedCount = 0;
+  let unchangedCount = 0;
+  let preservedFieldsCount = 0;
 
   for (const incoming of incomingEntries) {
     const matched = findMatchingAnimeInIndex(incoming, existingIndex, 'anilist_first');
@@ -914,11 +1099,17 @@ export function mergeAniListImport(
         updatedItem.isFavorite = wasFavorite;
       }
 
+      if (wasFavorite) {
+        preservedFieldsCount++;
+      }
+
       // Substituição de capas genéricas do Unsplash ou ausentes por capa oficial válida recebida
       // Preserva capas oficiais existentes e imagens personalizadas pelo usuário
       if (isGenericOrMissingPoster(currentEntry.posterUrl) && isValidPosterUrl(incoming.posterUrl)) {
         updatedItem.posterUrl = incoming.posterUrl;
         changed = true;
+      } else if (!isGenericOrMissingPoster(currentEntry.posterUrl)) {
+        preservedFieldsCount++;
       }
 
       if (updateExistingProgress) {
@@ -947,10 +1138,14 @@ export function mergeAniListImport(
         if (incoming.episodeDurationMinutes && !currentEntry.episodeDurationMinutes) {
           updatedItem.episodeDurationMinutes = incoming.episodeDurationMinutes;
         }
+      } else {
+        preservedFieldsCount += 3;
       }
 
       if (changed) {
         updatedCount++;
+      } else {
+        unchangedCount++;
       }
 
       resultMap.set(matched.id, updatedItem);
@@ -1017,5 +1212,7 @@ export function mergeAniListImport(
     mergedList: Array.from(resultMap.values()),
     addedCount,
     updatedCount,
+    unchangedCount,
+    preservedFieldsCount,
   };
 }

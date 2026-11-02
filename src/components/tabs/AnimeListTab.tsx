@@ -79,23 +79,39 @@ export function getNormalizedAnimeSearchText(anime: AnimeItem): string {
 }
 
 import { computeAnimeStatusCounts } from '../../utils/animeStats';
-export { computeAnimeStatusCounts };
+import { computeVirtualGridWindow } from '../../utils/listVirtualizer';
+export { computeAnimeStatusCounts, computeVirtualGridWindow };
+
+export type AnimeSortOption = 'recent' | 'rating_desc' | 'rating_asc' | 'title_asc' | 'progress_desc';
 
 // Persistent cache across tab switches isolated per profileId
-interface PersistentAnimeTabState {
+export interface PersistentAnimeTabState {
   activeFilter: AnimeStatus;
   searchQuery: string;
+  sortBy: AnimeSortOption;
+  selectedGenre: string;
+  scrollYByFilter: Record<AnimeStatus, number>;
   scrollY: number;
 }
 
 const persistentAnimeTabStateByProfile = new Map<string, PersistentAnimeTabState>();
 
-function getPersistentAnimeTabState(profileKey: string): PersistentAnimeTabState {
+export function getPersistentAnimeTabState(profileKey: string): PersistentAnimeTabState {
   let state = persistentAnimeTabStateByProfile.get(profileKey);
   if (!state) {
     state = {
       activeFilter: 'all',
       searchQuery: '',
+      sortBy: 'recent',
+      selectedGenre: 'all',
+      scrollYByFilter: {
+        all: 0,
+        watching: 0,
+        completed: 0,
+        planned: 0,
+        on_hold: 0,
+        dropped: 0,
+      },
       scrollY: 0,
     };
     persistentAnimeTabStateByProfile.set(profileKey, state);
@@ -299,6 +315,12 @@ const AnimeCard = React.memo<AnimeCardProps>(({
       </div>
     </div>
   );
+}, (prev, next) => {
+  return (
+    prev.anime === next.anime &&
+    prev.isOwnProfile === next.isOwnProfile &&
+    prev.failedPoster === next.failedPoster
+  );
 });
 
 export const AnimeListTab: React.FC<AnimeListTabProps> = React.memo(({
@@ -326,17 +348,35 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = React.memo(({
     return selectedStatusFilter ?? persistentTabState.activeFilter;
   });
   const [searchQuery, setSearchQuery] = useState(() => persistentTabState.searchQuery);
+  const [debouncedQuery, setDebouncedQuery] = useState(() => persistentTabState.searchQuery);
+  const [sortBy, setSortBy] = useState<AnimeSortOption>(() => persistentTabState.sortBy);
+  const [selectedGenre, setSelectedGenre] = useState<string>(() => persistentTabState.selectedGenre);
   const [detailAnimeId, setDetailAnimeId] = useState<string | null>(selectedAnimeId ?? null);
   const [failedPosterIds, setFailedPosterIds] = useState<Record<string, boolean>>({});
 
   // Dedicated Anime Edit Modal state
   const [editingAnime, setEditingAnime] = useState<AnimeItem | null>(null);
 
+  // Debounce search query changes to prevent heavy re-filtering of 10,000+ items on every keystroke
+  useEffect(() => {
+    if (!searchQuery.trim()) {
+      setDebouncedQuery('');
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setDebouncedQuery(searchQuery);
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [searchQuery]);
+
   if (prevProfileKey !== profileKey) {
     const nextState = getPersistentAnimeTabState(profileKey);
     setPrevProfileKey(profileKey);
     setActiveFilter(selectedStatusFilter ?? nextState.activeFilter);
     setSearchQuery(nextState.searchQuery);
+    setDebouncedQuery(nextState.searchQuery);
+    setSortBy(nextState.sortBy);
+    setSelectedGenre(nextState.selectedGenre);
     setDetailAnimeId(selectedAnimeId ?? null);
     setEditingAnime(null);
   }
@@ -365,6 +405,7 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = React.memo(({
     if (selectedStatusFilter) {
       setActiveFilter(selectedStatusFilter);
       setSearchQuery('');
+      setDebouncedQuery('');
       setDetailAnimeId(null);
       persistentTabState.scrollY = 0;
     }
@@ -381,9 +422,11 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = React.memo(({
   useEffect(() => {
     persistentTabState.activeFilter = activeFilter;
     persistentTabState.searchQuery = searchQuery;
-  }, [activeFilter, searchQuery, persistentTabState]);
+    persistentTabState.sortBy = sortBy;
+    persistentTabState.selectedGenre = selectedGenre;
+  }, [activeFilter, searchQuery, sortBy, selectedGenre, persistentTabState]);
 
-  // Restore scroll position when returning to this tab
+  // Restore scroll position when returning to this tab or when filter changes
   useEffect(() => {
     if (persistentTabState.scrollY > 0 && !selectedStatusFilter) {
       const targetY = persistentTabState.scrollY;
@@ -406,6 +449,20 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = React.memo(({
     return result;
   }, [animes]);
 
+  // Extrai lista única de gêneros disponíveis
+  const availableGenres = useMemo(() => {
+    const set = new Set<string>();
+    for (let i = 0; i < uniqueAnimes.length; i++) {
+      const gList = uniqueAnimes[i].genres;
+      if (Array.isArray(gList)) {
+        for (let j = 0; j < gList.length; j++) {
+          if (gList[j]) set.add(gList[j]);
+        }
+      }
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [uniqueAnimes]);
+
   const detailAnime = useMemo(
     () => (detailAnimeId ? uniqueAnimes.find((a) => a.id === detailAnimeId) ?? null : null),
     [detailAnimeId, uniqueAnimes]
@@ -416,23 +473,73 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = React.memo(({
     [statusCountsProp, uniqueAnimes]
   );
 
+  // Manipulador de troca de categoria com preservação individual de scroll
+  const handleSelectCategory = useCallback(
+    (newCategory: AnimeStatus) => {
+      // 1. Salva o scroll atual da categoria ativa
+      const currentY = window.scrollY || window.pageYOffset || 0;
+      persistentTabState.scrollYByFilter[activeFilter] = currentY;
+
+      // 2. Altera a categoria
+      setActiveFilter(newCategory);
+      if (onSelectCategory) {
+        onSelectCategory(newCategory);
+      }
+
+      // 3. Restaura a rolagem memorizada da nova categoria selecionada
+      const savedY = persistentTabState.scrollYByFilter[newCategory] || 0;
+      persistentTabState.scrollY = savedY;
+      window.setTimeout(() => {
+        window.scrollTo({ top: savedY, behavior: 'instant' as ScrollBehavior });
+      }, 15);
+    },
+    [activeFilter, onSelectCategory, persistentTabState]
+  );
+
   const filteredAnimes = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-    if (activeFilter === 'all' && !query) {
-      return uniqueAnimes;
-    }
-    const result: AnimeItem[] = [];
+    const query = debouncedQuery.trim().toLowerCase();
+    const isAllFilter = activeFilter === 'all';
+    const isAllGenre = selectedGenre === 'all';
+
+    let result: AnimeItem[] = [];
+
     for (let i = 0; i < uniqueAnimes.length; i++) {
       const anime = uniqueAnimes[i];
-      if (activeFilter !== 'all' && anime.status !== activeFilter) {
+      if (!isAllFilter && anime.status !== activeFilter) {
         continue;
       }
-      if (!query || getNormalizedAnimeSearchText(anime).includes(query)) {
-        result.push(anime);
+      if (!isAllGenre && (!Array.isArray(anime.genres) || !anime.genres.includes(selectedGenre))) {
+        continue;
       }
+      if (query && !getNormalizedAnimeSearchText(anime).includes(query)) {
+        continue;
+      }
+      result.push(anime);
     }
+
+    // Ordenação sob demanda sem mutação
+    if (sortBy !== 'recent') {
+      result = result.slice().sort((a, b) => {
+        switch (sortBy) {
+          case 'rating_desc':
+            return (b.rating || 0) - (a.rating || 0);
+          case 'rating_asc':
+            return (a.rating || 0) - (b.rating || 0);
+          case 'title_asc':
+            return (a.title || '').localeCompare(b.title || '');
+          case 'progress_desc': {
+            const progressA = a.totalEpisodes > 0 ? a.currentEpisode / a.totalEpisodes : 0;
+            const progressB = b.totalEpisodes > 0 ? b.currentEpisode / b.totalEpisodes : 0;
+            return progressB - progressA;
+          }
+          default:
+            return 0;
+        }
+      });
+    }
+
     return result;
-  }, [uniqueAnimes, activeFilter, searchQuery]);
+  }, [uniqueAnimes, activeFilter, selectedGenre, debouncedQuery, sortBy]);
 
   // Virtual window total metrics
   const totalItems = filteredAnimes.length;
@@ -446,6 +553,7 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = React.memo(({
         window.requestAnimationFrame(() => {
           const currentY = window.scrollY || window.pageYOffset || 0;
           persistentTabState.scrollY = currentY;
+          persistentTabState.scrollYByFilter[activeFilter] = currentY;
 
           const rowHeight = measuredRowHeight > 0 ? measuredRowHeight : DEFAULT_ROW_HEIGHT;
           const viewportHeight = typeof window !== 'undefined' && window.innerHeight > 0 ? window.innerHeight : 800;
@@ -476,7 +584,7 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = React.memo(({
       window.removeEventListener('scroll', handleScroll);
       window.removeEventListener('resize', handleResize);
     };
-  }, [totalRows, measuredRowHeight, updateGridOffsetTop, persistentTabState]);
+  }, [totalRows, measuredRowHeight, updateGridOffsetTop, activeFilter, persistentTabState]);
 
   // Post-commit measurement of gridOffsetTop and actual rendered card height (never inside render/useMemo)
   useEffect(() => {
@@ -497,35 +605,37 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = React.memo(({
     measure();
   }, [filteredAnimes.length, updateGridOffsetTop]);
 
-  const { visibleAnimes, topPadding, bottomPadding } = useMemo(() => {
+  const { visibleAnimes, topPadding, bottomPadding, domReductionPercent } = useMemo(() => {
     // If list is small (<= 24 items), render completely without windowing
     if (totalItems <= 24) {
       return {
         visibleAnimes: filteredAnimes,
         topPadding: 0,
         bottomPadding: 0,
+        domReductionPercent: 0,
       };
     }
 
     const rowHeight = measuredRowHeight > 0 ? measuredRowHeight : DEFAULT_ROW_HEIGHT;
     const viewportHeight = typeof window !== 'undefined' && window.innerHeight > 0 ? window.innerHeight : 800;
+    const relativeScroll = Math.max(0, scrollY - gridOffsetTopRef.current);
 
-    // Pure numeric read from ref updated post-commit (zero synchronous getBoundingClientRect reflow during render)
-    const gridOffsetTop = gridOffsetTopRef.current;
-
-    const relativeScroll = Math.max(0, scrollY - gridOffsetTop);
-    const startRow = Math.max(0, Math.floor(relativeScroll / rowHeight) - OVERSCAN_ROWS);
-    const endRow = Math.min(totalRows, Math.ceil((relativeScroll + viewportHeight) / rowHeight) + OVERSCAN_ROWS);
-
-    const startIndex = startRow * COLUMNS;
-    const endIndex = Math.min(totalItems, endRow * COLUMNS);
+    const win = computeVirtualGridWindow({
+      totalItems,
+      columns: COLUMNS,
+      rowHeight,
+      viewportHeight,
+      scrollTop: relativeScroll,
+      overscanRows: OVERSCAN_ROWS,
+    });
 
     return {
-      visibleAnimes: filteredAnimes.slice(startIndex, endIndex),
-      topPadding: startRow * rowHeight,
-      bottomPadding: Math.max(0, (totalRows - endRow) * rowHeight),
+      visibleAnimes: filteredAnimes.slice(win.startIndex, win.endIndex),
+      topPadding: win.topPadding,
+      bottomPadding: win.bottomPadding,
+      domReductionPercent: win.domReductionPercent,
     };
-  }, [filteredAnimes, totalItems, totalRows, measuredRowHeight, scrollY]);
+  }, [filteredAnimes, totalItems, measuredRowHeight, scrollY]);
 
   const handleOpenDetail = useCallback((animeId: string) => {
     setDetailAnimeId(animeId);
@@ -730,10 +840,10 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = React.memo(({
         </div>
       ) : (
         <>
-          {/* Controls: Horizontal Status Filters & Search Box */}
-          <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 border-b border-purple-900/30 pb-3">
+          {/* Controls: Horizontal Status Filters, Search Box, Genre & Sort Dropdowns */}
+          <div className="space-y-3 border-b border-purple-900/30 pb-3">
             {/* Status Categories */}
-            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0 no-scrollbar">
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
               {STATUS_CATEGORIES.map((cat) => {
                 const isActive = activeFilter === cat.id;
                 const count = statusCounts[cat.id];
@@ -742,13 +852,8 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = React.memo(({
                   <button
                     key={cat.id}
                     type="button"
-                    onClick={() => {
-                      setActiveFilter(cat.id);
-                      persistentTabState.scrollY = 0;
-                      if (onSelectCategory) {
-                        onSelectCategory(cat.id);
-                      }
-                    }}
+                    data-testid={`anime-category-tab-${cat.id}`}
+                    onClick={() => handleSelectCategory(cat.id)}
                     className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-xl px-3 py-1.5 text-xs font-medium transition-all cursor-pointer ${
                       isActive
                         ? 'bg-purple-600 text-white shadow-sm shadow-purple-900/50 border border-purple-400/30'
@@ -771,19 +876,64 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = React.memo(({
               })}
             </div>
 
-            {/* Search input inside anime list */}
-            <div className="relative w-full md:w-64">
-              <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-purple-400/60" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => {
-                  setSearchQuery(e.target.value);
-                  persistentTabState.scrollY = 0;
-                }}
-                placeholder="Filtrar por título ou gênero..."
-                className="w-full rounded-xl border border-purple-900/40 bg-[#0A0713] py-1.5 pl-8 pr-3 text-xs text-purple-100 placeholder:text-purple-400/40 focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500/40"
-              />
+            {/* Filter toolbar: Search, Genre, Sort & Counter */}
+            <div className="flex flex-wrap items-center justify-between gap-2.5">
+              <div className="flex flex-1 flex-wrap items-center gap-2 min-w-0">
+                {/* Search input inside anime list */}
+                <div className="relative min-w-[160px] flex-1 sm:max-w-xs">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-purple-400/60" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Filtrar por título..."
+                    className="w-full rounded-xl border border-purple-900/40 bg-[#0A0713] py-1.5 pl-8 pr-3 text-xs text-purple-100 placeholder:text-purple-400/40 focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500/40"
+                  />
+                </div>
+
+                {/* Genre Selector */}
+                {availableGenres.length > 0 && (
+                  <select
+                    data-testid="anime-genre-select"
+                    value={selectedGenre}
+                    onChange={(e) => setSelectedGenre(e.target.value)}
+                    className="rounded-xl border border-purple-900/40 bg-[#0A0713] px-2.5 py-1.5 text-xs text-purple-200 focus:border-purple-500 focus:outline-none cursor-pointer"
+                  >
+                    <option value="all">Todos os Gêneros</option>
+                    {availableGenres.map((g) => (
+                      <option key={g} value={g}>
+                        {g}
+                      </option>
+                    ))}
+                  </select>
+                )}
+
+                {/* Sort Selector */}
+                <select
+                  data-testid="anime-sort-select"
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value as AnimeSortOption)}
+                  className="rounded-xl border border-purple-900/40 bg-[#0A0713] px-2.5 py-1.5 text-xs text-purple-200 focus:border-purple-500 focus:outline-none cursor-pointer"
+                >
+                  <option value="recent">Ordem Padrão</option>
+                  <option value="rating_desc">Maior Nota</option>
+                  <option value="rating_asc">Menor Nota</option>
+                  <option value="title_asc">Título (A-Z)</option>
+                  <option value="progress_desc">Maior Progresso</option>
+                </select>
+              </div>
+
+              {/* Counts indicator with DOM reduction note for audit */}
+              <div className="text-[11px] font-mono text-purple-400/70 shrink-0">
+                <span>
+                  {filteredAnimes.length} de {statusCounts[activeFilter]} animes
+                </span>
+                {domReductionPercent > 0 && (
+                  <span className="hidden sm:inline-block ml-1.5 text-[10px] text-emerald-400/80 font-normal">
+                    (DOM otimizado: {visibleAnimes.length} nós ativos)
+                  </span>
+                )}
+              </div>
             </div>
           </div>
 

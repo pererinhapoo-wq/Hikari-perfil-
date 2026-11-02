@@ -714,22 +714,72 @@ malRouter.get('/animelist', requireFirebaseAuth, async (req: AuthenticatedExpres
       };
     }
 
+    // Helper: Requisição com retry e backoff exponencial com jitter para erros transitórios (429 e 5xx)
+    async function fetchMALWithRetry(url: string, token: string, maxRetries = 3): Promise<Response> {
+      let attempt = 0;
+      while (true) {
+        attempt++;
+        try {
+          const res = await fetch(url, {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+            signal: AbortSignal.timeout(15000),
+          });
+
+          if (res.status === 429) {
+            if (attempt > maxRetries) return res;
+            const retryAfterHeader = res.headers.get('retry-after');
+            let waitMs = 1500 * Math.pow(2, attempt - 1) + Math.random() * 500;
+            if (retryAfterHeader) {
+              const parsedSeconds = parseInt(retryAfterHeader, 10);
+              if (!isNaN(parsedSeconds) && parsedSeconds > 0) {
+                waitMs = Math.min(parsedSeconds * 1000, 10000);
+              }
+            }
+            await new Promise((resolve) => setTimeout(resolve, waitMs));
+            continue;
+          }
+
+          if (res.status >= 500 && res.status <= 504) {
+            if (attempt > maxRetries) return res;
+            const waitMs = 1000 * Math.pow(2, attempt - 1) + Math.random() * 400;
+            await new Promise((resolve) => setTimeout(resolve, waitMs));
+            continue;
+          }
+
+          return res;
+        } catch (fetchErr) {
+          if (attempt > maxRetries) {
+            throw fetchErr;
+          }
+          const waitMs = 1000 * Math.pow(2, attempt - 1) + Math.random() * 400;
+          await new Promise((resolve) => setTimeout(resolve, waitMs));
+        }
+      }
+    }
+
+    const offsetQuery = req.query.offset;
+    const limitQuery = req.query.limit;
+    const isBatchMode = offsetQuery !== undefined && !isNaN(parseInt(String(offsetQuery), 10));
+    const requestedOffset = isBatchMode ? Math.max(0, parseInt(String(offsetQuery), 10)) : 0;
+    const requestedLimit = limitQuery !== undefined && !isNaN(parseInt(String(limitQuery), 10))
+      ? Math.min(1000, Math.max(1, parseInt(String(limitQuery), 10)))
+      : 1000;
+
+    const malFields =
+      'list_status{status,score,num_episodes_watched,is_rewatching,num_times_rewatched},num_episodes,alternative_titles,genres,start_date,media_type,average_episode_duration';
+
     const allEntries: MALEntryRaw[] = [];
-    let nextUrl: string | null =
-      'https://api.myanimelist.net/v2/users/@me/animelist?fields=list_status{status,score,num_episodes_watched,is_rewatching,num_times_rewatched},num_episodes,alternative_titles,genres,start_date,media_type,average_episode_duration&limit=1000&offset=0';
+    let nextUrl: string | null = `https://api.myanimelist.net/v2/users/@me/animelist?fields=${malFields}&limit=${requestedLimit}&offset=${requestedOffset}`;
+    let hasMoreBatches = false;
+    let nextOffsetVal: number | null = null;
 
-    let pageCount = 0;
-    const maxPages = 20; // Com limit=1000, suporta até 20.000 entradas em poucas requisições
-
-    while (nextUrl && pageCount < maxPages) {
+    if (isBatchMode) {
+      // Modo em lote individual: processa uma página e retorna cursor para suporte incremental
       let listRes: Response;
       try {
-        listRes = await fetch(nextUrl, {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-          },
-          signal: AbortSignal.timeout(12000),
-        });
+        listRes = await fetchMALWithRetry(nextUrl, accessToken);
       } catch (fetchErr) {
         return res.status(504).json({
           error: 'MAL_TIMEOUT',
@@ -745,13 +795,7 @@ malRouter.get('/animelist', requireFirebaseAuth, async (req: AuthenticatedExpres
             storageCtx.encryptionKey,
             { clientId, clientSecret }
           );
-
-          listRes = await fetch(nextUrl, {
-            headers: {
-              Authorization: `Bearer ${accessToken}`,
-            },
-            signal: AbortSignal.timeout(12000),
-          });
+          listRes = await fetchMALWithRetry(nextUrl, accessToken);
         } catch {
           return res.status(401).json({
             error: 'MAL_TOKEN_EXPIRED',
@@ -777,7 +821,7 @@ malRouter.get('/animelist', requireFirebaseAuth, async (req: AuthenticatedExpres
       if (!listRes.ok) {
         return res.status(listRes.status).json({
           error: 'MAL_API_ERROR',
-          message: 'Erro ao consultar animes no MyAnimeList.',
+          message: `Erro ao consultar animes no MyAnimeList (HTTP ${listRes.status}).`,
         });
       }
 
@@ -795,17 +839,87 @@ malRouter.get('/animelist', requireFirebaseAuth, async (req: AuthenticatedExpres
         allEntries.push(...listJson.data);
       }
 
-      nextUrl = listJson.paging?.next || null;
-      pageCount++;
-    }
+      hasMoreBatches = Boolean(listJson.paging?.next);
+      if (hasMoreBatches) {
+        nextOffsetVal = requestedOffset + (Array.isArray(listJson.data) ? listJson.data.length : requestedLimit);
+      }
+    } else {
+      // Modo paginação completa: percorre sem limite artificial (sem maxPages = 20) até o fim confirmado
+      let pageCount = 0;
+      const seenOffsets = new Set<string>();
 
-    // Se o limite de páginas for atingido e ainda existirem mais entradas pendentes,
-    // não retorna sucesso incompleto mascarando falha de paginação.
-    if (nextUrl) {
-      return res.status(500).json({
-        error: 'MAL_LIST_TOO_LARGE',
-        message: 'A lista de animes no MyAnimeList excede o limite máximo suportado para importação em uma única operação.',
-      });
+      while (nextUrl) {
+        if (seenOffsets.has(nextUrl)) {
+          // Prevenção contra loops circulares da API externa
+          break;
+        }
+        seenOffsets.add(nextUrl);
+
+        let listRes: Response;
+        try {
+          listRes = await fetchMALWithRetry(nextUrl, accessToken);
+        } catch (fetchErr) {
+          return res.status(504).json({
+            error: 'MAL_TIMEOUT',
+            message: `Tempo limite esgotado na página ${pageCount + 1} do MyAnimeList: ${fetchErr instanceof Error ? fetchErr.message : 'timeout'}`,
+          });
+        }
+
+        if (listRes.status === 401) {
+          try {
+            accessToken = await refreshUserMALTokens(
+              storageCtx.db,
+              uid,
+              storageCtx.encryptionKey,
+              { clientId, clientSecret }
+            );
+            listRes = await fetchMALWithRetry(nextUrl, accessToken);
+          } catch {
+            return res.status(401).json({
+              error: 'MAL_TOKEN_EXPIRED',
+              message: 'O token de acesso do MyAnimeList expirou e a renovação falhou. Conecte sua conta novamente.',
+            });
+          }
+        }
+
+        if (listRes.status === 401) {
+          return res.status(401).json({
+            error: 'MAL_TOKEN_EXPIRED',
+            message: 'O token de acesso do MyAnimeList expirou. Conecte sua conta novamente.',
+          });
+        }
+
+        if (listRes.status === 429) {
+          return res.status(429).json({
+            error: 'MAL_RATE_LIMIT',
+            message: 'Limite de requisições atingido no MyAnimeList. Tente novamente em alguns segundos.',
+          });
+        }
+
+        if (!listRes.ok) {
+          return res.status(listRes.status).json({
+            error: 'MAL_API_ERROR',
+            message: `Erro retornado pelo MyAnimeList na página ${pageCount + 1}.`,
+          });
+        }
+
+        let listJson: MALListResponse;
+        try {
+          listJson = await listRes.json();
+        } catch {
+          return res.status(502).json({
+            error: 'MAL_API_ERROR',
+            message: 'Resposta em formato inválido retornada pelo MyAnimeList.',
+          });
+        }
+
+        if (Array.isArray(listJson.data)) {
+          allEntries.push(...listJson.data);
+        }
+
+        nextUrl = listJson.paging?.next || null;
+        pageCount++;
+      }
     }
 
     const mappedEntries = allEntries.map((item) => {
@@ -867,6 +981,8 @@ malRouter.get('/animelist', requireFirebaseAuth, async (req: AuthenticatedExpres
     res.json({
       entries: mappedEntries,
       totalCount: mappedEntries.length,
+      hasMore: isBatchMode ? hasMoreBatches : false,
+      nextOffset: isBatchMode ? nextOffsetVal : null,
     });
   } catch (err) {
     res.status(500).json({

@@ -89,7 +89,7 @@ export const ShareAnimePickerPopover: React.FC<ShareAnimePickerPopoverProps> = (
       </div>
 
       <div className="mt-2.5 max-h-56 overflow-y-auto pr-1 space-y-1.5">
-        {filtered.map((anime) => (
+        {filtered.slice(0, 40).map((anime) => (
           <button
             key={anime.id}
             type="button"
@@ -121,6 +121,12 @@ export const ShareAnimePickerPopover: React.FC<ShareAnimePickerPopoverProps> = (
             </div>
           </button>
         ))}
+
+        {filtered.length > 40 && (
+          <div className="py-2 text-center text-[10px] text-purple-400/70 border-t border-purple-900/30">
+            Mostrando 40 de {filtered.length} animes correspondentes. Refine a pesquisa para filtrar mais.
+          </div>
+        )}
 
         {filtered.length === 0 && (
           <div className="py-6 text-center text-xs text-purple-400/60">
