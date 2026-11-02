@@ -29,6 +29,7 @@ import {
   type FirebaseConfigStatus,
 } from '../lib/firebase';
 import { extractConflictEmailFromAuthError } from '../utils/authErrors';
+import { AUTHORIZED_ADMIN_UID } from '../types';
 
 export type AuthSessionStatus =
   | 'loading'
@@ -48,6 +49,7 @@ export interface AuthContextValue {
   userRevision: number;
   isLoading: boolean;
   isAuthenticated: boolean;
+  isAdmin: boolean;
   configStatus: FirebaseConfigStatus;
   signInWithEmail: (email: string, password: string) => Promise<User>;
   signUpWithEmail: (params: SignUpParams) => Promise<User>;
@@ -226,6 +228,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({
       userRevision,
       isLoading: status === 'loading',
       isAuthenticated: status === 'authenticated' && user !== null,
+      isAdmin: Boolean(status === 'authenticated' && user && user.uid === AUTHORIZED_ADMIN_UID),
       configStatus: effectiveConfig,
       signInWithEmail,
       signUpWithEmail,

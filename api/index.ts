@@ -1,6 +1,7 @@
 import express from 'express';
 import { malRouter } from '../src/server/malRoutes.js';
 import { chatRouter } from '../src/server/chatRoutes.js';
+import { adminRouter } from '../src/server/adminRoutes.js';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -13,6 +14,10 @@ app.use('/mal', malRouter);
 // Rotas de chat privado (/api/chat e /chat)
 app.use('/api/chat', chatRouter);
 app.use('/chat', chatRouter);
+
+// Rotas administrativas seguras do Hikari (/api/admin e /admin)
+app.use('/api/admin', adminRouter);
+app.use('/admin', adminRouter);
 
 // Endpoint de diagnóstico e integridade
 app.get(['/api', '/api/health'], (_req, res) => {

@@ -58,6 +58,17 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "conversationId", "senderId", "senderName", "senderAvatarUrl", "recipientId", "text", "type", "isRead", "createdAt"]
+    },
+    "AdminConfig": {
+      "title": "AdminConfig",
+      "description": "Configurações e auditorias do sistema exclusivas da conta proprietária",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerUid", "updatedAt"]
     }
   },
   "firestore": {
@@ -72,6 +83,10 @@
     "/conversations/{convId}/messages/{msgId}": {
       "schema": { "$ref": "#/entities/Message" },
       "description": "Mensagens individuais de uma conversa"
+    },
+    "/admin/{docId}": {
+      "schema": { "$ref": "#/entities/AdminConfig" },
+      "description": "Documentos e configurações administrativas protegidas"
     }
   }
 }

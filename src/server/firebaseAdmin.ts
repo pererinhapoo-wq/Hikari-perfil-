@@ -7,6 +7,7 @@ import {
   type ServiceAccount,
 } from 'firebase-admin/app';
 import { getFirestore, type Firestore } from 'firebase-admin/firestore';
+import { getAuth, type Auth } from 'firebase-admin/auth';
 
 let adminApp: App | null = null;
 let initializationError: string | null = null;
@@ -87,6 +88,15 @@ export function getFirebaseAdminApp(): App {
 export function getAdminFirestore(): Firestore {
   const app = getFirebaseAdminApp();
   return getFirestore(app);
+}
+
+/**
+ * Retorna a instância administrativa do Firebase Auth do Firebase Admin SDK.
+ * Lança erro claro se as credenciais administrativas não estiverem configuradas.
+ */
+export function getAdminAuth(): Auth {
+  const app = getFirebaseAdminApp();
+  return getAuth(app);
 }
 
 /**

@@ -22,6 +22,11 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
+    // Identificação exclusiva da conta administradora proprietária (Zero-Trust)
+    function isSystemAdmin() {
+      return isSignedIn() && request.auth.uid == 'TLJx2QuEv4QQYoduGqn0LDJxxRW2';
+    }
+
     function isValidId(id) {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
@@ -601,6 +606,15 @@ service cloud.firestore {
 
         allow delete: if false;
       }
+    }
+
+    // 9. Documentos e coleções exclusivas de administração do sistema (apenas a conta proprietária autorizada)
+    match /system/{docId} {
+      allow read, write: if isSystemAdmin() && isValidId(docId);
+    }
+
+    match /admin/{docId} {
+      allow read, write: if isSystemAdmin() && isValidId(docId);
     }
   }
 }

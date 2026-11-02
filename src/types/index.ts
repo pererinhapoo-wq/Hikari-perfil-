@@ -217,3 +217,14 @@ export interface PrivateConversation {
   createdAt: number;
   updatedAt: number;
 }
+
+/**
+ * Identificador imutável da conta administradora proprietária do Hikari Perfil
+ */
+export const AUTHORIZED_ADMIN_UID = 'TLJx2QuEv4QQYoduGqn0LDJxxRW2' as const;
+
+export interface AdminStatusResponse {
+  isAdmin: boolean;
+  authenticated: boolean;
+  role?: 'owner' | 'user';
+}
