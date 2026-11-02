@@ -2,14 +2,12 @@ import {
   collection,
   doc,
   query,
-  where,
   orderBy,
   limit as firestoreLimit,
   onSnapshot,
   setDoc,
   updateDoc,
   serverTimestamp,
-  getDocs,
 } from 'firebase/firestore';
 import { db, auth } from '../lib/firebase';
 import type {
@@ -18,7 +16,6 @@ import type {
   MessageType,
   HikariLinkPreview,
   ParticipantSummary,
-  DirectMessagesPrivacy,
 } from '../types';
 import {
   getDeterministicConversationId,
@@ -26,7 +23,7 @@ import {
   validateMediaPayload,
   canUserMessageRecipient,
   type UserCheckContext,
-} from '../server/chatStore';
+} from '../utils/chatValidation';
 
 export { getDeterministicConversationId, extractHikariLinkPreview, canUserMessageRecipient };
 export type { UserCheckContext };
@@ -91,23 +88,39 @@ export async function syncUserPrivacyContext(context: UserCheckContext): Promise
   }
 }
 
+const inFlightConversationsByUser = new Map<string, Promise<PrivateConversation[]>>();
+
 /**
- * Consulta conversas do usuário atual
+ * Consulta conversas do usuário atual (com deduplicação de requisições concorrentes)
  */
 export async function fetchUserConversations(userId: string): Promise<PrivateConversation[]> {
-  try {
-    const res = await fetch(`/api/chat/conversations?userId=${encodeURIComponent(userId)}`);
-    if (res.ok) {
-      const data = await res.json();
-      if (Array.isArray(data.conversations)) {
-        writeCachedConversations(data.conversations);
-        return data.conversations;
-      }
-    }
-  } catch {
-    // Fallback para cache local
+  const existingRequest = inFlightConversationsByUser.get(userId);
+  if (existingRequest) {
+    return existingRequest;
   }
-  return readCachedConversations().filter((c) => c.participants.includes(userId));
+
+  const request = (async (): Promise<PrivateConversation[]> => {
+    try {
+      const res = await fetch(`/api/chat/conversations?userId=${encodeURIComponent(userId)}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.conversations)) {
+          writeCachedConversations(data.conversations);
+          return data.conversations;
+        }
+      }
+    } catch {
+      // Fallback para cache local
+    }
+    return readCachedConversations().filter((c) => c.participants.includes(userId));
+  })();
+
+  inFlightConversationsByUser.set(userId, request);
+  try {
+    return await request;
+  } finally {
+    inFlightConversationsByUser.delete(userId);
+  }
 }
 
 /**
@@ -583,33 +596,77 @@ export function subscribeToConversation(
   };
 }
 
+interface SharedConversationsPoller {
+  listeners: Set<(conversations: PrivateConversation[]) => void>;
+  intervalId: number | null;
+  lastEmitted: PrivateConversation[] | null;
+  lastFetchedAt: number;
+}
+
+const activeConversationPollers = new Map<string, SharedConversationsPoller>();
+
 /**
- * Assina atualizações da lista de conversas
+ * Assina atualizações da lista de conversas compartilhando um único poller por userId
+ * para evitar requisições duplicadas ao abrir e fechar o PrivateChatModal.
  */
 export function subscribeToConversationsList(
   userId: string,
   onUpdate: (conversations: PrivateConversation[]) => void
 ): () => void {
-  let isSubscribed = true;
+  let poller = activeConversationPollers.get(userId);
 
-  const pollList = async () => {
-    if (!isSubscribed) return;
+  if (!poller) {
+    const cached = readCachedConversations().filter((c) => c.participants.includes(userId));
+    poller = {
+      listeners: new Set(),
+      intervalId: null,
+      lastEmitted: cached.length > 0 ? cached : null,
+      lastFetchedAt: 0,
+    };
+    activeConversationPollers.set(userId, poller);
+  }
+
+  poller.listeners.add(onUpdate);
+
+  // Emite imediatamente o snapshot em memória se já houver dados carregados
+  if (poller.lastEmitted) {
+    onUpdate(poller.lastEmitted);
+  }
+
+  const runPoll = async () => {
+    const currentPoller = activeConversationPollers.get(userId);
+    if (!currentPoller || currentPoller.listeners.size === 0) return;
     try {
       const convs = await fetchUserConversations(userId);
-      if (isSubscribed) {
-        onUpdate(convs);
+      const activePoller = activeConversationPollers.get(userId);
+      if (!activePoller || activePoller.listeners.size === 0) return;
+      activePoller.lastEmitted = convs;
+      activePoller.lastFetchedAt = Date.now();
+      for (const listener of activePoller.listeners) {
+        listener(convs);
       }
     } catch {
-      // Ignora erro
+      // Ignora erro transitório
     }
   };
 
-  pollList();
-  const intervalId = window.setInterval(pollList, 4000);
+  if (poller.intervalId === null) {
+    void runPoll();
+    poller.intervalId = window.setInterval(runPoll, 4000);
+  } else if (Date.now() - poller.lastFetchedAt > 1500) {
+    void runPoll();
+  }
 
   return () => {
-    isSubscribed = false;
-    window.clearInterval(intervalId);
+    const currentPoller = activeConversationPollers.get(userId);
+    if (!currentPoller) return;
+    currentPoller.listeners.delete(onUpdate);
+    if (currentPoller.listeners.size === 0) {
+      if (currentPoller.intervalId !== null) {
+        window.clearInterval(currentPoller.intervalId);
+      }
+      activeConversationPollers.delete(userId);
+    }
   };
 }
 

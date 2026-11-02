@@ -52,6 +52,7 @@ import { useAuth } from '../../contexts/AuthContext';
 interface SettingsModalProps {
   isOpen: boolean;
   initialTab?: 'profile' | 'privacy' | 'connected' | 'security';
+  openSyncKey?: number;
   profile: UserProfile;
   currentAnimes?: AnimeItem[];
   onClose: () => void;
@@ -73,9 +74,25 @@ interface SettingsModalProps {
   onUnblockUser?: (userId: string) => void;
 }
 
+function formatExternalAccountDate(rawDate?: string | null): string | null {
+  if (!rawDate || typeof rawDate !== 'string') return null;
+  const trimmed = rawDate.trim();
+  if (!trimmed) return null;
+  const d = new Date(trimmed);
+  if (isNaN(d.getTime())) {
+    return trimmed;
+  }
+  return d.toLocaleDateString('pt-BR', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  });
+}
+
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   initialTab = 'profile',
+  openSyncKey,
   profile,
   currentAnimes = [],
   onClose,
@@ -91,21 +108,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onUnblockUser
 }) => {
   const [prevInitialTab, setPrevInitialTab] = useState(initialTab);
+  const [prevOpenSyncKey, setPrevOpenSyncKey] = useState(openSyncKey);
+  const [prevProfileId, setPrevProfileId] = useState(profile.id);
   const [activeTab, setActiveTab] = useState<'profile' | 'privacy' | 'connected' | 'security'>(initialTab);
 
   const { user } = useAuth();
 
-  // Synchronously update activeTab whenever initialTab prop changes (no render delay or flash)
-  if (prevInitialTab !== initialTab) {
+  // Synchronously update activeTab when explicitly opened to a target section via menu/button
+  if (openSyncKey !== undefined ? prevOpenSyncKey !== openSyncKey : prevInitialTab !== initialTab) {
+    setPrevOpenSyncKey(openSyncKey);
     setPrevInitialTab(initialTab);
     setActiveTab(initialTab);
   }
 
-  // Form State
+  // Form State (preserved across modal close/reopen for the same profile.id)
   const [displayName, setDisplayName] = useState(profile.displayName);
   const [username, setUsername] = useState(profile.username);
   const [bio, setBio] = useState(profile.bio);
-  const [isPrivate] = useState(profile.isPrivate);
+  const [isPrivate, setIsPrivate] = useState(profile.isPrivate);
   
   // Category-level privacy settings state
   const [showAnimeList, setShowAnimeList] = useState(profile.privacySettings?.showAnimeList ?? true);
@@ -122,22 +142,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   
   const [saveSuccess, setSaveSuccess] = useState(false);
 
-function formatExternalAccountDate(rawDate?: string | null): string | null {
-  if (!rawDate || typeof rawDate !== 'string') return null;
-  const trimmed = rawDate.trim();
-  if (!trimmed) return null;
-  const d = new Date(trimmed);
-  if (isNaN(d.getTime())) {
-    return trimmed;
-  }
-  return d.toLocaleDateString('pt-BR', {
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-  });
-}
-
-// Connected accounts state
+  // Connected accounts state
   const [anilistConnected, setAnilistConnected] = useState(profile.externalAccounts.anilist.connected);
   const [anilistUsername, setAnilistUsername] = useState(profile.externalAccounts.anilist.username || '');
   const [anilistAvatarUrl, setAnilistAvatarUrl] = useState(profile.externalAccounts.anilist.avatarUrl || '');
@@ -151,6 +156,36 @@ function formatExternalAccountDate(rawDate?: string | null): string | null {
   const [malAccountCreatedAt, setMalAccountCreatedAt] = useState(
     formatExternalAccountDate(profile.externalAccounts.mal.accountCreatedAt) || profile.externalAccounts.mal.accountCreatedAt || ''
   );
+
+  // Re-initialize form fields only if the active user account (profile.id) changes
+  if (prevProfileId !== profile.id) {
+    setPrevProfileId(profile.id);
+    setDisplayName(profile.displayName);
+    setUsername(profile.username);
+    setBio(profile.bio);
+    setIsPrivate(profile.isPrivate);
+    setShowAnimeList(profile.privacySettings?.showAnimeList ?? true);
+    setShowFavorites(profile.privacySettings?.showFavorites ?? true);
+    setShowActivity(profile.privacySettings?.showActivity ?? true);
+    setShowCommentsOnProfile(profile.privacySettings?.showCommentsOnProfile ?? profile.showCommentsOnProfile);
+    setAllowDirectMessages(profile.privacySettings?.allowDirectMessages ?? true);
+    setDirectMessagesFrom(profile.privacySettings?.directMessagesFrom ?? 'everyone');
+    setShowOnlineStatus(profile.privacySettings?.showOnlineStatus !== false);
+    setAnilistConnected(profile.externalAccounts.anilist.connected);
+    setAnilistUsername(profile.externalAccounts.anilist.username || '');
+    setAnilistAvatarUrl(profile.externalAccounts.anilist.avatarUrl || '');
+    setAnilistLastSync(profile.externalAccounts.anilist.lastSync || '');
+    setAnilistAccountCreatedAt(profile.externalAccounts.anilist.accountCreatedAt || '');
+    setMalConnected(profile.externalAccounts.mal.connected);
+    setMalUsername(profile.externalAccounts.mal.username || '');
+    setMalAvatarUrl(profile.externalAccounts.mal.avatarUrl || '');
+    setMalLastSync(profile.externalAccounts.mal.lastSync || '');
+    setMalAccountCreatedAt(
+      formatExternalAccountDate(profile.externalAccounts.mal.accountCreatedAt) ||
+        profile.externalAccounts.mal.accountCreatedAt ||
+        ''
+    );
+  }
 
   // MAL Server status & connection state
   const [malStatus, setMalStatus] = useState<MALServerStatus | null>(null);

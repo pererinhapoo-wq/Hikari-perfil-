@@ -25,6 +25,7 @@ const CommentTimeSpan: React.FC<{
 };
 
 interface CommentsTabProps {
+  profileId?: string;
   comments: HikariComment[];
   showCommentsOnProfile: boolean;
   isOwnProfile: boolean;
@@ -34,22 +35,38 @@ interface CommentsTabProps {
 
 const COMMENTS_BATCH_SIZE = 12;
 
+const persistentCommentsVisibleCount = new Map<string, number>();
+
 export const CommentsTab: React.FC<CommentsTabProps> = ({
+  profileId,
   comments,
   showCommentsOnProfile,
   isOwnProfile,
   userName,
   highlightedCommentId
 }) => {
-  // Determine initial batch size, ensuring highlighted comment is visible if requested
-  const initialBatch = useMemo(() => {
-    if (!highlightedCommentId) return COMMENTS_BATCH_SIZE;
-    const idx = comments.findIndex((c) => c.id === highlightedCommentId);
-    return idx >= 0 ? Math.max(COMMENTS_BATCH_SIZE, idx + 1) : COMMENTS_BATCH_SIZE;
-  }, [comments, highlightedCommentId]);
+  const profileKey = profileId || '__default__';
 
+  // Determine initial batch size, ensuring highlighted comment or previously scrolled batch is visible
+  const initialBatch = useMemo(() => {
+    const saved = persistentCommentsVisibleCount.get(profileKey) ?? COMMENTS_BATCH_SIZE;
+    if (!highlightedCommentId) return Math.max(COMMENTS_BATCH_SIZE, saved);
+    const idx = comments.findIndex((c) => c.id === highlightedCommentId);
+    return idx >= 0 ? Math.max(COMMENTS_BATCH_SIZE, saved, idx + 1) : Math.max(COMMENTS_BATCH_SIZE, saved);
+  }, [comments, highlightedCommentId, profileKey]);
+
+  const [prevProfileKey, setPrevProfileKey] = useState(profileKey);
   const [visibleCount, setVisibleCount] = useState<number>(initialBatch);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
+
+  if (prevProfileKey !== profileKey) {
+    setPrevProfileKey(profileKey);
+    setVisibleCount(persistentCommentsVisibleCount.get(profileKey) ?? COMMENTS_BATCH_SIZE);
+  }
+
+  useEffect(() => {
+    persistentCommentsVisibleCount.set(profileKey, visibleCount);
+  }, [profileKey, visibleCount]);
 
   // Reset or adjust visible count when comments list length or highlighted ID changes
   useEffect(() => {

@@ -42,8 +42,14 @@ export const FollowersModal: React.FC<FollowersModalProps> = ({
   onRejectRequest,
   onBlockUser
 }) => {
+  const [prevInitialTab, setPrevInitialTab] = useState(initialTab);
   const [activeTab, setActiveTab] = useState<'followers' | 'following' | 'requests'>(initialTab);
   const [searchQuery, setSearchQuery] = useState('');
+
+  if (prevInitialTab !== initialTab) {
+    setPrevInitialTab(initialTab);
+    setActiveTab(initialTab);
+  }
 
   // Background scroll lock without position jumps, and Escape key dismissal
   useEffect(() => {

@@ -1,28 +1,53 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Loader2 } from 'lucide-react';
 import { updateProfile } from 'firebase/auth';
 import { Header } from './components/Header';
 import { ProfileHeader } from './components/ProfileHeader';
 import { TabsNavigation } from './components/TabsNavigation';
 import { OverviewTab } from './components/tabs/OverviewTab';
-import { AnimeListTab } from './components/tabs/AnimeListTab';
-import { CommentsTab } from './components/tabs/CommentsTab';
-import { AboutTab } from './components/tabs/AboutTab';
-import { ActivityTab } from './components/tabs/ActivityTab';
 import { PrivateProfileNotice } from './components/PrivateProfileNotice';
-import { FollowersModal } from './components/modals/FollowersModal';
-import { SettingsModal } from './components/modals/SettingsModal';
-import { PrivateChatModal } from './components/chat/PrivateChatModal';
-import { AuthScreen } from './components/auth/AuthScreen';
-import { AdminPanel } from './components/admin/AdminPanel';
-import { AdminAccessDenied } from './components/admin/AdminAccessDenied';
-import { verifyAdminAccess } from './services/adminService';
+import {
+  TabSectionFallback,
+  ModalLoadingFallback,
+  FullPageRouteFallback,
+} from './components/common/LazyFallbacks';
 import {
   syncUserPrivacyContext,
   subscribeToConversationsList,
   canUserMessageRecipient,
   type UserCheckContext,
 } from './services/chatService';
+
+const LazyAnimeListTab = lazy(() =>
+  import('./components/tabs/AnimeListTab').then((m) => ({ default: m.AnimeListTab }))
+);
+const LazyActivityTab = lazy(() =>
+  import('./components/tabs/ActivityTab').then((m) => ({ default: m.ActivityTab }))
+);
+const LazyCommentsTab = lazy(() =>
+  import('./components/tabs/CommentsTab').then((m) => ({ default: m.CommentsTab }))
+);
+const LazyAboutTab = lazy(() =>
+  import('./components/tabs/AboutTab').then((m) => ({ default: m.AboutTab }))
+);
+const LazyAdminPanel = lazy(() =>
+  import('./components/admin/AdminPanel').then((m) => ({ default: m.AdminPanel }))
+);
+const LazyAdminAccessDenied = lazy(() =>
+  import('./components/admin/AdminAccessDenied').then((m) => ({ default: m.AdminAccessDenied }))
+);
+const LazyAuthScreen = lazy(() =>
+  import('./components/auth/AuthScreen').then((m) => ({ default: m.AuthScreen }))
+);
+const LazySettingsModal = lazy(() =>
+  import('./components/modals/SettingsModal').then((m) => ({ default: m.SettingsModal }))
+);
+const LazyPrivateChatModal = lazy(() =>
+  import('./components/chat/PrivateChatModal').then((m) => ({ default: m.PrivateChatModal }))
+);
+const LazyFollowersModal = lazy(() =>
+  import('./components/modals/FollowersModal').then((m) => ({ default: m.FollowersModal }))
+);
 import { 
   UserProfile, 
   ProfileTab, 
@@ -53,12 +78,12 @@ import {
 } from './data/mockData';
 import { inferOffsetMsFromLabel } from './utils/relativeTime';
 import { computeAnimeStats, EMPTY_ANIME_STATS } from './utils/animeStats';
-import { 
-  getLastFetchedAniListCharacters, 
+import {
+  getLastFetchedAniListCharacters,
   mergeFavoriteCharacters,
   isGenericOrMissingPoster,
-  normalizeTitle
-} from './services/anilistService';
+  normalizeTitle,
+} from './utils/animeSyncHelpers';
 import { useAuth } from './contexts/AuthContext';
 import {
   PUBLIC_PROFILES_STORAGE_KEY,
@@ -366,13 +391,15 @@ export default function App() {
 
   // Tab & Anime List Filter / Detail Navigation State
   const [activeTab, setActiveTab] = useState<ProfileTab>('overview');
-  const [selectedAnimeStatusFilter, setSelectedAnimeStatusFilter] = useState<AnimeStatus>('all');
+  const [selectedAnimeStatusFilter, setSelectedAnimeStatusFilter] = useState<AnimeStatus | undefined>(undefined);
   const [animeFilterSyncKey, setAnimeFilterSyncKey] = useState(0);
   const [selectedAnimeDetailId, setSelectedAnimeDetailId] = useState<string | null>(null);
 
   // Modal States
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [hasOpenedSettings, setHasOpenedSettings] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<'profile' | 'privacy' | 'connected' | 'security'>('profile');
+  const [settingsOpenSyncKey, setSettingsOpenSyncKey] = useState(0);
   const [isFollowersOpen, setIsFollowersOpen] = useState(false);
   const [followersInitialTab, setFollowersInitialTab] = useState<'followers' | 'following' | 'requests'>('followers');
   const [isNotifOpen, setIsNotifOpen] = useState(false);
@@ -498,6 +525,7 @@ export default function App() {
           return;
         }
 
+        const { verifyAdminAccess } = await import('./services/adminService');
         const verification = await verifyAdminAccess(tokenToVerify, activeUid);
         const isOwnerVerified =
           activeUid === AUTHORIZED_ADMIN_UID &&
@@ -550,8 +578,9 @@ export default function App() {
     if (!user?.uid) {
       setAuthSession(null);
       setRemoteVisitedProfiles({});
+      setHasOpenedSettings(false);
       setActiveProfileId(CURRENT_USER.id);
-      setSelectedAnimeStatusFilter('all');
+      setSelectedAnimeStatusFilter(undefined);
       setSelectedAnimeDetailId(null);
       setActiveTab('overview');
       return () => {
@@ -565,9 +594,10 @@ export default function App() {
 
     setIsDemoPreview(false);
     setIsSettingsOpen(false);
+    setHasOpenedSettings(false);
     setIsFollowersOpen(false);
     setIsNotifOpen(false);
-    setSelectedAnimeStatusFilter('all');
+    setSelectedAnimeStatusFilter(undefined);
     setSelectedAnimeDetailId(null);
     setActiveProfileId(targetUid);
     setActiveTab('overview');
@@ -821,6 +851,16 @@ export default function App() {
   const isViewingAppShell =
     !isLoading && ((isAuthenticated && isAuthWorkspaceReady) || (!isAuthenticated && isDemoPreview));
 
+  const handleOpenSettings = useCallback(
+    (tab: 'profile' | 'privacy' | 'connected' | 'security' = 'profile') => {
+      setSettingsInitialTab(tab);
+      setSettingsOpenSyncKey((prev) => prev + 1);
+      setHasOpenedSettings(true);
+      setIsSettingsOpen(true);
+    },
+    []
+  );
+
   const handleCloseSettings = useCallback(() => {
     setIsSettingsOpen(false);
   }, []);
@@ -1013,7 +1053,7 @@ export default function App() {
   // Handler: Select Profile (switch view)
   const handleSelectProfile = useCallback(
     (userId: string) => {
-      setSelectedAnimeStatusFilter('all');
+      setSelectedAnimeStatusFilter(undefined);
       setSelectedAnimeDetailId(null);
       if (isAuthenticated && user) {
         if (userId === user.uid || !authOtherProfilesMap[userId]) {
@@ -1042,12 +1082,11 @@ export default function App() {
     [canAccessActiveProfileAnimeList]
   );
 
-  // Handler: Navigate tabs (resets status filter when clicking Animes tab directly)
+  // Handler: Navigate tabs (preserves user filter/search/scroll when returning to Animes tab)
   const handleTabChange = useCallback((tab: ProfileTab) => {
     if (tab === 'animes') {
       setSelectedAnimeDetailId(null);
-      setSelectedAnimeStatusFilter('all');
-      setAnimeFilterSyncKey((prev) => prev + 1);
+      setSelectedAnimeStatusFilter(undefined);
     }
     setActiveTab(tab);
   }, []);
@@ -1056,8 +1095,7 @@ export default function App() {
   const handleSelectAnimeFromSearch = useCallback(
     (animeId: string) => {
       if (!canAccessActiveProfileAnimeList) return;
-      setSelectedAnimeStatusFilter('all');
-      setAnimeFilterSyncKey((prev) => prev + 1);
+      setSelectedAnimeStatusFilter(undefined);
       setSelectedAnimeDetailId(animeId);
       setActiveTab('animes');
     },
@@ -2068,11 +2106,12 @@ export default function App() {
       status: 'idle',
     });
     setIsSettingsOpen(false);
+    setHasOpenedSettings(false);
     setIsFollowersOpen(false);
     setIsNotifOpen(false);
     setIsDemoPreview(false);
     setAuthInitialMode('login');
-    setSelectedAnimeStatusFilter('all');
+    setSelectedAnimeStatusFilter(undefined);
     setSelectedAnimeDetailId(null);
     setActiveTab('overview');
     setAuthSession(null);
@@ -2388,27 +2427,31 @@ export default function App() {
 
     if (canRenderAdminPanel && adminVerification.token) {
       return (
-        <AdminPanel
-          onReturnToApp={handleReturnFromAdmin}
-          idToken={adminVerification.token}
-        />
+        <Suspense fallback={<FullPageRouteFallback label="Carregando painel administrativo..." />}>
+          <LazyAdminPanel
+            onReturnToApp={handleReturnFromAdmin}
+            idToken={adminVerification.token}
+          />
+        </Suspense>
       );
     }
 
     return (
-      <AdminAccessDenied
-        onReturnToApp={handleReturnFromAdmin}
-        onOpenAuth={() => {
-          pendingAdminReturnRef.current = true;
-          if (typeof window !== 'undefined' && window.location.pathname.startsWith('/admin')) {
-            window.history.pushState(null, '', '/');
-          }
-          setCurrentView('app');
-          setIsDemoPreview(false);
-          setAuthInitialMode('login');
-        }}
-        isAuthenticated={isAuthenticated}
-      />
+      <Suspense fallback={<FullPageRouteFallback label="Verificando acesso..." />}>
+        <LazyAdminAccessDenied
+          onReturnToApp={handleReturnFromAdmin}
+          onOpenAuth={() => {
+            pendingAdminReturnRef.current = true;
+            if (typeof window !== 'undefined' && window.location.pathname.startsWith('/admin')) {
+              window.history.pushState(null, '', '/');
+            }
+            setCurrentView('app');
+            setIsDemoPreview(false);
+            setAuthInitialMode('login');
+          }}
+          isAuthenticated={isAuthenticated}
+        />
+      </Suspense>
     );
   }
 
@@ -2432,15 +2475,17 @@ export default function App() {
 
   if (!isAuthenticated && !isDemoPreview) {
     return (
-      <AuthScreen
-        key={authInitialMode}
-        initialMode={authInitialMode}
-        onEnterDemoMode={() => {
-          setActiveProfileId(CURRENT_USER.id);
-          setActiveTab('overview');
-          setIsDemoPreview(true);
-        }}
-      />
+      <Suspense fallback={<FullPageRouteFallback label="Carregando autenticação..." />}>
+        <LazyAuthScreen
+          key={authInitialMode}
+          initialMode={authInitialMode}
+          onEnterDemoMode={() => {
+            setActiveProfileId(CURRENT_USER.id);
+            setActiveTab('overview');
+            setIsDemoPreview(true);
+          }}
+        />
+      </Suspense>
     );
   }
 
@@ -2455,10 +2500,7 @@ export default function App() {
         notifications={notifications}
         isNotifOpen={isNotifOpen}
         onToggleNotif={setIsNotifOpen}
-        onOpenSettings={(tab = 'profile') => {
-          setSettingsInitialTab(tab);
-          setIsSettingsOpen(true);
-        }}
+        onOpenSettings={(tab = 'profile') => handleOpenSettings(tab)}
         onOpenFollowers={(tab = 'followers') => {
           setFollowersInitialTab(tab);
           setIsFollowersOpen(true);
@@ -2504,10 +2546,7 @@ export default function App() {
           onFollowToggle={handleFollowToggle}
           onBlockToggle={handleBlockToggle}
           onOpenDirectMessage={() => handleOpenChat(activeProfile.id)}
-          onOpenSettings={(tab = 'profile') => {
-            setSettingsInitialTab(tab);
-            setIsSettingsOpen(true);
-          }}
+          onOpenSettings={(tab = 'profile') => handleOpenSettings(tab)}
           onOpenFollowers={(tab) => {
             setFollowersInitialTab(tab);
             setIsFollowersOpen(true);
@@ -2568,19 +2607,22 @@ export default function App() {
                     </p>
                   </div>
                 ) : (
-                  <AnimeListTab
-                    animes={exposedAnimes}
-                    isOwnProfile={isOwnProfile}
-                    selectedStatusFilter={selectedAnimeStatusFilter}
-                    filterSyncKey={animeFilterSyncKey}
-                    selectedAnimeId={selectedAnimeDetailId}
-                    onClearSelectedAnime={() => setSelectedAnimeDetailId(null)}
-                    isListPrivateForVisitors={activeProfile.privacySettings?.showAnimeList === false}
-                    onUpdateEpisode={handleUpdateEpisode}
-                    onToggleFavorite={handleToggleFavorite}
-                    onUpdateStatus={handleUpdateStatus}
-                    onSaveAnimeEdit={handleSaveAnimeEdit}
-                  />
+                  <Suspense fallback={<TabSectionFallback label="Carregando lista de animes..." />}>
+                    <LazyAnimeListTab
+                      profileId={activeProfile.id}
+                      animes={exposedAnimes}
+                      isOwnProfile={isOwnProfile}
+                      selectedStatusFilter={selectedAnimeStatusFilter}
+                      filterSyncKey={animeFilterSyncKey}
+                      selectedAnimeId={selectedAnimeDetailId}
+                      onClearSelectedAnime={() => setSelectedAnimeDetailId(null)}
+                      isListPrivateForVisitors={activeProfile.privacySettings?.showAnimeList === false}
+                      onUpdateEpisode={handleUpdateEpisode}
+                      onToggleFavorite={handleToggleFavorite}
+                      onUpdateStatus={handleUpdateStatus}
+                      onSaveAnimeEdit={handleSaveAnimeEdit}
+                    />
+                  </Suspense>
                 )
               )}
 
@@ -2593,18 +2635,23 @@ export default function App() {
                     </p>
                   </div>
                 ) : (
-                  <CommentsTab
-                    comments={displayedComments}
-                    showCommentsOnProfile={activeProfile.showCommentsOnProfile}
-                    isOwnProfile={isOwnProfile}
-                    userName={activeProfile.displayName}
-                    highlightedCommentId={highlightedCommentId}
-                  />
+                  <Suspense fallback={<TabSectionFallback label="Carregando comentários..." />}>
+                    <LazyCommentsTab
+                      profileId={activeProfile.id}
+                      comments={displayedComments}
+                      showCommentsOnProfile={activeProfile.showCommentsOnProfile}
+                      isOwnProfile={isOwnProfile}
+                      userName={activeProfile.displayName}
+                      highlightedCommentId={highlightedCommentId}
+                    />
+                  </Suspense>
                 )
               )}
 
               {activeTab === 'about' && (
-                <AboutTab profile={activeProfile} />
+                <Suspense fallback={<TabSectionFallback label="Carregando informações..." />}>
+                  <LazyAboutTab profile={activeProfile} />
+                </Suspense>
               )}
 
               {activeTab === 'activity' && (
@@ -2616,10 +2663,13 @@ export default function App() {
                     </p>
                   </div>
                 ) : (
-                  <ActivityTab
-                    activities={displayedActivities}
-                    highlightedActivityId={highlightedActivityId}
-                  />
+                  <Suspense fallback={<TabSectionFallback label="Carregando atividades..." />}>
+                    <LazyActivityTab
+                      profileId={activeProfile.id}
+                      activities={displayedActivities}
+                      highlightedActivityId={highlightedActivityId}
+                    />
+                  </Suspense>
                 )
               )}
             </>
@@ -2627,91 +2677,101 @@ export default function App() {
         </div>
       </main>
 
-      {/* Social Followers & Following Modal */}
-      <FollowersModal
-        isOpen={isFollowersOpen}
-        initialTab={followersInitialTab}
-        followers={followers}
-        following={following}
-        requests={followRequests}
-        isOwnProfile={isOwnProfile}
-        onClose={() => setIsFollowersOpen(false)}
-        onUnfollow={handleUnfollowFromModal}
-        onRemoveFollower={handleRemoveFollower}
-        onAcceptRequest={handleAcceptRequest}
-        onRejectRequest={handleRejectRequest}
-        onBlockUser={(userId) => {
-          if (isAuthenticated) {
-            updateAuthWorkspace((prev) => {
-              const nextBlocked = prev.blockedIds.includes(userId)
-                ? prev.blockedIds
-                : [...prev.blockedIds, userId];
-              return {
-                ...prev,
-                blockedIds: nextBlocked,
-                followers: prev.followers.filter((u) => u.id !== userId),
-                profileOverrides: {
-                  ...prev.profileOverrides,
-                  followersCount: Math.max(0, (prev.profileOverrides.followersCount ?? 0) - 1),
-                },
-              };
-            });
-            return;
-          }
-          setDemoBlockedIds((prev) => new Set(prev).add(userId));
-          handleRemoveFollower(userId);
-        }}
-      />
-
-      {/* Settings & Privacy Modal */}
-      {isSettingsOpen && (
-        <SettingsModal
-          key={`${settingsInitialTab}-${isSettingsOpen}`}
-          isOpen={isSettingsOpen}
-          initialTab={settingsInitialTab}
-          profile={currentUser}
-          currentAnimes={animes}
-          blockedIds={Array.from(blockedIds)}
-          otherProfiles={authOtherProfilesMap}
-          onUnblockUser={handleBlockToggle}
-          onSyncAniList={handleSyncAniList}
-          onSyncMAL={handleSyncMAL}
-          onClose={handleCloseSettings}
-          onSaveProfile={handleSaveProfile}
-          onUpdateAvatar={handleUpdateAvatar}
-          onUpdateBanner={handleUpdateBanner}
-          onRemoveAvatar={handleRemoveAvatar}
-          onRemoveBanner={handleRemoveBanner}
-        />
+      {/* Social Followers & Following Modal — downloaded & mounted strictly when opened */}
+      {isFollowersOpen && (
+        <Suspense fallback={<ModalLoadingFallback label="Carregando seguidores..." />}>
+          <LazyFollowersModal
+            isOpen={isFollowersOpen}
+            initialTab={followersInitialTab}
+            followers={followers}
+            following={following}
+            requests={followRequests}
+            isOwnProfile={isOwnProfile}
+            onClose={() => setIsFollowersOpen(false)}
+            onUnfollow={handleUnfollowFromModal}
+            onRemoveFollower={handleRemoveFollower}
+            onAcceptRequest={handleAcceptRequest}
+            onRejectRequest={handleRejectRequest}
+            onBlockUser={(userId) => {
+              if (isAuthenticated) {
+                updateAuthWorkspace((prev) => {
+                  const nextBlocked = prev.blockedIds.includes(userId)
+                    ? prev.blockedIds
+                    : [...prev.blockedIds, userId];
+                  return {
+                    ...prev,
+                    blockedIds: nextBlocked,
+                    followers: prev.followers.filter((u) => u.id !== userId),
+                    profileOverrides: {
+                      ...prev.profileOverrides,
+                      followersCount: Math.max(0, (prev.profileOverrides.followersCount ?? 0) - 1),
+                    },
+                  };
+                });
+                return;
+              }
+              setDemoBlockedIds((prev) => new Set(prev).add(userId));
+              handleRemoveFollower(userId);
+            }}
+          />
+        </Suspense>
       )}
 
-      {/* Private Direct Messages Chat Drawer / Modal */}
+      {/* Settings & Privacy Modal — downloaded only on first open; state preserved across close/reopen without destructive key */}
+      {hasOpenedSettings && (
+        <Suspense
+          fallback={isSettingsOpen ? <ModalLoadingFallback label="Carregando configurações..." /> : null}
+        >
+          <LazySettingsModal
+            isOpen={isSettingsOpen}
+            initialTab={settingsInitialTab}
+            openSyncKey={settingsOpenSyncKey}
+            profile={currentUser}
+            currentAnimes={animes}
+            blockedIds={Array.from(blockedIds)}
+            otherProfiles={authOtherProfilesMap}
+            onUnblockUser={handleBlockToggle}
+            onSyncAniList={handleSyncAniList}
+            onSyncMAL={handleSyncMAL}
+            onClose={handleCloseSettings}
+            onSaveProfile={handleSaveProfile}
+            onUpdateAvatar={handleUpdateAvatar}
+            onUpdateBanner={handleUpdateBanner}
+            onRemoveAvatar={handleRemoveAvatar}
+            onRemoveBanner={handleRemoveBanner}
+          />
+        </Suspense>
+      )}
+
+      {/* Private Direct Messages Chat Drawer / Modal — downloaded & mounted strictly when opened */}
       {isChatOpen && (
-        <PrivateChatModal
-          isOpen={isChatOpen}
-          currentUser={currentUser}
-          otherProfiles={authOtherProfilesMap}
-          initialRecipientId={chatRecipientId}
-          userAnimes={animes}
-          followingIds={followingIds}
-          followersIds={new Set(
-            isAuthenticated
-              ? (activeAuthWorkspace?.followers ?? []).map((f) => f.id)
-              : demoFollowers.map((f) => f.id)
-          )}
-          blockedIds={blockedIds}
-          onClose={() => {
-            setIsChatOpen(false);
-            setChatRecipientId(null);
-          }}
-          onNavigateToProfile={(userId) => {
-            setIsChatOpen(false);
-            handleSelectProfile(userId);
-          }}
-          onSelectAnime={handleSelectAnimeFromSearch}
-          onToggleFollow={handleFollowToggle}
-          onToggleBlock={handleBlockToggle}
-        />
+        <Suspense fallback={<ModalLoadingFallback label="Carregando mensagens..." />}>
+          <LazyPrivateChatModal
+            isOpen={isChatOpen}
+            currentUser={currentUser}
+            otherProfiles={authOtherProfilesMap}
+            initialRecipientId={chatRecipientId}
+            userAnimes={animes}
+            followingIds={followingIds}
+            followersIds={new Set(
+              isAuthenticated
+                ? (activeAuthWorkspace?.followers ?? []).map((f) => f.id)
+                : demoFollowers.map((f) => f.id)
+            )}
+            blockedIds={blockedIds}
+            onClose={() => {
+              setIsChatOpen(false);
+              setChatRecipientId(null);
+            }}
+            onNavigateToProfile={(userId) => {
+              setIsChatOpen(false);
+              handleSelectProfile(userId);
+            }}
+            onSelectAnime={handleSelectAnimeFromSearch}
+            onToggleFollow={handleFollowToggle}
+            onToggleBlock={handleBlockToggle}
+          />
+        </Suspense>
       )}
     </div>
   );

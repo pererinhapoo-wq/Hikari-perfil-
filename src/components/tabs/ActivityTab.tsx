@@ -29,6 +29,7 @@ const ActivityTimeSpan: React.FC<{
 };
 
 interface ActivityTabProps {
+  profileId?: string;
   activities: UserActivity[];
   userAnimes?: AnimeItem[];
   highlightedActivityId?: string;
@@ -37,19 +38,35 @@ interface ActivityTabProps {
 const INITIAL_BATCH_SIZE = 6;
 const PROGRESSIVE_BATCH_STEP = 6;
 
+const persistentActivityVisibleCount = new Map<string, number>();
+
 export const ActivityTab: React.FC<ActivityTabProps> = ({
+  profileId,
   activities,
   userAnimes,
   highlightedActivityId
 }) => {
-  // Determine initial batch size, ensuring highlighted activity is included if requested
-  const initialBatch = useMemo(() => {
-    if (!highlightedActivityId) return INITIAL_BATCH_SIZE;
-    const idx = activities.findIndex((a) => a.id === highlightedActivityId);
-    return idx >= 0 ? Math.max(INITIAL_BATCH_SIZE, idx + 1) : INITIAL_BATCH_SIZE;
-  }, [activities, highlightedActivityId]);
+  const profileKey = profileId || '__default__';
 
+  // Determine initial batch size, ensuring highlighted activity or previously expanded batch is preserved
+  const initialBatch = useMemo(() => {
+    const saved = persistentActivityVisibleCount.get(profileKey) ?? INITIAL_BATCH_SIZE;
+    if (!highlightedActivityId) return Math.max(INITIAL_BATCH_SIZE, saved);
+    const idx = activities.findIndex((a) => a.id === highlightedActivityId);
+    return idx >= 0 ? Math.max(INITIAL_BATCH_SIZE, saved, idx + 1) : Math.max(INITIAL_BATCH_SIZE, saved);
+  }, [activities, highlightedActivityId, profileKey]);
+
+  const [prevProfileKey, setPrevProfileKey] = useState(profileKey);
   const [visibleCount, setVisibleCount] = useState<number>(initialBatch);
+
+  if (prevProfileKey !== profileKey) {
+    setPrevProfileKey(profileKey);
+    setVisibleCount(persistentActivityVisibleCount.get(profileKey) ?? INITIAL_BATCH_SIZE);
+  }
+
+  useEffect(() => {
+    persistentActivityVisibleCount.set(profileKey, visibleCount);
+  }, [profileKey, visibleCount]);
 
   // Adjust visible count if highlightedActivityId changes
   useEffect(() => {

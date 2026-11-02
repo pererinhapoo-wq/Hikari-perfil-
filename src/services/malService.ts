@@ -109,32 +109,51 @@ export interface MALServerStatus {
   redirectUri: string;
 }
 
+let cachedMALServerStatus: MALServerStatus | null = null;
+let inFlightMALServerStatus: Promise<MALServerStatus> | null = null;
+
 /**
- * Verifica o status de configuração do MyAnimeList no servidor.
+ * Verifica o status de configuração do MyAnimeList no servidor (com cache em memória por sessão).
  */
-export async function fetchMALServerStatus(): Promise<MALServerStatus> {
-  try {
-    const res = await fetch('/api/mal/config');
-    if (!res.ok) {
+export async function fetchMALServerStatus(forceRefresh = false): Promise<MALServerStatus> {
+  if (!forceRefresh && cachedMALServerStatus) {
+    return cachedMALServerStatus;
+  }
+  if (!forceRefresh && inFlightMALServerStatus) {
+    return inFlightMALServerStatus;
+  }
+
+  const request = (async (): Promise<MALServerStatus> => {
+    try {
+      const res = await fetch('/api/mal/config');
+      if (!res.ok) {
+        return {
+          configured: false,
+          clientIdConfigured: false,
+          redirectUri: `${window.location.origin}/api/mal/callback`,
+        };
+      }
+      const data = await res.json();
+      const resolved: MALServerStatus = {
+        configured: Boolean(data.configured),
+        clientIdConfigured: Boolean(data.clientIdConfigured),
+        redirectUri: data.redirectUri || `${window.location.origin}/api/mal/callback`,
+      };
+      cachedMALServerStatus = resolved;
+      return resolved;
+    } catch {
       return {
         configured: false,
         clientIdConfigured: false,
-        redirectUri: `${window.location.origin}/api/mal/callback`,
+        redirectUri: typeof window !== 'undefined' ? `${window.location.origin}/api/mal/callback` : '',
       };
+    } finally {
+      inFlightMALServerStatus = null;
     }
-    const data = await res.json();
-    return {
-      configured: Boolean(data.configured),
-      clientIdConfigured: Boolean(data.clientIdConfigured),
-      redirectUri: data.redirectUri || `${window.location.origin}/api/mal/callback`,
-    };
-  } catch {
-    return {
-      configured: false,
-      clientIdConfigured: false,
-      redirectUri: typeof window !== 'undefined' ? `${window.location.origin}/api/mal/callback` : '',
-    };
-  }
+  })();
+
+  inFlightMALServerStatus = request;
+  return request;
 }
 
 /**

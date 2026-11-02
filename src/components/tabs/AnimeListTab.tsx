@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   Search,
   Check,
@@ -13,9 +13,14 @@ import {
   SlidersHorizontal,
 } from 'lucide-react';
 import { AnimeItem, AnimeStatus } from '../../types';
-import { AnimeEditModal } from '../modals/AnimeEditModal';
+import { ModalLoadingFallback } from '../common/LazyFallbacks';
+
+const LazyAnimeEditModal = lazy(() =>
+  import('../modals/AnimeEditModal').then((m) => ({ default: m.AnimeEditModal }))
+);
 
 interface AnimeListTabProps {
+  profileId?: string;
   animes: AnimeItem[];
   isOwnProfile: boolean;
   selectedStatusFilter?: AnimeStatus;
@@ -44,18 +49,27 @@ const COLUMNS = 3;
 const OVERSCAN_ROWS = 2; // 2 rows above + 2 rows below = 12 buffer cards
 const DEFAULT_ROW_HEIGHT = 380;
 
-// Persistent cache across tab switches
+// Persistent cache across tab switches isolated per profileId
 interface PersistentAnimeTabState {
   activeFilter: AnimeStatus;
   searchQuery: string;
   scrollY: number;
 }
 
-const persistentAnimeTabState: PersistentAnimeTabState = {
-  activeFilter: 'all',
-  searchQuery: '',
-  scrollY: 0,
-};
+const persistentAnimeTabStateByProfile = new Map<string, PersistentAnimeTabState>();
+
+function getPersistentAnimeTabState(profileKey: string): PersistentAnimeTabState {
+  let state = persistentAnimeTabStateByProfile.get(profileKey);
+  if (!state) {
+    state = {
+      activeFilter: 'all',
+      searchQuery: '',
+      scrollY: 0,
+    };
+    persistentAnimeTabStateByProfile.set(profileKey, state);
+  }
+  return state;
+}
 
 function getStatusBadge(status: AnimeItem['status']) {
   switch (status) {
@@ -256,6 +270,7 @@ const AnimeCard = React.memo<AnimeCardProps>(({
 });
 
 export const AnimeListTab: React.FC<AnimeListTabProps> = ({
+  profileId,
   animes,
   isOwnProfile,
   selectedStatusFilter,
@@ -268,15 +283,28 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
   onUpdateStatus,
   onSaveAnimeEdit,
 }) => {
+  const profileKey = profileId || '__default__';
+  const persistentTabState = getPersistentAnimeTabState(profileKey);
+
+  const [prevProfileKey, setPrevProfileKey] = useState(profileKey);
   const [activeFilter, setActiveFilter] = useState<AnimeStatus>(() => {
-    return selectedStatusFilter ?? persistentAnimeTabState.activeFilter;
+    return selectedStatusFilter ?? persistentTabState.activeFilter;
   });
-  const [searchQuery, setSearchQuery] = useState(() => persistentAnimeTabState.searchQuery);
+  const [searchQuery, setSearchQuery] = useState(() => persistentTabState.searchQuery);
   const [detailAnimeId, setDetailAnimeId] = useState<string | null>(selectedAnimeId ?? null);
   const [failedPosterIds, setFailedPosterIds] = useState<Record<string, boolean>>({});
 
   // Dedicated Anime Edit Modal state
   const [editingAnime, setEditingAnime] = useState<AnimeItem | null>(null);
+
+  if (prevProfileKey !== profileKey) {
+    const nextState = getPersistentAnimeTabState(profileKey);
+    setPrevProfileKey(profileKey);
+    setActiveFilter(selectedStatusFilter ?? nextState.activeFilter);
+    setSearchQuery(nextState.searchQuery);
+    setDetailAnimeId(selectedAnimeId ?? null);
+    setEditingAnime(null);
+  }
 
   // Virtualization state & refs
   const gridRef = useRef<HTMLDivElement | null>(null);
@@ -303,9 +331,9 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
       setActiveFilter(selectedStatusFilter);
       setSearchQuery('');
       setDetailAnimeId(null);
-      persistentAnimeTabState.scrollY = 0;
+      persistentTabState.scrollY = 0;
     }
-  }, [selectedStatusFilter, filterSyncKey]);
+  }, [selectedStatusFilter, filterSyncKey, persistentTabState]);
 
   // Sync direct anime detail selection (e.g. from search)
   useEffect(() => {
@@ -316,20 +344,20 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
 
   // Keep persistent state synchronized
   useEffect(() => {
-    persistentAnimeTabState.activeFilter = activeFilter;
-    persistentAnimeTabState.searchQuery = searchQuery;
-  }, [activeFilter, searchQuery]);
+    persistentTabState.activeFilter = activeFilter;
+    persistentTabState.searchQuery = searchQuery;
+  }, [activeFilter, searchQuery, persistentTabState]);
 
   // Restore scroll position when returning to this tab
   useEffect(() => {
-    if (persistentAnimeTabState.scrollY > 0 && !selectedStatusFilter) {
-      const targetY = persistentAnimeTabState.scrollY;
+    if (persistentTabState.scrollY > 0 && !selectedStatusFilter) {
+      const targetY = persistentTabState.scrollY;
       const timer = window.setTimeout(() => {
         window.scrollTo({ top: targetY, behavior: 'instant' as ScrollBehavior });
       }, 15);
       return () => window.clearTimeout(timer);
     }
-  }, [selectedStatusFilter]);
+  }, [selectedStatusFilter, profileKey, persistentTabState]);
 
   const uniqueAnimes = useMemo(() => {
     const seen = new Set<string>();
@@ -382,7 +410,7 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
       if (!ticking) {
         window.requestAnimationFrame(() => {
           const currentY = window.scrollY || window.pageYOffset || 0;
-          persistentAnimeTabState.scrollY = currentY;
+          persistentTabState.scrollY = currentY;
 
           const rowHeight = measuredRowHeight > 0 ? measuredRowHeight : DEFAULT_ROW_HEIGHT;
           const viewportHeight = typeof window !== 'undefined' && window.innerHeight > 0 ? window.innerHeight : 800;
@@ -408,7 +436,7 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
       window.removeEventListener('scroll', handleScrollOrResize);
       window.removeEventListener('resize', handleScrollOrResize);
     };
-  }, [totalRows, measuredRowHeight, updateGridOffsetTop]);
+  }, [totalRows, measuredRowHeight, updateGridOffsetTop, persistentTabState]);
 
   // Dynamically measure actual rendered card height on screen
   useEffect(() => {
@@ -682,7 +710,7 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
                     type="button"
                     onClick={() => {
                       setActiveFilter(cat.id);
-                      persistentAnimeTabState.scrollY = 0;
+                      persistentTabState.scrollY = 0;
                     }}
                     className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-xl px-3 py-1.5 text-xs font-medium transition-all cursor-pointer ${
                       isActive
@@ -714,7 +742,7 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
                 value={searchQuery}
                 onChange={(e) => {
                   setSearchQuery(e.target.value);
-                  persistentAnimeTabState.scrollY = 0;
+                  persistentTabState.scrollY = 0;
                 }}
                 placeholder="Filtrar por título ou gênero..."
                 className="w-full rounded-xl border border-purple-900/40 bg-[#0A0713] py-1.5 pl-8 pr-3 text-xs text-purple-100 placeholder:text-purple-400/40 focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500/40"
@@ -748,7 +776,7 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
                   onClick={() => {
                     setActiveFilter('all');
                     setSearchQuery('');
-                    persistentAnimeTabState.scrollY = 0;
+                    persistentTabState.scrollY = 0;
                   }}
                   className="mt-4 rounded-lg bg-purple-600 px-4 py-2 text-xs font-semibold text-white hover:bg-purple-500 transition-colors cursor-pointer"
                 >
@@ -782,28 +810,32 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
         </>
       )}
 
-      {/* Dedicated Anime Edit Modal */}
-      <AnimeEditModal
-        anime={editingAnime}
-        isOpen={!!editingAnime}
-        onClose={() => setEditingAnime(null)}
-        onSave={(updates) => {
-          if (onSaveAnimeEdit && editingAnime) {
-            onSaveAnimeEdit(editingAnime.id, updates);
-          } else if (editingAnime) {
-            if (updates.status !== editingAnime.status && onUpdateStatus) {
-              onUpdateStatus(editingAnime.id, updates.status);
-            }
-            if (updates.currentEpisode !== editingAnime.currentEpisode) {
-              onUpdateEpisode(
-                editingAnime.id,
-                updates.currentEpisode - editingAnime.currentEpisode
-              );
-            }
-          }
-          setEditingAnime(null);
-        }}
-      />
+      {/* Dedicated Anime Edit Modal — downloaded & mounted strictly when editingAnime !== null */}
+      {editingAnime !== null && (
+        <Suspense fallback={<ModalLoadingFallback label="Carregando editor de anime..." />}>
+          <LazyAnimeEditModal
+            anime={editingAnime}
+            isOpen={true}
+            onClose={() => setEditingAnime(null)}
+            onSave={(updates) => {
+              if (onSaveAnimeEdit && editingAnime) {
+                onSaveAnimeEdit(editingAnime.id, updates);
+              } else if (editingAnime) {
+                if (updates.status !== editingAnime.status && onUpdateStatus) {
+                  onUpdateStatus(editingAnime.id, updates.status);
+                }
+                if (updates.currentEpisode !== editingAnime.currentEpisode) {
+                  onUpdateEpisode(
+                    editingAnime.id,
+                    updates.currentEpisode - editingAnime.currentEpisode
+                  );
+                }
+              }
+              setEditingAnime(null);
+            }}
+          />
+        </Suspense>
+      )}
     </div>
   );
 };
