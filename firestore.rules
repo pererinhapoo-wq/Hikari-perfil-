@@ -410,14 +410,10 @@ service cloud.firestore {
       }
 
       // 8. Subcoleção de blocos particionados de animes (~300 animes por doc, limite estrito de 450 para garantir < 200 KiB)
+      // Acesso de leitura e escrita restrito estritamente ao proprietário (Zero-Trust) em alinhamento com anime_storage/manifest.
+      // O perfil público consome a projeção pública sanitizada (PublicProfileProjection) para exibição segura sem expor dados internos.
       match /anime_chunks/{chunkId} {
-        allow get: if isValidId(userId) && isValidId(chunkId) && (
-          isOwner(userId) || (
-            isSignedIn()
-            && get(/databases/$(database)/documents/users/$(userId)).data.isPrivate == false
-            && get(/databases/$(database)/documents/users/$(userId)).data.privacySettings.showAnimeList == true
-          )
-        );
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(chunkId);
         allow list: if isOwner(userId);
         allow create, update: if isOwner(userId)
           && isValidId(userId)

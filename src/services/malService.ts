@@ -4,6 +4,7 @@ import {
   ExistingAnimeIndex,
   createExistingAnimeIndex,
   findMatchingAnimeInIndex,
+  isValidYear,
   isGenericOrMissingPoster,
   isValidPosterUrl,
   isGenericOrMissingImage,
@@ -11,6 +12,7 @@ import {
 } from './anilistService';
 
 export {
+  isValidYear,
   isGenericOrMissingPoster,
   isValidPosterUrl,
   isGenericOrMissingImage,
@@ -305,10 +307,12 @@ export async function disconnectMALServer(idToken: string): Promise<void> {
  * Localiza no array atual de animes do Hikari a correspondência exata para uma entrada vinda do MyAnimeList.
  * 1. Primeiro por identificador malId.
  * 2. Segundo por anilistId (caso o item existente tenha vindo do AniList com idMal preenchido).
- * 3. Terceiro por título normalizado sem ambiguidades.
+ * 3. Terceiro por título normalizado e ano combinado sem ambiguidades nem colisões entre obras distintas.
  */
 export function findMatchingExistingAnimeForMAL(
-  incoming: MALAnimeEntry,
+  incoming:
+    | MALAnimeEntry
+    | { malId?: number; anilistId?: number; title: string; titleRomaji?: string; year?: number },
   existingList: AnimeItem[],
   existingIndex?: ExistingAnimeIndex
 ): AnimeItem | undefined {
@@ -328,31 +332,9 @@ export function findMatchingExistingAnimeForMAL(
     if (byAniId) return byAniId;
   }
 
-  // 3. Coincidência por título normalizado
-  const incTitleNorm = normalizeTitle(incoming.title);
-  const incRomajiNorm = incoming.titleRomaji ? normalizeTitle(incoming.titleRomaji) : '';
-
-  if (!incTitleNorm && !incRomajiNorm) return undefined;
-
-  return existingList.find((ex) => {
-    // Rejeita correspondência se ambos tiverem IDs externos e forem conflitantes
-    if (incoming.malId && ex.malId && incoming.malId !== ex.malId) {
-      return false;
-    }
-    if (incoming.anilistId && ex.anilistId && incoming.anilistId !== ex.anilistId) {
-      return false;
-    }
-
-    const exTitleNorm = normalizeTitle(ex.title);
-    const exRomajiNorm = ex.titleRomaji ? normalizeTitle(ex.titleRomaji) : '';
-
-    if (incTitleNorm && exTitleNorm && incTitleNorm === exTitleNorm) return true;
-    if (incTitleNorm && exRomajiNorm && incTitleNorm === exRomajiNorm) return true;
-    if (incRomajiNorm && exTitleNorm && incRomajiNorm === exTitleNorm) return true;
-    if (incRomajiNorm && exRomajiNorm && incRomajiNorm === exRomajiNorm) return true;
-
-    return false;
-  });
+  // 3. Fallback unificado utilizando createExistingAnimeIndex + findMatchingAnimeInIndex
+  const tempIndex = createExistingAnimeIndex(existingList);
+  return findMatchingAnimeInIndex(incoming, tempIndex, 'mal_first');
 }
 
 /**
@@ -566,6 +548,14 @@ export function mergeMALImport(
       }
       if (updatedItem.anilistId && !existingIndex.byAnilistId.has(updatedItem.anilistId)) {
         existingIndex.byAnilistId.set(updatedItem.anilistId, updatedItem);
+      }
+      const normTitle = normalizeTitle(updatedItem.title);
+      if (normTitle) {
+        const titleEntries = existingIndex.byNormalizedTitle.get(normTitle);
+        if (titleEntries) {
+          const entry = titleEntries.find((c) => c.item.id === matched.id);
+          if (entry) entry.item = updatedItem;
+        }
       }
     } else {
       const generatedId = `ani_mal_${incoming.malId}_${Date.now()}_${Math.random()

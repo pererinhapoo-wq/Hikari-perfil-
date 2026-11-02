@@ -1246,6 +1246,31 @@ function schedulePublicProfilesWrite(immediate = false): void {
 }
 
 /**
+ * Sanitiza um registro de anime para a projeção pública:
+ * - Mantém exclusivamente propriedades públicas canônicas.
+ * - Remove metadados internos, IDs de blocos ou referências de armazenamento privado.
+ */
+export function sanitizePublicAnimeItem(item: AnimeItem): AnimeItem {
+  return {
+    id: String(item.id || ''),
+    title: String(item.title || ''),
+    ...(item.titleRomaji ? { titleRomaji: String(item.titleRomaji) } : {}),
+    posterUrl: String(item.posterUrl || ''),
+    status: item.status,
+    currentEpisode: typeof item.currentEpisode === 'number' ? Math.max(0, item.currentEpisode) : 0,
+    totalEpisodes: typeof item.totalEpisodes === 'number' ? Math.max(0, item.totalEpisodes) : 0,
+    rating: typeof item.rating === 'number' ? Math.max(0, Math.min(10, item.rating)) : 0,
+    isFavorite: Boolean(item.isFavorite),
+    year: typeof item.year === 'number' ? item.year : 0,
+    genres: Array.isArray(item.genres) ? item.genres.map(String).slice(0, 15) : [],
+    ...(typeof item.episodeDurationMinutes === 'number' ? { episodeDurationMinutes: item.episodeDurationMinutes } : {}),
+    ...(typeof item.rewatchCount === 'number' ? { rewatchCount: item.rewatchCount } : {}),
+    ...(typeof item.anilistId === 'number' ? { anilistId: item.anilistId } : {}),
+    ...(typeof item.malId === 'number' ? { malId: item.malId } : {}),
+  };
+}
+
+/**
  * Writes a sanitized public projection of an authenticated user's profile so
  * other users can visit the profile without ever having read access to private
  * workspaces or private anime lists. When showAnimeList is false (or profile is
@@ -1326,7 +1351,7 @@ export function syncPublicProfileProjection(
       },
     },
     animeStats: computeAnimeStats(animes),
-    publicAnimes: canExposeAnimeItems ? animes.slice(0, 2000) : [],
+    publicAnimes: canExposeAnimeItems ? animes.slice(0, 2000).map(sanitizePublicAnimeItem) : [],
     updatedAtMs: normalizedUpdatedAt,
   };
 
@@ -1415,7 +1440,9 @@ export function readPublicProfilesMap(
       };
 
       const rawPublicAnimes =
-        canExpose && Array.isArray(rec.publicAnimes) ? (rec.publicAnimes as AnimeItem[]) : [];
+        canExpose && Array.isArray(rec.publicAnimes)
+          ? (rec.publicAnimes as AnimeItem[]).map(sanitizePublicAnimeItem)
+          : [];
 
       const safeStats =
         sanitizeAnimeStatsSummary(rec.animeStats) ??

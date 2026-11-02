@@ -49,7 +49,7 @@ function recordTest(id: number, title: string, passed: boolean, details: string)
   console.log(`[TEST ${String(id).padStart(2, '0')}] ${status} - ${title}: ${details}`);
 }
 
-function makeMockAnime(id: string, title: string, status: AnimeItem['status'], episode = 1): AnimeItem {
+function makeMockAnime(id: string, title: string, status: AnimeItem['status'], episode = 1, year = 2024): AnimeItem {
   return {
     id,
     title,
@@ -60,7 +60,7 @@ function makeMockAnime(id: string, title: string, status: AnimeItem['status'], e
     totalEpisodes: 24,
     rating: 8.5,
     isFavorite: false,
-    year: 2024,
+    year,
     genres: ['Ação', 'Aventura'],
   };
 }
@@ -453,7 +453,7 @@ async function runStage5Tests() {
   // TEST 13: Repetição do mesmo lote sem duplicar registros (idempotência)
   try {
     const existingList: AnimeItem[] = [
-      makeMockAnime('mal-101', 'Frieren: Beyond Journey\'s End', 'completed', 28),
+      makeMockAnime('mal-101', 'Frieren: Beyond Journey\'s End', 'completed', 28, 2023),
     ];
 
     const duplicateBatch: MALAnimeEntry[] = [
@@ -926,8 +926,8 @@ async function runStage5Tests() {
   // TEST 23: Repetição do lote: nenhum anime duplicado (idempotência estrita)
   try {
     const existing: AnimeItem[] = [
-      makeMockAnime('anime_rep_1', 'Repetitive Anime 1', 'completed', 12),
-      makeMockAnime('anime_rep_2', 'Repetitive Anime 2', 'watching', 6),
+      makeMockAnime('anime_rep_1', 'Repetitive Anime 1', 'completed', 12, 2022),
+      makeMockAnime('anime_rep_2', 'Repetitive Anime 2', 'watching', 6, 2023),
     ];
 
     const incoming: AniListAnimeEntry[] = [

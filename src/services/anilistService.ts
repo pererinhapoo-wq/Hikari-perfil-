@@ -787,11 +787,30 @@ export function createExistingAnimeIndex(list: AnimeItem[]): ExistingAnimeIndex 
 
   for (let i = 0; i < list.length; i++) {
     const item = list[i];
-    if (item.anilistId && !byAnilistId.has(item.anilistId)) {
-      byAnilistId.set(item.anilistId, item);
+    let effectiveAnilistId = item.anilistId;
+    let effectiveMalId = item.malId;
+
+    if (!effectiveAnilistId && typeof item.id === 'string') {
+      const match = item.id.match(/^(?:ani_)?(?:al|anilist)[-_](\d+)/i);
+      if (match) {
+        const parsed = parseInt(match[1], 10);
+        if (!isNaN(parsed) && parsed > 0) effectiveAnilistId = parsed;
+      }
     }
-    if (item.malId && !byMalId.has(item.malId)) {
-      byMalId.set(item.malId, item);
+
+    if (!effectiveMalId && typeof item.id === 'string') {
+      const match = item.id.match(/^(?:ani_)?mal[-_](\d+)/i);
+      if (match) {
+        const parsed = parseInt(match[1], 10);
+        if (!isNaN(parsed) && parsed > 0) effectiveMalId = parsed;
+      }
+    }
+
+    if (effectiveAnilistId && !byAnilistId.has(effectiveAnilistId)) {
+      byAnilistId.set(effectiveAnilistId, item);
+    }
+    if (effectiveMalId && !byMalId.has(effectiveMalId)) {
+      byMalId.set(effectiveMalId, item);
     }
     const normTitle = normalizeTitle(item.title);
     if (normTitle) {
@@ -813,12 +832,35 @@ export function createExistingAnimeIndex(list: AnimeItem[]): ExistingAnimeIndex 
 }
 
 /**
+ * Valida se um valor numérico representa um ano de lançamento válido (inteiro positivo > 0).
+ */
+export function isValidYear(year?: number | null): boolean {
+  return typeof year === 'number' && Number.isFinite(year) && year > 0;
+}
+
+/**
  * Localiza no índice em Map a correspondência exata para uma entrada externa em O(1),
- * respeitando a ordem de prioridade definida e evitando associar temporadas/remakes
- * que compartilhem o mesmo título mas possuam IDs externos conflitantes.
+ * respeitando a ordem de prioridade definida:
+ * 1. Prioridade 1: Identificador malId (se priority === 'mal_first') ou anilistId (se priority === 'anilist_first').
+ * 2. Prioridade 2: O outro identificador externo secundário.
+ * 3. Prioridade 3: Na ausência de IDs externos (ou correspondência direta de ID), combinação de Título Normalizado + Ano de Lançamento.
+ *
+ * Regras estritas anti-colisão:
+ * - Rejeita correspondência se houver IDs externos conflitantes (ex: temporadas, remakes ou filmes distintos).
+ * - Quando ambos os registros possuem anos conhecidos: coincidem SOMENTE se os anos forem rigorosamente iguais. Anos diferentes são mantidos separados.
+ * - Quando um dos registros não possui ano (ano <= 0, ausente ou não informado):
+ *   * Não inventa um ano arbitrário.
+ *   * Não associa automaticamente se houver ambiguidade (múltiplos candidatos ou confronto entre um registro com ano conhecido e outro sem ano).
+ *   * Permite correspondência segura somente quando ambos não possuem ano e há exatamente um único candidato no perfil (preservação retroativa).
  */
 export function findMatchingAnimeInIndex(
-  incoming: { anilistId?: number; malId?: number; title: string; titleRomaji?: string },
+  incoming: {
+    anilistId?: number;
+    malId?: number;
+    title: string;
+    titleRomaji?: string;
+    year?: number;
+  },
   index: ExistingAnimeIndex,
   priority: 'anilist_first' | 'mal_first' = 'anilist_first'
 ): AnimeItem | undefined {
@@ -847,29 +889,68 @@ export function findMatchingAnimeInIndex(
 
   if (!incTitleNorm && !incRomajiNorm) return undefined;
 
-  const candidates: { item: AnimeItem; index: number }[] = [];
+  const candidateMap = new Map<string, { item: AnimeItem; index: number }>();
   if (incTitleNorm && index.byNormalizedTitle.has(incTitleNorm)) {
-    candidates.push(...(index.byNormalizedTitle.get(incTitleNorm) || []));
+    for (const c of index.byNormalizedTitle.get(incTitleNorm) || []) {
+      candidateMap.set(c.item.id, c);
+    }
   }
   if (incRomajiNorm && index.byNormalizedTitle.has(incRomajiNorm)) {
-    candidates.push(...(index.byNormalizedTitle.get(incRomajiNorm) || []));
+    for (const c of index.byNormalizedTitle.get(incRomajiNorm) || []) {
+      candidateMap.set(c.item.id, c);
+    }
   }
+
+  if (candidateMap.size === 0) return undefined;
 
   // Ordena por índice de inserção original para manter determinismo
-  candidates.sort((a, b) => a.index - b.index);
+  const candidates = Array.from(candidateMap.values()).sort((a, b) => a.index - b.index);
 
-  for (const { item } of candidates) {
-    // Rejeita correspondência por título se ambos tiverem IDs externos conflitantes
-    // (ex: temporadas, filmes ou remakes diferentes que compartilham o mesmo título base)
+  // Filtra candidatos sem IDs externos conflitantes
+  const nonConflicting = candidates.filter(({ item }) => {
     if (incoming.anilistId && item.anilistId && incoming.anilistId !== item.anilistId) {
-      continue;
+      return false;
     }
     if (incoming.malId && item.malId && incoming.malId !== item.malId) {
-      continue;
+      return false;
     }
-    return item;
+    return true;
+  });
+
+  if (nonConflicting.length === 0) return undefined;
+
+  const incomingHasYear = isValidYear(incoming.year);
+  const incomingYear = incomingHasYear ? incoming.year! : null;
+
+  // Caso 1: O registro de entrada possui ano conhecido
+  if (incomingHasYear && incomingYear !== null) {
+    // Busca candidatos que possuam exatamente o mesmo ano conhecido
+    const exactYearMatches = nonConflicting.filter(
+      ({ item }) => isValidYear(item.year) && item.year === incomingYear
+    );
+
+    if (exactYearMatches.length > 0) {
+      return exactYearMatches[0].item;
+    }
+
+    // Candidatos com outros anos conhecidos são rejeitados (Regra 4).
+    // Candidatos sem ano são considerados ambíguos quando confrontados com ano conhecido (Regra 5).
+    return undefined;
   }
 
+  // Caso 2: O registro de entrada NÃO possui ano conhecido (ano <= 0, ausente ou não informado)
+  // Regra 5: Candidatos com ano conhecido NÃO podem ser associados a um registro sem ano (ambíguo).
+  // Candidatos que também não possuem ano:
+  const noYearCandidates = nonConflicting.filter(({ item }) => !isValidYear(item.year));
+
+  if (noYearCandidates.length === 1) {
+    // Correspondência segura e única entre registros sem ano:
+    // Preserva compatibilidade com registros legados (Regras 6 e 7) sem inventar ano arbitrário (Regra 5).
+    return noYearCandidates[0].item;
+  }
+
+  // Mais de 1 candidato sem ano (ambiguidade) ou 0 candidatos sem ano:
+  // Regra 5: Não associa automaticamente registros ambíguos.
   return undefined;
 }
 
@@ -877,10 +958,12 @@ export function findMatchingAnimeInIndex(
  * Localiza no array atual de animes do Hikari a correspondência exata para uma entrada vinda do AniList.
  * 1. Primeiro por identificador anilistId.
  * 2. Segundo por identificador malId (quando disponível).
- * 3. Terceiro por título normalizado, sem associar temporadas ou obras com IDs conflitantes.
+ * 3. Terceiro por título normalizado e ano combinado, sem associar temporadas ou obras com IDs conflitantes.
  */
 export function findMatchingExistingAnime(
-  incoming: AniListAnimeEntry,
+  incoming:
+    | AniListAnimeEntry
+    | { anilistId?: number; malId?: number; title: string; titleRomaji?: string; year?: number },
   existingList: AnimeItem[],
   existingIndex?: ExistingAnimeIndex
 ): AnimeItem | undefined {
@@ -900,31 +983,9 @@ export function findMatchingExistingAnime(
     if (byMalId) return byMalId;
   }
 
-  // 3. Coincidência por título normalizado
-  const incTitleNorm = normalizeTitle(incoming.title);
-  const incRomajiNorm = incoming.titleRomaji ? normalizeTitle(incoming.titleRomaji) : '';
-
-  if (!incTitleNorm && !incRomajiNorm) return undefined;
-
-  return existingList.find((ex) => {
-    // Rejeita correspondência se ambos tiverem IDs externos e forem conflitantes
-    if (incoming.anilistId && ex.anilistId && incoming.anilistId !== ex.anilistId) {
-      return false;
-    }
-    if (incoming.malId && ex.malId && incoming.malId !== ex.malId) {
-      return false;
-    }
-
-    const exTitleNorm = normalizeTitle(ex.title);
-    const exRomajiNorm = ex.titleRomaji ? normalizeTitle(ex.titleRomaji) : '';
-
-    if (incTitleNorm && exTitleNorm && incTitleNorm === exTitleNorm) return true;
-    if (incTitleNorm && exRomajiNorm && incTitleNorm === exRomajiNorm) return true;
-    if (incRomajiNorm && exTitleNorm && incRomajiNorm === exTitleNorm) return true;
-    if (incRomajiNorm && exRomajiNorm && incRomajiNorm === exRomajiNorm) return true;
-
-    return false;
-  });
+  // 3. Fallback unificado utilizando createExistingAnimeIndex + findMatchingAnimeInIndex
+  const tempIndex = createExistingAnimeIndex(existingList);
+  return findMatchingAnimeInIndex(incoming, tempIndex, 'anilist_first');
 }
 
 /**
@@ -1156,6 +1217,14 @@ export function mergeAniListImport(
       }
       if (updatedItem.malId && !existingIndex.byMalId.has(updatedItem.malId)) {
         existingIndex.byMalId.set(updatedItem.malId, updatedItem);
+      }
+      const normTitle = normalizeTitle(updatedItem.title);
+      if (normTitle) {
+        const titleEntries = existingIndex.byNormalizedTitle.get(normTitle);
+        if (titleEntries) {
+          const entry = titleEntries.find((c) => c.item.id === matched.id);
+          if (entry) entry.item = updatedItem;
+        }
       }
     } else {
       // Novo anime a ser adicionado
