@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { 
   Bell, 
@@ -54,7 +54,7 @@ interface HeaderProps {
   onOpenAdminPanel?: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = ({
+export const Header: React.FC<HeaderProps> = React.memo(({
   currentUser,
   activeProfile: _activeProfile,
   animes = [],
@@ -97,7 +97,13 @@ export const Header: React.FC<HeaderProps> = ({
   const notifListRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLDivElement>(null);
 
-  const unreadCount = notifications.filter(n => !n.isRead).length;
+  const unreadCount = useMemo(() => {
+    let count = 0;
+    for (let i = 0; i < notifications.length; i++) {
+      if (!notifications[i].isRead) count++;
+    }
+    return count;
+  }, [notifications]);
 
   const computeUserMenuCoords = useCallback(() => {
     if (typeof window === 'undefined' || !userMenuRef.current) {
@@ -232,78 +238,95 @@ export const Header: React.FC<HeaderProps> = ({
     };
   }, [isUserMenuOpen]);
 
-  const searchResults = searchQuery.trim()
-    ? (isAuthenticated
-        ? [
-            {
+  const hasSearchIntent = isSearchOpen || searchQuery.trim().length > 0;
+
+  const indexedSearchCandidates = useMemo(() => {
+    if (!hasSearchIntent) return [];
+    const baseItems = isAuthenticated
+      ? [
+          {
+            type: 'user' as const,
+            id: currentUser.id,
+            name: currentUser.displayName,
+            sub: `@${currentUser.username} (Meu Perfil)`,
+            avatar: currentUser.avatarUrl,
+          },
+          ...searchableProfiles
+            .filter((p) => p.id && p.id !== currentUser.id)
+            .map((p) => ({
               type: 'user' as const,
-              id: currentUser.id,
-              name: currentUser.displayName,
-              sub: `@${currentUser.username} (Meu Perfil)`,
-              avatar: currentUser.avatarUrl,
-            },
-            ...searchableProfiles
-              .filter((p) => p.id && p.id !== currentUser.id)
-              .map((p) => ({
-                type: 'user' as const,
-                id: p.id,
-                name: p.displayName,
-                sub: `@${p.username} (${p.isPrivate ? 'Perfil Privado' : 'Perfil Público'})`,
-                avatar: p.avatarUrl,
-              })),
-            ...animes.map((anime) => ({
-              type: 'anime' as const,
-              id: anime.id,
-              name: anime.title,
-              sub: `Anime · ${anime.year}`,
-              avatar: anime.posterUrl,
-              tab: 'animes' as const,
+              id: p.id,
+              name: p.displayName,
+              sub: `@${p.username} (${p.isPrivate ? 'Perfil Privado' : 'Perfil Público'})`,
+              avatar: p.avatarUrl,
             })),
-          ]
-        : [
-            {
-              type: 'user' as const,
-              id: currentUser.id,
-              name: currentUser.displayName,
-              sub: `@${currentUser.username} (Perfil de Demonstração)`,
-              avatar: currentUser.avatarUrl,
-            },
-            {
-              type: 'user' as const,
-              id: AUTHORIZED_ADMIN_UID,
-              name: 'Aether',
-              sub: '@aether (Hikari Eternal)',
-              avatar: '',
-            },
-            {
-              type: 'user' as const,
-              id: 'usr_kuroha',
-              name: 'Kuroha ✦',
-              sub: '@kuroha_void (Perfil Privado)',
-              avatar: '/src/assets/images/hikari_follower_avatar_1793518826589.jpg',
-            },
-            {
-              type: 'user' as const,
-              id: 'usr_shinji',
-              name: 'Shinji Kazuki',
-              sub: '@shinji_mecha (Perfil Público)',
-              avatar: '/src/assets/images/hikari_user_avatar_1793518815544.jpg',
-            },
-            ...animes.map((anime) => ({
-              type: 'anime' as const,
-              id: anime.id,
-              name: anime.title,
-              sub: `Anime · ${anime.year}`,
-              avatar: anime.posterUrl,
-              tab: 'animes' as const,
-            })),
-          ]
-      ).filter(
-        (item) =>
-          item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          item.sub.toLowerCase().includes(searchQuery.toLowerCase())
-      )
-    : [];
+          ...animes.map((anime) => ({
+            type: 'anime' as const,
+            id: anime.id,
+            name: anime.title,
+            sub: `Anime · ${anime.year}`,
+            avatar: anime.posterUrl,
+            tab: 'animes' as const,
+          })),
+        ]
+      : [
+          {
+            type: 'user' as const,
+            id: currentUser.id,
+            name: currentUser.displayName,
+            sub: `@${currentUser.username} (Perfil de Demonstração)`,
+            avatar: currentUser.avatarUrl,
+          },
+          {
+            type: 'user' as const,
+            id: AUTHORIZED_ADMIN_UID,
+            name: 'Aether',
+            sub: '@aether (Hikari Eternal)',
+            avatar: '',
+          },
+          {
+            type: 'user' as const,
+            id: 'usr_kuroha',
+            name: 'Kuroha ✦',
+            sub: '@kuroha_void (Perfil Privado)',
+            avatar: '/src/assets/images/hikari_follower_avatar_1793518826589.jpg',
+          },
+          {
+            type: 'user' as const,
+            id: 'usr_shinji',
+            name: 'Shinji Kazuki',
+            sub: '@shinji_mecha (Perfil Público)',
+            avatar: '/src/assets/images/hikari_user_avatar_1793518815544.jpg',
+          },
+          ...animes.map((anime) => ({
+            type: 'anime' as const,
+            id: anime.id,
+            name: anime.title,
+            sub: `Anime · ${anime.year}`,
+            avatar: anime.posterUrl,
+            tab: 'animes' as const,
+          })),
+        ];
+
+    return baseItems.map((item) => ({
+      ...item,
+      searchText: `${item.name} ${item.sub}`.toLowerCase(),
+    }));
+  }, [hasSearchIntent, isAuthenticated, currentUser.id, currentUser.displayName, currentUser.username, currentUser.avatarUrl, searchableProfiles, animes]);
+
+  const searchResults = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return [];
+    const matches: typeof indexedSearchCandidates = [];
+    for (let i = 0; i < indexedSearchCandidates.length; i++) {
+      const candidate = indexedSearchCandidates[i];
+      if (candidate.searchText.includes(query)) {
+        matches.push(candidate);
+        if (matches.length >= 25) break;
+      }
+    }
+    return matches;
+  }, [searchQuery, indexedSearchCandidates]);
 
   return (
     <header className="sticky top-0 z-40 w-full border-b border-purple-900/30 bg-[#0A0713]/90 backdrop-blur-md">
@@ -974,4 +997,5 @@ export const Header: React.FC<HeaderProps> = ({
       </div>
     </header>
   );
-};
+});
+

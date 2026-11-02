@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
 import { 
   Tv, 
   Sparkles, 
@@ -17,7 +17,7 @@ interface FavoritesTabProps {
   onNavigateToAnimes: () => void;
 }
 
-export const FavoritesTab: React.FC<FavoritesTabProps> = ({
+export const FavoritesTab: React.FC<FavoritesTabProps> = React.memo(({
   favorites,
   characters = [],
   companies = [],
@@ -28,15 +28,15 @@ export const FavoritesTab: React.FC<FavoritesTabProps> = ({
 }) => {
   const [failedImageIds, setFailedImageIds] = useState<Record<string, boolean>>({});
 
-  const markImageFailed = (id: string) => {
+  const markImageFailed = useCallback((id: string) => {
     setFailedImageIds((prev) => (prev[id] ? prev : { ...prev, [id]: true }));
-  };
+  }, []);
 
   // Sliced to maximum 10 items strictly as demanded by specification
-  const animeFavorites = favorites.slice(0, 10);
-  const characterFavorites = characters.slice(0, 10);
-  const companyFavorites = companies.slice(0, 10);
-  const personFavorites = people.slice(0, 10);
+  const animeFavorites = useMemo(() => favorites.slice(0, 10), [favorites]);
+  const characterFavorites = useMemo(() => characters.slice(0, 10), [characters]);
+  const companyFavorites = useMemo(() => companies.slice(0, 10), [companies]);
+  const personFavorites = useMemo(() => people.slice(0, 10), [people]);
 
   return (
     <div className="space-y-8 pb-8">
@@ -310,4 +310,4 @@ export const FavoritesTab: React.FC<FavoritesTabProps> = ({
       </section>
     </div>
   );
-};
+});

@@ -1,24 +1,31 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Film, Play, Star, CheckCircle, Bookmark, MessageSquare, RefreshCw, PlusCircle } from 'lucide-react';
 import { UserActivity, AnimeItem } from '../../types';
-import { resolveActivityPoster, resolveActivityAnimeTitle } from '../../utils/activityPoster';
+import { resolveActivityAnimeMatch } from '../../utils/activityPoster';
 
 interface ActivityPosterThumbProps {
   activity: UserActivity;
   userAnimes?: AnimeItem[];
+  profileId?: string;
   size?: 'sm' | 'md';
   className?: string;
 }
 
-export const ActivityPosterThumb: React.FC<ActivityPosterThumbProps> = ({
+export const ActivityPosterThumb: React.FC<ActivityPosterThumbProps> = React.memo(({
   activity,
   userAnimes,
+  profileId,
   size = 'md',
-  className = ''
+  className = '',
 }) => {
-  const [imageError, setImageError] = useState(false);
-  const posterUrl = resolveActivityPoster(activity, userAnimes);
-  const animeTitle = resolveActivityAnimeTitle(activity, userAnimes) || activity.title;
+  const { posterUrl, animeTitle: matchedTitle } = useMemo(
+    () => resolveActivityAnimeMatch(activity, userAnimes, profileId),
+    [activity, userAnimes, profileId]
+  );
+
+  const [erroredUrl, setErroredUrl] = useState<string | null>(null);
+  const imageError = Boolean(posterUrl && erroredUrl === posterUrl);
+  const animeTitle = matchedTitle || activity.title;
 
   const sizeClasses = size === 'sm'
     ? 'w-10 h-14 min-w-10 min-h-14 rounded-lg'
@@ -60,7 +67,7 @@ export const ActivityPosterThumb: React.FC<ActivityPosterThumbProps> = ({
           loading="lazy"
           decoding="async"
           referrerPolicy="no-referrer"
-          onError={() => setImageError(true)}
+          onError={() => setErroredUrl(posterUrl)}
           className="h-full w-full object-cover object-center transition-transform duration-300 group-hover/poster:scale-105"
         />
         {/* Subtle bottom vignette to ensure contrast */}
@@ -85,4 +92,4 @@ export const ActivityPosterThumb: React.FC<ActivityPosterThumbProps> = ({
       </span>
     </div>
   );
-};
+});

@@ -13,20 +13,20 @@ import {
   Layers
 } from 'lucide-react';
 import { UserActivity, AnimeItem } from '../../types';
-import { useCurrentTime, formatRelativeTime, formatExactDateTime } from '../../utils/relativeTime';
+import { useRelativeTimeLabel, formatExactDateTime } from '../../utils/relativeTime';
 import { ActivityPosterThumb } from '../common/ActivityPosterThumb';
 
 /**
- * Leaf component that subscribes to useCurrentTime() so timer ticks do NOT
- * cause the parent ActivityTab or all rendered activities to re-render.
+ * Leaf component using centralized shared clock + string diffing so unchanged labels
+ * (e.g. "Há 3 dias") never trigger unnecessary re-renders.
  */
 const ActivityTimeSpan: React.FC<{
   timestamp: number | undefined;
   fallbackText?: string;
-}> = ({ timestamp, fallbackText = '' }) => {
-  const now = useCurrentTime();
-  return <>{formatRelativeTime(timestamp, now, fallbackText, false)}</>;
-};
+}> = React.memo(({ timestamp, fallbackText = '' }) => {
+  const label = useRelativeTimeLabel(timestamp, fallbackText, false);
+  return <>{label}</>;
+});
 
 interface ActivityTabProps {
   profileId?: string;
@@ -208,6 +208,7 @@ export const ActivityTab: React.FC<ActivityTabProps> = ({
                       <ActivityPosterThumb
                         activity={activity}
                         userAnimes={userAnimes}
+                        profileId={profileId}
                         size="md"
                       />
 

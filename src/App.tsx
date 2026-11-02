@@ -13,7 +13,7 @@ import {
 } from './components/common/LazyFallbacks';
 import {
   syncUserPrivacyContext,
-  subscribeToConversationsList,
+  subscribeToUnreadMessagesCount,
   canUserMessageRecipient,
   type UserCheckContext,
 } from './services/chatService';
@@ -77,7 +77,7 @@ import {
   INITIAL_NOTIFICATIONS 
 } from './data/mockData';
 import { inferOffsetMsFromLabel } from './utils/relativeTime';
-import { computeAnimeStats, EMPTY_ANIME_STATS } from './utils/animeStats';
+import { computeAnimeStats, EMPTY_ANIME_STATS, updateSingleAnimeById } from './utils/animeStats';
 import {
   getLastFetchedAniListCharacters,
   mergeFavoriteCharacters,
@@ -87,6 +87,7 @@ import {
 import { useAuth } from './contexts/AuthContext';
 import {
   PUBLIC_PROFILES_STORAGE_KEY,
+  adjustCachedPublicProfileFollowersCount,
   buildProfileFromFirebaseUser,
   createEmptyUserWorkspace,
   getUserWorkspaceStorageKey,
@@ -649,47 +650,95 @@ export default function App() {
     };
   }, [user?.uid]);
 
-  // Keep demo localStorage synchronized ONLY while actively inside Demo Mode
-  useEffect(() => {
-    if (isAuthenticated || !isDemoPreview) return;
+  // Debounced Demo Mode persistence with synchronous flush on pagehide/beforeunload/visibilitychange
+  const pendingDemoPayloadRef = useRef<PersistedDemoProfileData | null>(null);
+  const demoWriteTimerRef = useRef<number | null>(null);
+
+  const flushPendingDemoWrite = useCallback(() => {
+    if (demoWriteTimerRef.current !== null && typeof window !== 'undefined') {
+      window.clearTimeout(demoWriteTimerRef.current);
+      demoWriteTimerRef.current = null;
+    }
+    const payload = pendingDemoPayloadRef.current;
+    if (!payload || typeof window === 'undefined' || !window.localStorage) return;
+    pendingDemoPayloadRef.current = null;
     try {
-      window.localStorage.setItem(
-        DEMO_PROFILE_STORAGE_KEY,
-        JSON.stringify({
-          profileOverrides: {
-            displayName: demoProfile.displayName,
-            username: demoProfile.username,
-            avatarUrl: demoProfile.avatarUrl,
-            bannerUrl: demoProfile.bannerUrl,
-            bio: demoProfile.bio,
-            isPrivate: demoProfile.isPrivate,
-            showCommentsOnProfile: demoProfile.showCommentsOnProfile,
-            privacySettings: demoProfile.privacySettings,
-            externalAccounts: demoProfile.externalAccounts,
-            followersCount: demoProfile.followersCount,
-            followingCount: demoProfile.followingCount,
-          },
-          animes: demoAnimes,
-          comments: demoComments,
-          activities: demoActivities,
-          notifications: demoNotifications,
-          followingIds: Array.from(demoFollowingIds),
-          requestedIds: Array.from(demoRequestedIds),
-          blockedIds: Array.from(demoBlockedIds),
-          following: demoFollowing,
-          followers: demoFollowers,
-          followRequests: demoFollowRequests,
-          otherProfiles: demoOtherProfiles,
-        })
-      );
+      window.localStorage.setItem(DEMO_PROFILE_STORAGE_KEY, JSON.stringify(payload));
     } catch {
       // Ignore storage write errors gracefully
     }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        flushPendingDemoWrite();
+      }
+    };
+    window.addEventListener('pagehide', flushPendingDemoWrite);
+    window.addEventListener('beforeunload', flushPendingDemoWrite);
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      flushPendingDemoWrite();
+      window.removeEventListener('pagehide', flushPendingDemoWrite);
+      window.removeEventListener('beforeunload', flushPendingDemoWrite);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [flushPendingDemoWrite]);
+
+  // Keep demo localStorage synchronized ONLY while actively inside Demo Mode (debounced 300ms)
+  useEffect(() => {
+    if (isAuthenticated || !isDemoPreview) {
+      pendingDemoPayloadRef.current = null;
+      if (demoWriteTimerRef.current !== null && typeof window !== 'undefined') {
+        window.clearTimeout(demoWriteTimerRef.current);
+        demoWriteTimerRef.current = null;
+      }
+      return;
+    }
+
+    pendingDemoPayloadRef.current = {
+      profileOverrides: {
+        displayName: demoProfile.displayName,
+        username: demoProfile.username,
+        avatarUrl: demoProfile.avatarUrl,
+        bannerUrl: demoProfile.bannerUrl,
+        bio: demoProfile.bio,
+        isPrivate: demoProfile.isPrivate,
+        showCommentsOnProfile: demoProfile.showCommentsOnProfile,
+        privacySettings: demoProfile.privacySettings,
+        externalAccounts: demoProfile.externalAccounts,
+        followersCount: demoProfile.followersCount,
+        followingCount: demoProfile.followingCount,
+      },
+      animes: demoAnimes,
+      favoriteCharacters: demoFavoriteCharacters,
+      comments: demoComments,
+      activities: demoActivities,
+      notifications: demoNotifications,
+      followingIds: Array.from(demoFollowingIds),
+      requestedIds: Array.from(demoRequestedIds),
+      blockedIds: Array.from(demoBlockedIds),
+      following: demoFollowing,
+      followers: demoFollowers,
+      followRequests: demoFollowRequests,
+      otherProfiles: demoOtherProfiles,
+    };
+
+    if (demoWriteTimerRef.current !== null) {
+      window.clearTimeout(demoWriteTimerRef.current);
+    }
+    demoWriteTimerRef.current = window.setTimeout(() => {
+      demoWriteTimerRef.current = null;
+      flushPendingDemoWrite();
+    }, 300);
   }, [
     isAuthenticated,
     isDemoPreview,
     demoProfile,
     demoAnimes,
+    demoFavoriteCharacters,
     demoComments,
     demoActivities,
     demoNotifications,
@@ -700,6 +749,7 @@ export default function App() {
     demoFollowers,
     demoFollowRequests,
     demoOtherProfiles,
+    flushPendingDemoWrite,
   ]);
 
   // Cross-tab storage synchronization strictly scoped to either current UID or Demo Mode
@@ -1102,12 +1152,14 @@ export default function App() {
     [canAccessActiveProfileAnimeList]
   );
 
-  // Synchronize user context with server for authoritative privacy and block checks
+  const activeFollowersSource = isAuthenticated
+    ? activeAuthWorkspace?.followers
+    : demoFollowers;
+
+  // Synchronize user context with server for authoritative privacy and block checks (deduplicated by payload signature)
   useEffect(() => {
     if (!currentUser.id) return;
-    const currentFollowerIds = isAuthenticated
-      ? (activeAuthWorkspace?.followers ?? []).map((f) => f.id)
-      : demoFollowers.map((f) => f.id);
+    const currentFollowerIds = (activeFollowersSource ?? []).map((f) => f.id);
 
     syncUserPrivacyContext({
       id: currentUser.id,
@@ -1121,25 +1173,33 @@ export default function App() {
       followerIds: currentFollowerIds,
       blockedIds: Array.from(blockedIds),
     });
-  }, [currentUser, followingIds, blockedIds, isAuthenticated, activeAuthWorkspace, demoFollowers]);
+  }, [
+    currentUser.id,
+    currentUser.username,
+    currentUser.displayName,
+    currentUser.avatarUrl,
+    currentUser.privacySettings?.allowDirectMessages,
+    currentUser.privacySettings?.directMessagesFrom,
+    currentUser.privacySettings?.showOnlineStatus,
+    followingIds,
+    blockedIds,
+    activeFollowersSource,
+  ]);
 
-  // Subscribe to unread messages count across all conversations
+  // Subscribe passively to unread messages count without background polling while PrivateChatModal is closed
   useEffect(() => {
-    if (!currentUser.id) return;
-    const unsubscribe = subscribeToConversationsList(currentUser.id, (convs) => {
-      const unreadTotal = convs.reduce((sum, c) => sum + (c.unreadCounts[currentUser.id] || 0), 0);
-      setUnreadMessagesCount(unreadTotal);
-    });
-    return () => unsubscribe();
+    if (!currentUser.id) {
+      setUnreadMessagesCount(0);
+      return;
+    }
+    return subscribeToUnreadMessagesCount(currentUser.id, setUnreadMessagesCount);
   }, [currentUser.id]);
 
   // Validate whether the current user is allowed to message the currently viewed profile
   const activeProfileDirectMessageCheck = useMemo(() => {
     if (isOwnProfile) return { allowed: true };
 
-    const currentFollowerIds = isAuthenticated
-      ? (activeAuthWorkspace?.followers ?? []).map((f) => f.id)
-      : demoFollowers.map((f) => f.id);
+    const currentFollowerIds = (activeFollowersSource ?? []).map((f) => f.id);
 
     const senderCtx: UserCheckContext = {
       id: currentUser.id,
@@ -1166,7 +1226,7 @@ export default function App() {
     };
 
     return canUserMessageRecipient(senderCtx, recipientCtx);
-  }, [isOwnProfile, currentUser, activeProfile, followingIds, blockedIds, isAuthenticated, activeAuthWorkspace, demoFollowers]);
+  }, [isOwnProfile, currentUser, activeProfile, followingIds, blockedIds, activeFollowersSource]);
 
   // Handler: Open chat modal with optional preselected recipient
   const handleOpenChat = useCallback((targetRecipientId?: string) => {
@@ -1266,21 +1326,7 @@ export default function App() {
             };
           });
 
-          try {
-            const raw = window.localStorage.getItem(PUBLIC_PROFILES_STORAGE_KEY);
-            if (raw) {
-              const parsed = JSON.parse(raw);
-              if (parsed && typeof parsed === 'object' && parsed[targetId]?.profile) {
-                parsed[targetId].profile.followersCount = Math.max(
-                  0,
-                  (parsed[targetId].profile.followersCount ?? 0) + delta
-                );
-                window.localStorage.setItem(PUBLIC_PROFILES_STORAGE_KEY, JSON.stringify(parsed));
-              }
-            }
-          } catch {
-            // Ignore storage quota error
-          }
+          adjustCachedPublicProfileFollowersCount(targetId, delta);
           setPublicProfilesRevision((r) => r + 1);
         }
         return;
@@ -1541,21 +1587,7 @@ export default function App() {
         };
       });
 
-      try {
-        const raw = window.localStorage.getItem(PUBLIC_PROFILES_STORAGE_KEY);
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (parsed && typeof parsed === 'object' && parsed[userId]?.profile) {
-            parsed[userId].profile.followersCount = Math.max(
-              0,
-              (parsed[userId].profile.followersCount ?? 1) - 1
-            );
-            window.localStorage.setItem(PUBLIC_PROFILES_STORAGE_KEY, JSON.stringify(parsed));
-          }
-        }
-      } catch {
-        // Ignore storage error
-      }
+      adjustCachedPublicProfileFollowersCount(userId, -1);
       setPublicProfilesRevision((r) => r + 1);
       return;
     }
@@ -1582,277 +1614,298 @@ export default function App() {
     });
   };
 
-  const persistAndApply = (
-    nextAnimes: AnimeItem[],
-    newActivity: UserActivity | null,
-    nextComments: HikariComment[] = comments
-  ) => {
-    if (isAuthenticated) {
-      updateAuthWorkspace((prev) => ({
-        ...prev,
-        animes: nextAnimes,
-        comments: nextComments !== comments ? nextComments : prev.comments,
-        activities: newActivity ? [newActivity, ...prev.activities] : prev.activities,
-      }));
-      return;
-    }
-
-    const nextActivities = newActivity ? [newActivity, ...demoActivities] : demoActivities;
-    if (isDemoPreview) {
-      try {
-        window.localStorage.setItem(
-          DEMO_PROFILE_STORAGE_KEY,
-          JSON.stringify({
-            profileOverrides: {
-              displayName: demoProfile.displayName,
-              username: demoProfile.username,
-              avatarUrl: demoProfile.avatarUrl,
-              bannerUrl: demoProfile.bannerUrl,
-              bio: demoProfile.bio,
-              isPrivate: demoProfile.isPrivate,
-              showCommentsOnProfile: demoProfile.showCommentsOnProfile,
-              privacySettings: demoProfile.privacySettings,
-              externalAccounts: demoProfile.externalAccounts,
-            },
-            animes: nextAnimes,
-            comments: nextComments,
-            activities: nextActivities,
-            notifications: demoNotifications,
-          })
-        );
-      } catch {
-        // Fallback to state if browser storage is restricted
-      }
-    }
-    setDemoAnimes(nextAnimes);
-    if (nextComments !== demoComments) {
-      setDemoComments(nextComments);
-    }
-    if (newActivity) {
-      setDemoActivities(nextActivities);
-    }
+  // Ref to latest list state so anime mutation handlers remain referentially stable across renders
+  const latestAnimeMutationStateRef = useRef({
+    animes,
+    comments,
+    demoComments,
+  });
+  latestAnimeMutationStateRef.current = {
+    animes,
+    comments,
+    demoComments,
   };
 
-  // Handler: Update episode progress
-  const handleUpdateEpisode = (animeId: string, delta: number) => {
-    const prevAnime = animes.find(a => a.id === animeId);
-    if (!prevAnime) return;
+  const persistAndApply = useCallback(
+    (
+      nextAnimes: AnimeItem[],
+      newActivity: UserActivity | null,
+      nextComments?: HikariComment[]
+    ) => {
+      const { comments: currComments, demoComments: currDemoComments } =
+        latestAnimeMutationStateRef.current;
 
-    const newEp = Math.min(prevAnime.totalEpisodes, Math.max(0, prevAnime.currentEpisode + delta));
-    const newStatus: AnimeItem['status'] =
-      newEp === prevAnime.totalEpisodes && prevAnime.totalEpisodes > 0
-        ? 'completed'
-        : prevAnime.status === 'completed' && newEp < prevAnime.totalEpisodes
-        ? newEp === 0
-          ? 'planned'
-          : 'watching'
-        : prevAnime.status === 'planned' && newEp > 0
-        ? 'watching'
-        : prevAnime.status;
+      if (isAuthenticated) {
+        updateAuthWorkspace((prev) => ({
+          ...prev,
+          animes: nextAnimes,
+          comments:
+            nextComments !== undefined && nextComments !== currComments
+              ? nextComments
+              : prev.comments,
+          activities: newActivity ? [newActivity, ...prev.activities] : prev.activities,
+        }));
+        return;
+      }
 
-    if (newEp === prevAnime.currentEpisode && newStatus === prevAnime.status) return;
+      setDemoAnimes(nextAnimes);
+      if (nextComments !== undefined && nextComments !== currDemoComments) {
+        setDemoComments(nextComments);
+      }
+      if (newActivity) {
+        setDemoActivities((prev) => [newActivity, ...prev]);
+      }
+    },
+    [isAuthenticated, updateAuthWorkspace]
+  );
 
-    const nextAnimes = animes.map(anime =>
-      anime.id === animeId ? { ...anime, currentEpisode: newEp, status: newStatus } : anime
-    );
+  // Handler: Update episode progress (single-slot update without full-list map cloning)
+  const handleUpdateEpisode = useCallback(
+    (animeId: string, delta: number) => {
+      const currentAnimes = latestAnimeMutationStateRef.current.animes;
+      const result = updateSingleAnimeById(currentAnimes, animeId, (prevAnime) => {
+        const newEp = Math.min(
+          prevAnime.totalEpisodes,
+          Math.max(0, prevAnime.currentEpisode + delta)
+        );
+        const newStatus: AnimeItem['status'] =
+          newEp === prevAnime.totalEpisodes && prevAnime.totalEpisodes > 0
+            ? 'completed'
+            : prevAnime.status === 'completed' && newEp < prevAnime.totalEpisodes
+            ? newEp === 0
+              ? 'planned'
+              : 'watching'
+            : prevAnime.status === 'planned' && newEp > 0
+            ? 'watching'
+            : prevAnime.status;
 
-    const actionNow = Date.now();
-    const completedNow = newStatus === 'completed' && prevAnime.status !== 'completed';
-    const activity: UserActivity = completedNow
-      ? {
+        if (newEp === prevAnime.currentEpisode && newStatus === prevAnime.status) {
+          return null;
+        }
+        return { ...prevAnime, currentEpisode: newEp, status: newStatus };
+      });
+
+      if (!result) return;
+      const { nextAnimes, previousAnime: prevAnime, updatedAnime } = result;
+      const newEp = updatedAnime.currentEpisode;
+      const newStatus = updatedAnime.status;
+
+      const actionNow = Date.now();
+      const completedNow = newStatus === 'completed' && prevAnime.status !== 'completed';
+      const activity: UserActivity = completedNow
+        ? {
+            id: `act_${actionNow}_${animeId}`,
+            type: 'completed_anime',
+            title: `Marcou ${prevAnime.title} como concluído`,
+            description: `${newEp}/${prevAnime.totalEpisodes} episódios`,
+            timestamp: 'Agora',
+            createdAtTimestamp: actionNow,
+            episode: newEp,
+          }
+        : {
+            id: `act_${actionNow}_${animeId}`,
+            type: 'watched_ep',
+            title:
+              newEp > prevAnime.currentEpisode
+                ? `Assistiu até o episódio ${newEp} de ${prevAnime.title}`
+                : `Atualizou o progresso de ${prevAnime.title} para o episódio ${newEp}`,
+            description: `Progresso: ${newEp}/${prevAnime.totalEpisodes} episódios`,
+            timestamp: 'Agora',
+            createdAtTimestamp: actionNow,
+            episode: newEp,
+          };
+
+      persistAndApply(nextAnimes, activity);
+    },
+    [persistAndApply]
+  );
+
+  // Handler: Update anime status (single-slot update with automatic episode maxing on completion)
+  const handleUpdateStatus = useCallback(
+    (animeId: string, newStatus: AnimeItem['status']) => {
+      const currentAnimes = latestAnimeMutationStateRef.current.animes;
+      const result = updateSingleAnimeById(currentAnimes, animeId, (prevAnime) => {
+        if (prevAnime.status === newStatus) return null;
+        const nextEp =
+          newStatus === 'completed' ? prevAnime.totalEpisodes : prevAnime.currentEpisode;
+        return { ...prevAnime, status: newStatus, currentEpisode: nextEp };
+      });
+
+      if (!result) return;
+      const { nextAnimes, previousAnime: prevAnime, updatedAnime } = result;
+      const isCompleted = newStatus === 'completed';
+      const nextEp = updatedAnime.currentEpisode;
+
+      const actionNow = Date.now();
+      const activity: UserActivity = isCompleted
+        ? {
+            id: `act_${actionNow}_${animeId}`,
+            type: 'completed_anime',
+            title: `Marcou ${prevAnime.title} como concluído`,
+            description: `${nextEp}/${prevAnime.totalEpisodes} episódios`,
+            timestamp: 'Agora',
+            createdAtTimestamp: actionNow,
+            episode: nextEp,
+          }
+        : {
+            id: `act_${actionNow}_${animeId}`,
+            type: 'status_changed',
+            title:
+              newStatus === 'on_hold'
+                ? `Colocou ${prevAnime.title} em espera`
+                : newStatus === 'dropped'
+                ? `Marcou ${prevAnime.title} como abandonado`
+                : `Moveu ${prevAnime.title} para ${STATUS_ACTIVITY_LABEL[newStatus]}`,
+            description: `Progresso: ${nextEp}/${prevAnime.totalEpisodes} episódios`,
+            timestamp: 'Agora',
+            createdAtTimestamp: actionNow,
+            episode: nextEp,
+          };
+
+      persistAndApply(nextAnimes, activity);
+    },
+    [persistAndApply]
+  );
+
+  // Handler: Save anime edit from modal (single-slot update, recording 1 consolidated activity)
+  const handleSaveAnimeEdit = useCallback(
+    (
+      animeId: string,
+      updates: { currentEpisode: number; status: AnimeItem['status']; rating: number }
+    ) => {
+      const currentAnimes = latestAnimeMutationStateRef.current.animes;
+      const result = updateSingleAnimeById(currentAnimes, animeId, (prevAnime) => {
+        const nextEp = Math.min(prevAnime.totalEpisodes, Math.max(0, updates.currentEpisode));
+        const nextStatus = updates.status;
+        const nextRating = updates.rating;
+
+        if (
+          nextStatus === prevAnime.status &&
+          nextEp === prevAnime.currentEpisode &&
+          nextRating === prevAnime.rating
+        ) {
+          return null;
+        }
+        return {
+          ...prevAnime,
+          currentEpisode: nextEp,
+          status: nextStatus,
+          rating: nextRating,
+        };
+      });
+
+      if (!result) return;
+      const { nextAnimes, previousAnime: prevAnime, updatedAnime } = result;
+      const nextEp = updatedAnime.currentEpisode;
+      const nextStatus = updatedAnime.status;
+      const nextRating = updatedAnime.rating;
+
+      const statusChanged = nextStatus !== prevAnime.status;
+      const epChanged = nextEp !== prevAnime.currentEpisode;
+      const ratingChanged = nextRating !== prevAnime.rating;
+
+      const actionNow = Date.now();
+      let newActivity: UserActivity | null = null;
+
+      if (statusChanged && nextStatus === 'completed') {
+        newActivity = {
           id: `act_${actionNow}_${animeId}`,
           type: 'completed_anime',
           title: `Marcou ${prevAnime.title} como concluído`,
-          description: `${newEp}/${prevAnime.totalEpisodes} episódios`,
+          description: `${nextEp}/${prevAnime.totalEpisodes} episódios${ratingChanged && nextRating > 0 ? ` · Nota ${nextRating}/10` : ''}`,
           timestamp: 'Agora',
           createdAtTimestamp: actionNow,
-          episode: newEp
-        }
-      : {
+          episode: nextEp,
+          score: ratingChanged && nextRating > 0 ? nextRating : undefined,
+        };
+      } else if (statusChanged) {
+        const statusTitle =
+          nextStatus === 'on_hold'
+            ? `Colocou ${prevAnime.title} em espera`
+            : nextStatus === 'dropped'
+            ? `Marcou ${prevAnime.title} como abandonado`
+            : `Moveu ${prevAnime.title} para ${STATUS_ACTIVITY_LABEL[nextStatus]}`;
+
+        newActivity = {
+          id: `act_${actionNow}_${animeId}`,
+          type: 'status_changed',
+          title: statusTitle,
+          description: `Progresso: ${nextEp}/${prevAnime.totalEpisodes} episódios${ratingChanged && nextRating > 0 ? ` · Nota ${nextRating}/10` : ''}`,
+          timestamp: 'Agora',
+          createdAtTimestamp: actionNow,
+          episode: nextEp,
+          score: ratingChanged && nextRating > 0 ? nextRating : undefined,
+        };
+      } else if (ratingChanged) {
+        newActivity = {
+          id: `act_${actionNow}_${animeId}`,
+          type: 'rated',
+          title:
+            nextRating > 0
+              ? `Avaliou ${prevAnime.title} com nota ${nextRating}`
+              : `Removeu a avaliação de ${prevAnime.title}`,
+          description: epChanged
+            ? `Progresso atualizado para ${nextEp}/${prevAnime.totalEpisodes} episódios`
+            : nextRating > 0
+            ? `Avaliação atualizada (${nextRating}/10)`
+            : 'Sem nota atribuída',
+          timestamp: 'Agora',
+          createdAtTimestamp: actionNow,
+          score: nextRating > 0 ? nextRating : undefined,
+          episode: epChanged ? nextEp : undefined,
+        };
+      } else if (epChanged) {
+        newActivity = {
           id: `act_${actionNow}_${animeId}`,
           type: 'watched_ep',
           title:
-            newEp > prevAnime.currentEpisode
-              ? `Assistiu até o episódio ${newEp} de ${prevAnime.title}`
-              : `Atualizou o progresso de ${prevAnime.title} para o episódio ${newEp}`,
-          description: `Progresso: ${newEp}/${prevAnime.totalEpisodes} episódios`,
-          timestamp: 'Agora',
-          createdAtTimestamp: actionNow,
-          episode: newEp
-        };
-
-    persistAndApply(nextAnimes, activity);
-  };
-
-  // Handler: Update anime status (with automatic episode maxing on completion)
-  const handleUpdateStatus = (animeId: string, newStatus: AnimeItem['status']) => {
-    const prevAnime = animes.find(a => a.id === animeId);
-    if (!prevAnime || prevAnime.status === newStatus) return;
-
-    const isCompleted = newStatus === 'completed';
-    const nextEp = isCompleted ? prevAnime.totalEpisodes : prevAnime.currentEpisode;
-
-    const nextAnimes = animes.map(anime =>
-      anime.id === animeId
-        ? { ...anime, status: newStatus, currentEpisode: nextEp }
-        : anime
-    );
-
-    const actionNow = Date.now();
-    const activity: UserActivity = isCompleted
-      ? {
-          id: `act_${actionNow}_${animeId}`,
-          type: 'completed_anime',
-          title: `Marcou ${prevAnime.title} como concluído`,
-          description: `${nextEp}/${prevAnime.totalEpisodes} episódios`,
-          timestamp: 'Agora',
-          createdAtTimestamp: actionNow,
-          episode: nextEp
-        }
-      : {
-          id: `act_${actionNow}_${animeId}`,
-          type: 'status_changed',
-          title:
-            newStatus === 'on_hold'
-              ? `Colocou ${prevAnime.title} em espera`
-              : newStatus === 'dropped'
-              ? `Marcou ${prevAnime.title} como abandonado`
-              : `Moveu ${prevAnime.title} para ${STATUS_ACTIVITY_LABEL[newStatus]}`,
+            nextEp > prevAnime.currentEpisode
+              ? `Assistiu até o episódio ${nextEp} de ${prevAnime.title}`
+              : `Atualizou o progresso de ${prevAnime.title} para o episódio ${nextEp}`,
           description: `Progresso: ${nextEp}/${prevAnime.totalEpisodes} episódios`,
           timestamp: 'Agora',
           createdAtTimestamp: actionNow,
-          episode: nextEp
+          episode: nextEp,
         };
+      }
 
-    persistAndApply(nextAnimes, activity);
-  };
+      persistAndApply(nextAnimes, newActivity);
+    },
+    [persistAndApply]
+  );
 
-  // Handler: Save anime edit from modal (updates episode count, status and rating, recording 1 consolidated activity)
-  const handleSaveAnimeEdit = (
-    animeId: string,
-    updates: { currentEpisode: number; status: AnimeItem['status']; rating: number }
-  ) => {
-    const prevAnime = animes.find(a => a.id === animeId);
-    if (!prevAnime) return;
+  // Handler: Toggle favorite (single-slot update without full-list map cloning)
+  const handleToggleFavorite = useCallback(
+    (animeId: string) => {
+      const currentAnimes = latestAnimeMutationStateRef.current.animes;
+      const result = updateSingleAnimeById(currentAnimes, animeId, (prevAnime) => ({
+        ...prevAnime,
+        isFavorite: !prevAnime.isFavorite,
+      }));
+      if (!result) return;
 
-    const nextEp = Math.min(prevAnime.totalEpisodes, Math.max(0, updates.currentEpisode));
-    const nextStatus = updates.status;
-    const nextRating = updates.rating;
+      const { nextAnimes, previousAnime: prevAnime, updatedAnime } = result;
+      const nextFav = updatedAnime.isFavorite;
 
-    const statusChanged = nextStatus !== prevAnime.status;
-    const epChanged = nextEp !== prevAnime.currentEpisode;
-    const ratingChanged = nextRating !== prevAnime.rating;
-
-    if (!statusChanged && !epChanged && !ratingChanged) {
-      return;
-    }
-
-    const nextAnimes = animes.map(anime =>
-      anime.id === animeId
-        ? {
-            ...anime,
-            currentEpisode: nextEp,
-            status: nextStatus,
-            rating: nextRating
-          }
-        : anime
-    );
-
-    const actionNow = Date.now();
-    let newActivity: UserActivity | null = null;
-
-    if (statusChanged && nextStatus === 'completed') {
-      newActivity = {
+      const actionNow = Date.now();
+      const activity: UserActivity = {
         id: `act_${actionNow}_${animeId}`,
-        type: 'completed_anime',
-        title: `Marcou ${prevAnime.title} como concluído`,
-        description: `${nextEp}/${prevAnime.totalEpisodes} episódios${ratingChanged && nextRating > 0 ? ` · Nota ${nextRating}/10` : ''}`,
+        type: 'added_favorite',
+        title: nextFav
+          ? `Adicionou ${prevAnime.title} aos favoritos`
+          : `Removeu ${prevAnime.title} dos favoritos`,
+        description: prevAnime.genres.slice(0, 2).join(' · '),
         timestamp: 'Agora',
         createdAtTimestamp: actionNow,
-        episode: nextEp,
-        score: ratingChanged && nextRating > 0 ? nextRating : undefined
+        animeId: prevAnime.id,
+        animeTitle: prevAnime.title,
+        posterUrl: prevAnime.posterUrl,
       };
-    } else if (statusChanged) {
-      const statusTitle =
-        nextStatus === 'on_hold'
-          ? `Colocou ${prevAnime.title} em espera`
-          : nextStatus === 'dropped'
-          ? `Marcou ${prevAnime.title} como abandonado`
-          : `Moveu ${prevAnime.title} para ${STATUS_ACTIVITY_LABEL[nextStatus]}`;
 
-      newActivity = {
-        id: `act_${actionNow}_${animeId}`,
-        type: 'status_changed',
-        title: statusTitle,
-        description: `Progresso: ${nextEp}/${prevAnime.totalEpisodes} episódios${ratingChanged && nextRating > 0 ? ` · Nota ${nextRating}/10` : ''}`,
-        timestamp: 'Agora',
-        createdAtTimestamp: actionNow,
-        episode: nextEp,
-        score: ratingChanged && nextRating > 0 ? nextRating : undefined
-      };
-    } else if (ratingChanged) {
-      newActivity = {
-        id: `act_${actionNow}_${animeId}`,
-        type: 'rated',
-        title:
-          nextRating > 0
-            ? `Avaliou ${prevAnime.title} com nota ${nextRating}`
-            : `Removeu a avaliação de ${prevAnime.title}`,
-        description: epChanged
-          ? `Progresso atualizado para ${nextEp}/${prevAnime.totalEpisodes} episódios`
-          : nextRating > 0
-          ? `Avaliação atualizada (${nextRating}/10)`
-          : 'Sem nota atribuída',
-        timestamp: 'Agora',
-        createdAtTimestamp: actionNow,
-        score: nextRating > 0 ? nextRating : undefined,
-        episode: epChanged ? nextEp : undefined
-      };
-    } else if (epChanged) {
-      newActivity = {
-        id: `act_${actionNow}_${animeId}`,
-        type: 'watched_ep',
-        title:
-          nextEp > prevAnime.currentEpisode
-            ? `Assistiu até o episódio ${nextEp} de ${prevAnime.title}`
-            : `Atualizou o progresso de ${prevAnime.title} para o episódio ${nextEp}`,
-        description: `Progresso: ${nextEp}/${prevAnime.totalEpisodes} episódios`,
-        timestamp: 'Agora',
-        createdAtTimestamp: actionNow,
-        episode: nextEp
-      };
-    }
-
-    persistAndApply(nextAnimes, newActivity);
-  };
-
-  // Handler: Toggle favorite
-  const handleToggleFavorite = (animeId: string) => {
-    const prevAnime = animes.find(a => a.id === animeId);
-    if (!prevAnime) return;
-
-    const nextFav = !prevAnime.isFavorite;
-    const nextAnimes = animes.map(anime =>
-      anime.id === animeId ? { ...anime, isFavorite: nextFav } : anime
-    );
-
-    const actionNow = Date.now();
-    const activity: UserActivity = {
-      id: `act_${actionNow}_${animeId}`,
-      type: 'added_favorite',
-      title: nextFav
-        ? `Adicionou ${prevAnime.title} aos favoritos`
-        : `Removeu ${prevAnime.title} dos favoritos`,
-      description: prevAnime.genres.slice(0, 2).join(' · '),
-      timestamp: 'Agora',
-      createdAtTimestamp: actionNow,
-      animeId: prevAnime.id,
-      animeTitle: prevAnime.title,
-      posterUrl: prevAnime.posterUrl
-    };
-
-    persistAndApply(nextAnimes, activity);
-  };
+      persistAndApply(nextAnimes, activity);
+    },
+    [persistAndApply]
+  );
 
   // Image updates
   const handleUpdateAvatar = (url: string) => {
@@ -1971,37 +2024,8 @@ export default function App() {
       setDemoAnimes(mergedAnimes);
       setDemoFavoriteCharacters(nextDemoCharacters);
       setDemoActivities((prev) => [syncActivity, ...prev]);
-
-      if (isDemoPreview) {
-        try {
-          window.localStorage.setItem(
-            DEMO_PROFILE_STORAGE_KEY,
-            JSON.stringify({
-              profileOverrides: {
-                ...nextDemoProfile,
-              },
-              animes: mergedAnimes,
-              favoriteCharacters: nextDemoCharacters,
-              comments: demoComments,
-              activities: [syncActivity, ...demoActivities],
-              notifications: demoNotifications,
-            })
-          );
-        } catch {
-          // Fallback
-        }
-      }
     },
-    [
-      isAuthenticated,
-      demoProfile,
-      demoFavoriteCharacters,
-      demoActivities,
-      isDemoPreview,
-      demoComments,
-      demoNotifications,
-      updateAuthWorkspace,
-    ]
+    [isAuthenticated, demoProfile, demoFavoriteCharacters, updateAuthWorkspace]
   );
 
   // Handler: Sync imported anime list from MyAnimeList
@@ -2049,7 +2073,7 @@ export default function App() {
         return;
       }
 
-      // Modo demonstração
+      // Modo demonstração (persistido via debounce unificado)
       const prevDemoAccounts = demoProfile.externalAccounts ?? {
         anilist: { connected: false },
         mal: { connected: false },
@@ -2064,36 +2088,8 @@ export default function App() {
       setDemoProfile(nextDemoProfile);
       setDemoAnimes(mergedAnimes);
       setDemoActivities((prev) => [syncActivity, ...prev]);
-      if (isDemoPreview) {
-        try {
-          window.localStorage.setItem(
-            DEMO_PROFILE_STORAGE_KEY,
-            JSON.stringify({
-              profileOverrides: {
-                ...nextDemoProfile,
-              },
-              animes: mergedAnimes,
-              favoriteCharacters: demoFavoriteCharacters,
-              comments: demoComments,
-              activities: [syncActivity, ...demoActivities],
-              notifications: demoNotifications,
-            })
-          );
-        } catch {
-          // Fallback
-        }
-      }
     },
-    [
-      isAuthenticated,
-      demoProfile,
-      demoFavoriteCharacters,
-      demoActivities,
-      isDemoPreview,
-      demoComments,
-      demoNotifications,
-      updateAuthWorkspace,
-    ]
+    [isAuthenticated, demoProfile, updateAuthWorkspace]
   );
 
   // Real Logout handler: wipes personal memory immediately, terminates Firebase Auth session and returns to login screen
@@ -2396,6 +2392,39 @@ export default function App() {
     ]
   );
 
+  const searchableProfiles = useMemo(
+    () => (isAuthenticated ? Object.values(authOtherProfilesMap) : undefined),
+    [isAuthenticated, authOtherProfilesMap]
+  );
+
+  const blockedIdsList = useMemo(() => Array.from(blockedIds), [blockedIds]);
+
+  const chatFollowersIdsSet = useMemo(
+    () => new Set((activeFollowersSource ?? []).map((f) => f.id)),
+    [activeFollowersSource]
+  );
+
+  const handleOpenFollowersModal = useCallback(
+    (tab: 'followers' | 'following' | 'requests' = 'followers') => {
+      setFollowersInitialTab(tab);
+      setIsFollowersOpen(true);
+    },
+    []
+  );
+
+  const handleOpenMessagesFromHeader = useCallback(() => {
+    handleOpenChat();
+  }, [handleOpenChat]);
+
+  const handleOpenAuthFromHeader = useCallback((mode: 'login' | 'signup' = 'login') => {
+    setAuthInitialMode(mode);
+    setIsDemoPreview(false);
+  }, []);
+
+  const handleClearSelectedAnime = useCallback(() => {
+    setSelectedAnimeDetailId(null);
+  }, []);
+
   // Rota privada de administração (/admin) com validação mandatória de servidor vinculada ao UID autenticado
   if (currentView === 'admin') {
     const isWaitingForAdminCheck =
@@ -2496,15 +2525,12 @@ export default function App() {
         currentUser={currentUser}
         activeProfile={activeProfile}
         animes={exposedAnimes}
-        searchableProfiles={isAuthenticated ? Object.values(authOtherProfilesMap) : undefined}
+        searchableProfiles={searchableProfiles}
         notifications={notifications}
         isNotifOpen={isNotifOpen}
         onToggleNotif={setIsNotifOpen}
-        onOpenSettings={(tab = 'profile') => handleOpenSettings(tab)}
-        onOpenFollowers={(tab = 'followers') => {
-          setFollowersInitialTab(tab);
-          setIsFollowersOpen(true);
-        }}
+        onOpenSettings={handleOpenSettings}
+        onOpenFollowers={handleOpenFollowersModal}
         onSelectProfile={handleSelectProfile}
         onSelectAnime={handleSelectAnimeFromSearch}
         onMarkNotificationAsRead={handleMarkNotificationAsRead}
@@ -2518,17 +2544,10 @@ export default function App() {
         isAuthenticated={isAuthenticated}
         authenticatedEmail={isAuthenticated ? user?.email ?? null : null}
         onLogout={isAuthenticated ? handleLogout : undefined}
-        onOpenMessages={() => handleOpenChat()}
+        onOpenMessages={handleOpenMessagesFromHeader}
         unreadMessagesCount={unreadMessagesCount}
         onOpenAdminPanel={handleNavigateToAdmin}
-        onOpenAuth={
-          !isAuthenticated
-            ? (mode = 'login') => {
-                setAuthInitialMode(mode);
-                setIsDemoPreview(false);
-              }
-            : undefined
-        }
+        onOpenAuth={!isAuthenticated ? handleOpenAuthFromHeader : undefined}
       />
 
       {/* Main Container */}
@@ -2615,7 +2634,7 @@ export default function App() {
                       selectedStatusFilter={selectedAnimeStatusFilter}
                       filterSyncKey={animeFilterSyncKey}
                       selectedAnimeId={selectedAnimeDetailId}
-                      onClearSelectedAnime={() => setSelectedAnimeDetailId(null)}
+                      onClearSelectedAnime={handleClearSelectedAnime}
                       isListPrivateForVisitors={activeProfile.privacySettings?.showAnimeList === false}
                       onUpdateEpisode={handleUpdateEpisode}
                       onToggleFavorite={handleToggleFavorite}
@@ -2667,6 +2686,7 @@ export default function App() {
                     <LazyActivityTab
                       profileId={activeProfile.id}
                       activities={displayedActivities}
+                      userAnimes={exposedAnimes}
                       highlightedActivityId={highlightedActivityId}
                     />
                   </Suspense>
@@ -2728,7 +2748,7 @@ export default function App() {
             openSyncKey={settingsOpenSyncKey}
             profile={currentUser}
             currentAnimes={animes}
-            blockedIds={Array.from(blockedIds)}
+            blockedIds={blockedIdsList}
             otherProfiles={authOtherProfilesMap}
             onUnblockUser={handleBlockToggle}
             onSyncAniList={handleSyncAniList}
@@ -2753,11 +2773,7 @@ export default function App() {
             initialRecipientId={chatRecipientId}
             userAnimes={animes}
             followingIds={followingIds}
-            followersIds={new Set(
-              isAuthenticated
-                ? (activeAuthWorkspace?.followers ?? []).map((f) => f.id)
-                : demoFollowers.map((f) => f.id)
-            )}
+            followersIds={chatFollowersIdsSet}
             blockedIds={blockedIds}
             onClose={() => {
               setIsChatOpen(false);

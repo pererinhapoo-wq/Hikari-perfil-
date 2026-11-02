@@ -1,108 +1,276 @@
 import { useState, useEffect } from 'react';
 
+interface SharedClockBucket {
+  intervalMs: number;
+  currentNow: number;
+  intervalId: ReturnType<typeof setInterval> | null;
+  subscribers: Set<(nowMs: number) => void>;
+}
+
+const clockBuckets = new Map<number, SharedClockBucket>();
+let visibilityListenerRegistered = false;
+
+function isDocumentHidden(): boolean {
+  return typeof document !== 'undefined' && document.visibilityState === 'hidden';
+}
+
+function startBucketTimer(bucket: SharedClockBucket): void {
+  if (bucket.intervalId !== null || bucket.subscribers.size === 0) return;
+  if (typeof window === 'undefined' || isDocumentHidden()) return;
+
+  bucket.intervalId = setInterval(() => {
+    if (isDocumentHidden()) {
+      stopBucketTimer(bucket);
+      return;
+    }
+    const tickNow = Date.now();
+    bucket.currentNow = tickNow;
+    for (const notify of bucket.subscribers) {
+      notify(tickNow);
+    }
+  }, bucket.intervalMs);
+}
+
+function stopBucketTimer(bucket: SharedClockBucket): void {
+  if (bucket.intervalId !== null) {
+    clearInterval(bucket.intervalId);
+    bucket.intervalId = null;
+  }
+}
+
+function handleGlobalVisibilityChange(): void {
+  const hidden = isDocumentHidden();
+  const now = Date.now();
+
+  for (const bucket of clockBuckets.values()) {
+    if (hidden) {
+      stopBucketTimer(bucket);
+    } else if (bucket.subscribers.size > 0) {
+      bucket.currentNow = now;
+      for (const notify of bucket.subscribers) {
+        notify(now);
+      }
+      startBucketTimer(bucket);
+    }
+  }
+}
+
+function attachGlobalVisibilityListener(): void {
+  if (visibilityListenerRegistered || typeof document === 'undefined') return;
+  document.addEventListener('visibilitychange', handleGlobalVisibilityChange);
+  visibilityListenerRegistered = true;
+}
+
+function detachGlobalVisibilityListenerIfIdle(): void {
+  if (!visibilityListenerRegistered || typeof document === 'undefined') return;
+  let totalSubscribers = 0;
+  for (const bucket of clockBuckets.values()) {
+    totalSubscribers += bucket.subscribers.size;
+  }
+  if (totalSubscribers === 0) {
+    document.removeEventListener('visibilitychange', handleGlobalVisibilityChange);
+    visibilityListenerRegistered = false;
+  }
+}
+
 /**
- * Periodically updates the current epoch timestamp (ms) while the page remains open
- * so relative labels ("Agora", "Há 1 minuto", "Há 2 horas", etc.) advance without reload.
+ * Assinatura imperativa ao relógio compartilhado centralizado por intervalMs.
+ * Garante no máximo 1 timer por intervalo em toda a aplicação, pausando automaticamente
+ * quando document.visibilityState === 'hidden' e limpando recursos quando não há inscritos.
+ */
+export function subscribeToSharedClock(
+  listener: (nowMs: number) => void,
+  intervalMs = 15000
+): () => void {
+  const normalizedInterval = Math.max(1000, Math.floor(intervalMs));
+  let bucket = clockBuckets.get(normalizedInterval);
+  if (!bucket) {
+    bucket = {
+      intervalMs: normalizedInterval,
+      currentNow: Date.now(),
+      intervalId: null,
+      subscribers: new Set(),
+    };
+    clockBuckets.set(normalizedInterval, bucket);
+  }
+
+  bucket.subscribers.add(listener);
+  attachGlobalVisibilityListener();
+  startBucketTimer(bucket);
+
+  return () => {
+    const activeBucket = clockBuckets.get(normalizedInterval);
+    if (!activeBucket) return;
+    activeBucket.subscribers.delete(listener);
+    if (activeBucket.subscribers.size === 0) {
+      stopBucketTimer(activeBucket);
+      clockBuckets.delete(normalizedInterval);
+    }
+    detachGlobalVisibilityListenerIfIdle();
+  };
+}
+
+/**
+ * Métricas diagnósticas do relógio compartilhado para verificação automatizada de timers ativos.
+ */
+export function getSharedClockDiagnostics(): {
+  activeTimersCount: number;
+  totalSubscribersCount: number;
+} {
+  let activeTimersCount = 0;
+  let totalSubscribersCount = 0;
+  for (const bucket of clockBuckets.values()) {
+    if (bucket.intervalId !== null) {
+      activeTimersCount++;
+    }
+    totalSubscribersCount += bucket.subscribers.size;
+  }
+  return { activeTimersCount, totalSubscribersCount };
+}
+
+/**
+ * Hook que retorna o instante atual (ms) compartilhando um único timer centralizado
+ * e pausando automaticamente quando a aba está em segundo plano.
  */
 export function useCurrentTime(intervalMs = 15000): number {
   const [now, setNow] = useState<number>(() => Date.now());
 
   useEffect(() => {
-    const timerId = window.setInterval(() => {
-      setNow(Date.now());
+    if (typeof window === 'undefined') return;
+    return subscribeToSharedClock((tickNow) => {
+      setNow(tickNow);
     }, intervalMs);
-    return () => window.clearInterval(timerId);
   }, [intervalMs]);
 
   return now;
 }
 
 /**
- * Formats an epoch timestamp (ms) as a Portuguese relative duration.
- * Examples:
- * - capitalized (default): "Agora", "Há 1 minuto", "Há 2 minutos", "Há 2 horas", "Há 3 dias"
- * - lowercase (for inline suffix after "— "): "agora", "há 1 minuto", "há 2 minutos"
+ * Hook otimizado para rótulos de tempo relativo:
+ * - Não cria assinatura de timer se o item usar apenas texto fixo (sem timestamp numérico).
+ * - Compartilha o único relógio centralizado para itens dinâmicos.
+ * - Só dispara re-renderização do componente folha quando o texto formatado realmente muda
+ *   (ex: evita re-renderizar "Há 3 dias" a cada 15 segundos).
  */
-export function formatRelativeTime(
-  createdAtTimestamp: number | undefined,
-  now: number,
+export function useRelativeTimeLabel(
+  timestamp: number | undefined,
   fallbackText = '',
-  lowercase = false
+  lowercase = false,
+  intervalMs = 15000
 ): string {
-  if (typeof createdAtTimestamp !== 'number' || !Number.isFinite(createdAtTimestamp)) {
-    return lowercase && fallbackText ? fallbackText.charAt(0).toLowerCase() + fallbackText.slice(1) : fallbackText;
-  }
+  const hasNumericTimestamp =
+    typeof timestamp === 'number' && Number.isFinite(timestamp) && timestamp > 0;
 
-  const diffMs = Math.max(0, now - createdAtTimestamp);
-  const diffSec = Math.floor(diffMs / 1000);
+  const [label, setLabel] = useState<string>(() =>
+    formatRelativeTime(timestamp, Date.now(), fallbackText, lowercase)
+  );
 
-  if (diffSec < 60) {
-    return lowercase ? 'agora' : 'Agora';
-  }
+  useEffect(() => {
+    setLabel(formatRelativeTime(timestamp, Date.now(), fallbackText, lowercase));
 
-  const prefix = lowercase ? 'há' : 'Há';
-  const diffMin = Math.floor(diffSec / 60);
-  if (diffMin === 1) return `${prefix} 1 minuto`;
-  if (diffMin < 60) return `${prefix} ${diffMin} minutos`;
+    if (!hasNumericTimestamp || typeof window === 'undefined') {
+      return;
+    }
 
-  const diffHour = Math.floor(diffMin / 60);
-  if (diffHour === 1) return `${prefix} 1 hora`;
-  if (diffHour < 24) return `${prefix} ${diffHour} horas`;
+    return subscribeToSharedClock((tickNow) => {
+      const nextLabel = formatRelativeTime(timestamp, tickNow, fallbackText, lowercase);
+      setLabel((prev) => (prev === nextLabel ? prev : nextLabel));
+    }, intervalMs);
+  }, [timestamp, fallbackText, lowercase, intervalMs, hasNumericTimestamp]);
 
-  const diffDay = Math.floor(diffHour / 24);
-  if (diffDay === 1) return `${prefix} 1 dia`;
-  if (diffDay < 7) return `${prefix} ${diffDay} dias`;
-
-  const diffWeek = Math.floor(diffDay / 7);
-  if (diffWeek === 1) return `${prefix} 1 semana`;
-  if (diffWeek < 5) return `${prefix} ${diffWeek} semanas`;
-
-  const diffMonth = Math.floor(diffDay / 30);
-  if (diffMonth === 1) return `${prefix} 1 mês`;
-  if (diffMonth < 12) return `${prefix} ${diffMonth} meses`;
-
-  const diffYear = Math.floor(diffDay / 365);
-  if (diffYear === 1) return `${prefix} 1 ano`;
-  return `${prefix} ${diffYear} anos`;
+  return label;
 }
 
 /**
- * Formats an epoch timestamp (ms) as an exact localized pt-BR date and time string for tooltips.
+ * Formata um timestamp (ms) para tempo relativo natural em português.
+ * - Menos de 60s: "Agora" (ou "agora")
+ * - 1 a 59 min: "Há X minuto(s)"
+ * - 1 a 23 h: "Há X hora(s)"
+ * - 1 a 6 dias: "Há X dia(s)"
+ * - 7 a 29 dias: "Há X semana(s)"
+ * - 30 a 364 dias: "Há X mês/meses"
+ * - 365+ dias: "Há X ano(s)"
  */
-export function formatExactDateTime(createdAtTimestamp: number | undefined): string {
-  if (typeof createdAtTimestamp !== 'number' || !Number.isFinite(createdAtTimestamp)) {
-    return '';
+export function formatRelativeTime(
+  timestamp: number | undefined,
+  nowMs: number,
+  fallbackText = '',
+  lowercase = false
+): string {
+  if (!timestamp || !Number.isFinite(timestamp)) {
+    return fallbackText;
   }
-  return new Date(createdAtTimestamp).toLocaleString('pt-BR', {
-    dateStyle: 'short',
-    timeStyle: 'short'
+
+  const diffSeconds = Math.max(0, Math.floor((nowMs - timestamp) / 1000));
+  const prefix = lowercase ? 'há' : 'Há';
+
+  if (diffSeconds < 60) {
+    return lowercase ? 'agora' : 'Agora';
+  }
+
+  const minutes = Math.floor(diffSeconds / 60);
+  if (minutes < 60) {
+    return minutes === 1 ? `${prefix} 1 minuto` : `${prefix} ${minutes} minutos`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return hours === 1 ? `${prefix} 1 hora` : `${prefix} ${hours} horas`;
+  }
+
+  const days = Math.floor(hours / 24);
+  if (days < 7) {
+    return days === 1 ? `${prefix} 1 dia` : `${prefix} ${days} dias`;
+  }
+
+  if (days < 30) {
+    const weeks = Math.floor(days / 7);
+    return weeks === 1 ? `${prefix} 1 semana` : `${prefix} ${weeks} semanas`;
+  }
+
+  if (days < 365) {
+    const months = Math.floor(days / 30);
+    return months === 1 ? `${prefix} 1 mês` : `${prefix} ${months} meses`;
+  }
+
+  const years = Math.floor(days / 365);
+  return years === 1 ? `${prefix} 1 ano` : `${prefix} ${years} anos`;
+}
+
+/**
+ * Formata data completa para exibição em tooltips de acessibilidade.
+ */
+export function formatExactDateTime(timestamp: number | undefined): string {
+  if (!timestamp || !Number.isFinite(timestamp)) return '';
+  return new Date(timestamp).toLocaleString('pt-BR', {
+    day: '2-digit',
+    month: 'long',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
   });
 }
 
 /**
- * Converts legacy human-readable labels ("Há 2 horas", "Ontem", "Há 3 dias", "Há 1 semana")
- * into an initial millisecond offset once on initial seed so original timestamps stay fixed across reloads.
+ * Infere um deslocamento em milissegundos a partir de um rótulo textual legado
+ * (ex: "Há 2 horas", "Há 3 dias", "Há 1 semana") para converter dados iniciais sem timestamp numérico.
  */
 export function inferOffsetMsFromLabel(label: string): number {
   const normalized = label.trim().toLowerCase();
-  const MINUTE = 60 * 1000;
-  const HOUR = 60 * MINUTE;
-  const DAY = 24 * HOUR;
+  if (!normalized || normalized === 'agora' || normalized === 'agora mesmo') {
+    return 0;
+  }
+  const match = normalized.match(/(\d+)\s*(minuto|hora|dia|semana|m[eê]s|ano)/);
+  if (!match) return 0;
 
-  if (normalized === 'agora') return 0;
-  if (normalized === 'ontem') return DAY;
-
-  const match = normalized.match(/(\d+)\s*(minuto|minutos|hora|horas|dia|dias|semana|semanas|mês|meses)/);
-  if (!match) return HOUR;
-
-  const amount = parseInt(match[1], 10);
+  const value = parseInt(match[1], 10);
   const unit = match[2];
 
-  if (unit.startsWith('minuto')) return amount * MINUTE;
-  if (unit.startsWith('hora')) return amount * HOUR;
-  if (unit.startsWith('dia')) return amount * DAY;
-  if (unit.startsWith('semana')) return amount * 7 * DAY;
-  if (unit.startsWith('mês') || unit.startsWith('mes')) return amount * 30 * DAY;
-
-  return HOUR;
+  if (unit.startsWith('minuto')) return value * 60 * 1000;
+  if (unit.startsWith('hora')) return value * 3600 * 1000;
+  if (unit.startsWith('dia')) return value * 86400 * 1000;
+  if (unit.startsWith('semana')) return value * 7 * 86400 * 1000;
+  if (unit.startsWith('m')) return value * 30 * 86400 * 1000;
+  if (unit.startsWith('ano')) return value * 365 * 86400 * 1000;
+  return 0;
 }

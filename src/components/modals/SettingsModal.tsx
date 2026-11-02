@@ -48,6 +48,11 @@ import {
   type MALServerStatus,
 } from '../../services/malService';
 import { useAuth } from '../../contexts/AuthContext';
+import {
+  runGuardedExternalSync,
+  recordExternalSyncSuccess,
+  clearExternalSyncCooldown,
+} from '../../utils/syncCooldown';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -207,8 +212,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [isImportingMAL, setIsImportingMAL] = useState(false);
   const [malSuccessMsg, setMalSuccessMsg] = useState<string | null>(null);
 
-  // Check MAL server status on mount
+  // Check MAL server status lazily only when the Connected Accounts tab is opened
   useEffect(() => {
+    if (!isOpen || activeTab !== 'connected' || malStatus !== null) {
+      return;
+    }
     let isMounted = true;
     fetchMALServerStatus()
       .then((status) => {
@@ -218,7 +226,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [isOpen, activeTab, malStatus]);
 
   // Escuta estrita e segura do callback OAuth do MyAnimeList via postMessage
   useEffect(() => {
@@ -408,6 +416,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   const handleDisconnectMAL = async () => {
+    const previousMalAccount = malUsername || profile.id;
     if (user) {
       try {
         const idToken = await user.getIdToken();
@@ -416,6 +425,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         // offline/demo fallback
       }
     }
+    clearExternalSyncCooldown({
+      profileId: profile.id,
+      provider: 'mal',
+      accountIdentifier: previousMalAccount,
+    });
     setMalConnected(false);
     setMalUsername('');
     setMalAvatarUrl('');
@@ -434,6 +448,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   const handleFetchMALList = async () => {
+    const syncScope = {
+      profileId: profile.id,
+      provider: 'mal' as const,
+      accountIdentifier: malUsername || profile.id,
+    };
+
     setIsFetchingMALList(true);
     setMalListError(null);
     setMalPreview(null);
@@ -445,8 +465,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         );
         return;
       }
-      const idToken = await user.getIdToken();
-      const entries = await fetchMALAnimeList(idToken);
+
+      const outcome = await runGuardedExternalSync(syncScope, 'manual', async () => {
+        const idToken = await user.getIdToken();
+        return fetchMALAnimeList(idToken);
+      });
+
+      if (!outcome.executed) {
+        if (outcome.reason === 'in_flight') {
+          setMalListError('Uma consulta ao MyAnimeList já está em andamento para esta conta.');
+        }
+        return;
+      }
+
+      const entries = outcome.data;
       setRawMALEntries(entries);
       const preview = calculateMALImportPreview(entries, currentAnimes, malUsername);
       setMalPreview(preview);
@@ -479,6 +511,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     })}`;
 
     setMalLastSync(formattedDate);
+    recordExternalSyncSuccess({
+      profileId: profile.id,
+      provider: 'mal',
+      accountIdentifier: malUsername || profile.id,
+    });
 
     if (onSyncMAL) {
       onSyncMAL(mergedList, {
@@ -1484,6 +1521,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         <button
                           type="button"
                           onClick={() => {
+                            const previousAniListAccount = anilistUsername || profile.id;
+                            clearExternalSyncCooldown({
+                              profileId: profile.id,
+                              provider: 'anilist',
+                              accountIdentifier: previousAniListAccount,
+                            });
                             setAnilistConnected(false);
                             setAnilistUsername('');
                             setAnilistAvatarUrl('');
@@ -1577,12 +1620,30 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             type="button"
                             disabled={isFetchingCollection || isImporting}
                             onClick={async () => {
+                              const syncScope = {
+                                profileId: profile.id,
+                                provider: 'anilist' as const,
+                                accountIdentifier: anilistUsername || profile.id,
+                              };
                               setIsFetchingCollection(true);
                               setCollectionError(null);
                               setAniListPreview(null);
                               setImportSuccessMsg(null);
                               try {
-                                const entries = await fetchAniListAnimeList(anilistUsername);
+                                const outcome = await runGuardedExternalSync(
+                                  syncScope,
+                                  'manual',
+                                  () => fetchAniListAnimeList(anilistUsername)
+                                );
+                                if (!outcome.executed) {
+                                  if (outcome.reason === 'in_flight') {
+                                    setCollectionError(
+                                      'Uma consulta ao AniList já está em andamento para esta conta.'
+                                    );
+                                  }
+                                  return;
+                                }
+                                const entries = outcome.data;
                                 setRawIncomingEntries(entries);
                                 const preview = calculateAniListImportPreview(
                                   entries,
@@ -1971,6 +2032,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                               })}`;
 
                               setAnilistLastSync(formattedDate);
+                              recordExternalSyncSuccess({
+                                profileId: profile.id,
+                                provider: 'anilist',
+                                accountIdentifier: anilistUsername || profile.id,
+                              });
 
                               if (onSyncAniList) {
                                 onSyncAniList(mergedList, {

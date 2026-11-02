@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useCallback } from 'react';
 import { 
   MessageSquare, 
   ArrowRight, 
@@ -17,22 +17,24 @@ import {
   FavoritePerson,
 } from '../../types';
 import { FavoritesTab } from './FavoritesTab';
-import { useCurrentTime, formatRelativeTime, formatExactDateTime } from '../../utils/relativeTime';
+import { useRelativeTimeLabel, formatExactDateTime } from '../../utils/relativeTime';
 import { computeAnimeStats, type AnimeStatsSummary } from '../../utils/animeStats';
 import { ActivityPosterThumb } from '../common/ActivityPosterThumb';
 
+const NOOP_TOGGLE_FAVORITE = (_id: string) => {};
+
 /**
- * Isolated leaf component that subscribes to useCurrentTime()
- * so timer ticks do NOT cause the parent OverviewTab or its 2,000+ animes to re-render.
+ * Isolated leaf component using centralized shared clock + string diffing
+ * so timer ticks do NOT cause parent OverviewTab or unchanged labels to re-render.
  */
 const RelativeTimeSpan: React.FC<{
   timestamp: number | undefined;
   fallbackText?: string;
   lowercase?: boolean;
-}> = ({ timestamp, fallbackText = '', lowercase = false }) => {
-  const now = useCurrentTime();
-  return <>{formatRelativeTime(timestamp, now, fallbackText, lowercase)}</>;
-};
+}> = React.memo(({ timestamp, fallbackText = '', lowercase = false }) => {
+  const label = useRelativeTimeLabel(timestamp, fallbackText, lowercase);
+  return <>{label}</>;
+});
 
 interface OverviewTabProps {
   profile: UserProfile;
@@ -50,7 +52,7 @@ interface OverviewTabProps {
   onToggleFavorite?: (id: string) => void;
 }
 
-export const OverviewTab: React.FC<OverviewTabProps> = ({
+export const OverviewTab: React.FC<OverviewTabProps> = React.memo(({
   profile,
   animes,
   animeStats,
@@ -92,14 +94,23 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
     [animeStats, animes]
   );
 
-  const handleOpenStatusList = (status: AnimeStatus) => {
-    if (!canOpenLists) return;
-    if (onSelectAnimeStatus) {
-      onSelectAnimeStatus(status);
-    } else {
-      onNavigateTab('animes');
+  const handleOpenStatusList = useCallback(
+    (status: AnimeStatus) => {
+      if (!canOpenLists) return;
+      if (onSelectAnimeStatus) {
+        onSelectAnimeStatus(status);
+      } else {
+        onNavigateTab('animes');
+      }
+    },
+    [canOpenLists, onSelectAnimeStatus, onNavigateTab]
+  );
+
+  const handleNavigateFavoritesToAnimes = useCallback(() => {
+    if (canOpenLists) {
+      handleOpenStatusList('all');
     }
-  };
+  }, [canOpenLists, handleOpenStatusList]);
 
   // Memoize proportional stacked bar segments (SVG viewBox width = 1000)
   const { renderedSegments } = useMemo(() => {
@@ -380,12 +391,8 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
               companies={favoriteCompanies}
               people={favoritePeople}
               isOwnProfile={!!isOwnProfile}
-              onToggleFavorite={onToggleFavorite || (() => {})}
-              onNavigateToAnimes={() => {
-                if (canOpenLists) {
-                  handleOpenStatusList('all');
-                }
-              }}
+              onToggleFavorite={onToggleFavorite || NOOP_TOGGLE_FAVORITE}
+              onNavigateToAnimes={handleNavigateFavoritesToAnimes}
             />
           )}
 
@@ -519,6 +526,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                       <ActivityPosterThumb
                         activity={act}
                         userAnimes={animes}
+                        profileId={profile.id}
                         size="sm"
                       />
                       <div className="flex-1 min-w-0 text-xs">
@@ -589,4 +597,4 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
       </div>
     </div>
   );
-};
+});

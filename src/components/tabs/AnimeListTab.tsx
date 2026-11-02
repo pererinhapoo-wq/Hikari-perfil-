@@ -49,6 +49,74 @@ const COLUMNS = 3;
 const OVERSCAN_ROWS = 2; // 2 rows above + 2 rows below = 12 buffer cards
 const DEFAULT_ROW_HEIGHT = 380;
 
+const STATUS_CATEGORIES: { id: AnimeStatus; label: string; icon: React.ReactNode }[] = [
+  { id: 'all', label: 'Todos', icon: null },
+  { id: 'watching', label: 'Assistindo', icon: <Play className="h-3 w-3" /> },
+  { id: 'completed', label: 'Concluídos', icon: <Check className="h-3 w-3" /> },
+  { id: 'planned', label: 'Planejados', icon: <Clock className="h-3 w-3" /> },
+  { id: 'on_hold', label: 'Em espera', icon: <PauseCircle className="h-3 w-3" /> },
+  { id: 'dropped', label: 'Abandonados', icon: <XCircle className="h-3 w-3" /> },
+];
+
+const animeSearchTextCache = new WeakMap<AnimeItem, string>();
+
+/**
+ * Pré-indexa o texto pesquisável de cada AnimeItem em minúsculas uma única vez por referência.
+ */
+export function getNormalizedAnimeSearchText(anime: AnimeItem): string {
+  const cached = animeSearchTextCache.get(anime);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const normalized = `${anime.title || ''}\u0000${anime.titleRomaji || ''}\u0000${
+    Array.isArray(anime.genres) ? anime.genres.join('\u0000') : ''
+  }`.toLowerCase();
+  animeSearchTextCache.set(anime, normalized);
+  return normalized;
+}
+
+/**
+ * Calcula a contagem de todas as 6 categorias de filtro em uma única passagem O(N).
+ */
+export function computeAnimeStatusCounts(
+  animes: readonly AnimeItem[]
+): Record<AnimeStatus, number> {
+  let watching = 0;
+  let completed = 0;
+  let planned = 0;
+  let onHold = 0;
+  let dropped = 0;
+
+  for (let i = 0; i < animes.length; i++) {
+    switch (animes[i].status) {
+      case 'watching':
+        watching++;
+        break;
+      case 'completed':
+        completed++;
+        break;
+      case 'planned':
+        planned++;
+        break;
+      case 'on_hold':
+        onHold++;
+        break;
+      case 'dropped':
+        dropped++;
+        break;
+    }
+  }
+
+  return {
+    all: animes.length,
+    watching,
+    completed,
+    planned,
+    on_hold: onHold,
+    dropped,
+  };
+}
+
 // Persistent cache across tab switches isolated per profileId
 interface PersistentAnimeTabState {
   activeFilter: AnimeStatus;
@@ -269,7 +337,7 @@ const AnimeCard = React.memo<AnimeCardProps>(({
   );
 });
 
-export const AnimeListTab: React.FC<AnimeListTabProps> = ({
+export const AnimeListTab: React.FC<AnimeListTabProps> = React.memo(({
   profileId,
   animes,
   isOwnProfile,
@@ -376,27 +444,27 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
     [detailAnimeId, uniqueAnimes]
   );
 
-  const statusCategories: { id: AnimeStatus; label: string; icon: React.ReactNode }[] = [
-    { id: 'all', label: 'Todos', icon: null },
-    { id: 'watching', label: 'Assistindo', icon: <Play className="h-3 w-3" /> },
-    { id: 'completed', label: 'Concluídos', icon: <Check className="h-3 w-3" /> },
-    { id: 'planned', label: 'Planejados', icon: <Clock className="h-3 w-3" /> },
-    { id: 'on_hold', label: 'Em espera', icon: <PauseCircle className="h-3 w-3" /> },
-    { id: 'dropped', label: 'Abandonados', icon: <XCircle className="h-3 w-3" /> },
-  ];
+  const statusCounts = useMemo(
+    () => computeAnimeStatusCounts(uniqueAnimes),
+    [uniqueAnimes]
+  );
 
   const filteredAnimes = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    return uniqueAnimes.filter((anime) => {
-      const matchesFilter = activeFilter === 'all' || anime.status === activeFilter;
-      if (!matchesFilter) return false;
-      if (!query) return true;
-      return (
-        anime.title.toLowerCase().includes(query) ||
-        Boolean(anime.titleRomaji && anime.titleRomaji.toLowerCase().includes(query)) ||
-        anime.genres.some((g) => g.toLowerCase().includes(query))
-      );
-    });
+    if (activeFilter === 'all' && !query) {
+      return uniqueAnimes;
+    }
+    const result: AnimeItem[] = [];
+    for (let i = 0; i < uniqueAnimes.length; i++) {
+      const anime = uniqueAnimes[i];
+      if (activeFilter !== 'all' && anime.status !== activeFilter) {
+        continue;
+      }
+      if (!query || getNormalizedAnimeSearchText(anime).includes(query)) {
+        result.push(anime);
+      }
+    }
+    return result;
   }, [uniqueAnimes, activeFilter, searchQuery]);
 
   // Virtual window total metrics
@@ -406,7 +474,7 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
   // Window scroll & resize listener with row-change banding to eliminate redundant renders
   useEffect(() => {
     let ticking = false;
-    const handleScrollOrResize = () => {
+    const handleScroll = () => {
       if (!ticking) {
         window.requestAnimationFrame(() => {
           const currentY = window.scrollY || window.pageYOffset || 0;
@@ -429,26 +497,32 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
       }
     };
 
+    const handleResize = () => {
+      updateGridOffsetTop();
+      handleScroll();
+    };
+
     updateGridOffsetTop();
-    window.addEventListener('scroll', handleScrollOrResize, { passive: true });
-    window.addEventListener('resize', handleScrollOrResize, { passive: true });
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    window.addEventListener('resize', handleResize, { passive: true });
     return () => {
-      window.removeEventListener('scroll', handleScrollOrResize);
-      window.removeEventListener('resize', handleScrollOrResize);
+      window.removeEventListener('scroll', handleScroll);
+      window.removeEventListener('resize', handleResize);
     };
   }, [totalRows, measuredRowHeight, updateGridOffsetTop, persistentTabState]);
 
-  // Dynamically measure actual rendered card height on screen
+  // Post-commit measurement of gridOffsetTop and actual rendered card height (never inside render/useMemo)
   useEffect(() => {
     const measure = () => {
       if (!gridRef.current) return;
       updateGridOffsetTop();
       const firstCard = gridRef.current.querySelector<HTMLElement>('[data-testid^="anime-card-"]');
       if (firstCard) {
-        const height = firstCard.getBoundingClientRect().height;
+        const height = firstCard.offsetHeight || firstCard.getBoundingClientRect().height;
         if (height > 100) {
           const gap = window.innerWidth >= 768 ? 20 : window.innerWidth >= 640 ? 16 : 10;
-          setMeasuredRowHeight(Math.round(height + gap));
+          const nextRowHeight = Math.round(height + gap);
+          setMeasuredRowHeight((prev) => (Math.abs(prev - nextRowHeight) >= 2 ? nextRowHeight : prev));
         }
       }
     };
@@ -469,13 +543,8 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
     const rowHeight = measuredRowHeight > 0 ? measuredRowHeight : DEFAULT_ROW_HEIGHT;
     const viewportHeight = typeof window !== 'undefined' && window.innerHeight > 0 ? window.innerHeight : 800;
 
-    let gridOffsetTop = gridOffsetTopRef.current;
-    if (gridOffsetTop === 0 && gridRef.current) {
-      const rect = gridRef.current.getBoundingClientRect();
-      const currentScrollY = window.scrollY || window.pageYOffset || 0;
-      gridOffsetTop = Math.max(0, rect.top + currentScrollY);
-      gridOffsetTopRef.current = gridOffsetTop;
-    }
+    // Pure numeric read from ref updated post-commit (zero synchronous getBoundingClientRect reflow during render)
+    const gridOffsetTop = gridOffsetTopRef.current;
 
     const relativeScroll = Math.max(0, scrollY - gridOffsetTop);
     const startRow = Math.max(0, Math.floor(relativeScroll / rowHeight) - OVERSCAN_ROWS);
@@ -698,11 +767,9 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
           <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 border-b border-purple-900/30 pb-3">
             {/* Status Categories */}
             <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0 no-scrollbar">
-              {statusCategories.map((cat) => {
+              {STATUS_CATEGORIES.map((cat) => {
                 const isActive = activeFilter === cat.id;
-                const count = cat.id === 'all'
-                  ? uniqueAnimes.length
-                  : uniqueAnimes.filter((a) => a.status === cat.id).length;
+                const count = statusCounts[cat.id];
 
                 return (
                   <button
@@ -838,4 +905,5 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = ({
       )}
     </div>
   );
-};
+});
+

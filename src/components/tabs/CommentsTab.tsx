@@ -10,19 +10,19 @@ import {
   ChevronDown
 } from 'lucide-react';
 import { HikariComment } from '../../types';
-import { useCurrentTime, formatRelativeTime, formatExactDateTime } from '../../utils/relativeTime';
+import { useRelativeTimeLabel, formatExactDateTime } from '../../utils/relativeTime';
 
 /**
- * Leaf component that subscribes to useCurrentTime() so timer ticks do NOT
- * cause the parent CommentsTab or all rendered comments to re-render.
+ * Leaf component using centralized shared clock + string diffing so unchanged labels
+ * never trigger unnecessary re-renders.
  */
 const CommentTimeSpan: React.FC<{
   timestamp: number | undefined;
   fallbackText?: string;
-}> = ({ timestamp, fallbackText = '' }) => {
-  const now = useCurrentTime();
-  return <>{formatRelativeTime(timestamp, now, fallbackText, false)}</>;
-};
+}> = React.memo(({ timestamp, fallbackText = '' }) => {
+  const label = useRelativeTimeLabel(timestamp, fallbackText, false);
+  return <>{label}</>;
+});
 
 interface CommentsTabProps {
   profileId?: string;

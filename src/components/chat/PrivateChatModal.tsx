@@ -183,23 +183,45 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
     [currentUser, followingIds, followersIds, blockedIds]
   );
 
-  // Presence Heartbeat Loop (respeita preferência showOnlineStatus e desconexão em pagehide/beforeunload)
+  // Presence Heartbeat Loop (pausa timer quando a aba está oculta e retoma ao voltar ao primeiro plano)
   useEffect(() => {
     if (!isOpen || !currentUser.id) return;
     const showOnline = currentUser.privacySettings?.showOnlineStatus !== false;
+    let intervalId: number | null = null;
 
-    // Heartbeat inicial
-    sendPresenceHeartbeat(currentUser.id, showOnline);
+    const startHeartbeatTimer = () => {
+      if (intervalId !== null || document.visibilityState === 'hidden') return;
+      intervalId = window.setInterval(() => {
+        if (document.visibilityState === 'hidden') {
+          if (intervalId !== null) {
+            window.clearInterval(intervalId);
+            intervalId = null;
+          }
+          return;
+        }
+        void sendPresenceHeartbeat(currentUser.id, showOnline);
+      }, 20000);
+    };
 
-    const intervalId = window.setInterval(() => {
-      sendPresenceHeartbeat(currentUser.id, showOnline);
-    }, 20000);
+    const stopHeartbeatTimer = () => {
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+        intervalId = null;
+      }
+    };
+
+    if (document.visibilityState !== 'hidden') {
+      void sendPresenceHeartbeat(currentUser.id, showOnline);
+      startHeartbeatTimer();
+    }
 
     const handleVisibilityOrUnload = () => {
       if (document.visibilityState === 'hidden') {
+        stopHeartbeatTimer();
         sendPresenceOffline(currentUser.id);
       } else {
-        sendPresenceHeartbeat(currentUser.id, showOnline);
+        void sendPresenceHeartbeat(currentUser.id, showOnline);
+        startHeartbeatTimer();
       }
     };
 
@@ -207,7 +229,7 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
     window.addEventListener('beforeunload', handleVisibilityOrUnload);
 
     return () => {
-      window.clearInterval(intervalId);
+      stopHeartbeatTimer();
       document.removeEventListener('visibilitychange', handleVisibilityOrUnload);
       window.removeEventListener('beforeunload', handleVisibilityOrUnload);
       sendPresenceOffline(currentUser.id);
