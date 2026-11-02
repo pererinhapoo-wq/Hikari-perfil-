@@ -142,12 +142,12 @@ export function buildProfileFromFirebaseUser(
   });
 
   const isAdmin = firebaseUser.uid === AUTHORIZED_ADMIN_UID;
-  const defaultAdminDisplayName = 'Elizabeth';
-  const defaultAdminUsername = 'elizabeth_admin';
-  const defaultAdminAvatar = '/src/assets/images/elizabeth_admin_avatar_1793603523814.jpg';
-  const defaultAdminBanner = '/src/assets/images/elizabeth_admin_banner_1793603538370.jpg';
+  const defaultAdminDisplayName = 'Aether';
+  const defaultAdminUsername = 'aether';
+  const defaultAdminAvatar = '';
+  const defaultAdminBanner = '';
   const defaultAdminBio =
-    'Administradora oficial do Hikari Perfil. Não falo, só me comunico por placas. Pare de adicionar 50 animes na lista de "Planejados" antes de terminar os que começou em 2018.';
+    'Guardião do ecossistema Hikari e apreciador de narrativas profundas e inesquecíveis.';
 
   const resolvedUsername =
     typeof overrides.username === 'string' && overrides.username.trim().length > 0

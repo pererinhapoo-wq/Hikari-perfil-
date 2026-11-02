@@ -13,7 +13,6 @@ import { PrivateProfileNotice } from './components/PrivateProfileNotice';
 import { FollowersModal } from './components/modals/FollowersModal';
 import { SettingsModal } from './components/modals/SettingsModal';
 import { PrivateChatModal } from './components/chat/PrivateChatModal';
-import { ElizabethCorner } from './components/admin/ElizabethCorner';
 import { AuthScreen } from './components/auth/AuthScreen';
 import {
   syncUserPrivacyContext,
@@ -38,7 +37,7 @@ import {
   CURRENT_USER, 
   OTHER_USERS, 
   INITIAL_ANIMES, 
-  ELIZABETH_ANIMES,
+  AETHER_ANIMES,
   FAVORITE_CHARACTERS,
   FAVORITE_COMPANIES,
   FAVORITE_PEOPLE,
@@ -771,7 +770,7 @@ export default function App() {
       return computeAnimeStats(animes);
     }
     if (activeProfile.id === AUTHORIZED_ADMIN_UID) {
-      return computeAnimeStats(ELIZABETH_ANIMES);
+      return computeAnimeStats(AETHER_ANIMES);
     }
     if (isAuthenticated) {
       return authPublicProfilesMap[activeProfile.id]?.animeStats ?? EMPTY_ANIME_STATS;
@@ -788,7 +787,7 @@ export default function App() {
       return animes;
     }
     if (activeProfile.id === AUTHORIZED_ADMIN_UID) {
-      return ELIZABETH_ANIMES;
+      return AETHER_ANIMES;
     }
     if (isAuthenticated) {
       return authPublicProfilesMap[activeProfile.id]?.publicAnimes ?? [];
@@ -2277,9 +2276,6 @@ export default function App() {
           onRemoveAvatar={handleRemoveAvatar}
           onRemoveBanner={handleRemoveBanner}
         />
-
-        {/* Elizabeth's Corner — Exclusivo do perfil público da Elizabeth (Gintama) */}
-        <ElizabethCorner profileUid={activeProfile.id} />
 
         {/* Navigation Tabs Bar */}
         <TabsNavigation

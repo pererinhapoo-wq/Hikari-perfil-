@@ -13,7 +13,8 @@ import {
   MessageSquare
 } from 'lucide-react';
 import { UserProfile } from '../types';
-import { ElizabethAdminBadge } from './admin/ElizabethAdminBadge';
+import { HikariEternalBadge } from './badge/HikariEternalBadge';
+import { AetherAnimatedName } from './badge/AetherAnimatedName';
 
 interface ProfileHeaderProps {
   profile: UserProfile;
@@ -215,11 +216,11 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
             <div className="space-y-1">
               <div className="flex flex-wrap items-center gap-2.5">
                 <h1 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">
-                  {profile.displayName}
+                  <AetherAnimatedName name={profile.displayName} profileOrUid={profile} />
                 </h1>
                 
-                {/* Selo Administrativo Exclusivo inspirado na Elizabeth (Gintama) — renderizado estritamente para o UID proprietário */}
-                <ElizabethAdminBadge profileOrUid={profile} />
+                {/* Selo Exclusivo Hikari Eternal — renderizado estritamente para o UID proprietário */}
+                <HikariEternalBadge profileOrUid={profile} />
 
                 {/* Privacy Badge (exibido apenas quando o perfil for privado) */}
                 {profile.isPrivate && (

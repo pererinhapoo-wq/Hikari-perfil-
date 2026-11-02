@@ -39,13 +39,13 @@ export const CURRENT_USER: UserProfile = {
   }
 };
 
-export const ELIZABETH_ADMIN_PROFILE: UserProfile = {
+export const AETHER_OWNER_PROFILE: UserProfile = {
   id: AUTHORIZED_ADMIN_UID,
-  username: 'elizabeth_admin',
-  displayName: 'Elizabeth',
-  avatarUrl: '/src/assets/images/elizabeth_admin_avatar_1793603523814.jpg',
-  bannerUrl: '/src/assets/images/elizabeth_admin_banner_1793603538370.jpg',
-  bio: 'Administradora oficial do Hikari Perfil. Não falo, só me comunico por placas. Pare de adicionar 50 animes na lista de "Planejados" antes de terminar os que começou em 2018.',
+  username: 'aether',
+  displayName: 'Aether',
+  avatarUrl: '',
+  bannerUrl: '',
+  bio: 'Guardião do ecossistema Hikari e apreciador de narrativas profundas e inesquecíveis.',
   createdAt: '01 de janeiro de 2023',
   createdAtTimestamp: 1672531200000,
   followersCount: 4280,
@@ -62,13 +62,13 @@ export const ELIZABETH_ADMIN_PROFILE: UserProfile = {
     showOnlineStatus: true,
   },
   externalAccounts: {
-    anilist: { connected: true, username: 'ElizabethAdmin' },
+    anilist: { connected: false },
     mal: { connected: false },
   },
 };
 
 export const OTHER_USERS: Record<string, UserProfile> = {
-  [AUTHORIZED_ADMIN_UID]: ELIZABETH_ADMIN_PROFILE,
+  [AUTHORIZED_ADMIN_UID]: AETHER_OWNER_PROFILE,
   'usr_kuroha': {
     id: 'usr_kuroha',
     username: 'kuroha_void',
@@ -175,7 +175,7 @@ export const OTHER_USERS: Record<string, UserProfile> = {
   }
 };
 
-export const ELIZABETH_ANIMES: AnimeItem[] = [
+export const AETHER_ANIMES: AnimeItem[] = [
   {
     id: 'anime_gintama_final',
     title: 'Gintama: THE FINAL',
@@ -702,10 +702,10 @@ export const INITIAL_FOLLOWERS: FollowUser[] = [
 export const INITIAL_FOLLOWING: FollowUser[] = [
   {
     id: AUTHORIZED_ADMIN_UID,
-    username: 'elizabeth_admin',
-    displayName: 'Elizabeth',
-    avatarUrl: '/src/assets/images/elizabeth_admin_avatar_1793603523814.jpg',
-    bio: 'Administradora oficial do Hikari Perfil. Não falo, só me comunico por placas.',
+    username: 'aether',
+    displayName: 'Aether',
+    avatarUrl: '',
+    bio: 'Guardião do ecossistema Hikari.',
     isFollowing: true,
     isRequested: false,
     isFollower: false,

@@ -51,3 +51,96 @@ button:active:not(:disabled), a:active:not([disabled]), [role="button"]:active {
     scroll-behavior: auto !important;
   }
 }
+
+/* =========================================================================
+   Hikari Eternal & Aether Identity Animations
+   ========================================================================= */
+
+@keyframes eternalShimmerSweep {
+  0% {
+    background-position: -250% center;
+  }
+  35%, 100% {
+    background-position: 250% center;
+  }
+}
+
+@keyframes eternalCorePulse {
+  0%, 100% {
+    opacity: 0.75;
+    transform: scale(0.96);
+    filter: drop-shadow(0 0 2px rgba(196, 181, 253, 0.4));
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.1);
+    filter: drop-shadow(0 0 8px rgba(167, 139, 250, 0.95));
+  }
+}
+
+@keyframes eternalBorderGlow {
+  0%, 100% {
+    border-color: rgba(167, 139, 250, 0.35);
+    box-shadow: 0 0 8px -1px rgba(139, 92, 246, 0.25), inset 0 0 6px -1px rgba(196, 181, 253, 0.15);
+  }
+  50% {
+    border-color: rgba(196, 181, 253, 0.65);
+    box-shadow: 0 0 16px 1px rgba(167, 139, 250, 0.45), inset 0 0 10px 0px rgba(224, 231, 255, 0.25);
+  }
+}
+
+@keyframes particleTwinkle1 {
+  0%, 100% {
+    opacity: 0.2;
+    transform: translateY(0px) scale(0.85);
+  }
+  50% {
+    opacity: 0.95;
+    transform: translateY(-1.5px) scale(1.2);
+  }
+}
+
+@keyframes particleTwinkle2 {
+  0%, 100% {
+    opacity: 0.9;
+    transform: translateY(0px) scale(1.15);
+  }
+  50% {
+    opacity: 0.2;
+    transform: translateY(1.5px) scale(0.8);
+  }
+}
+
+.aether-text-shimmer {
+  background: linear-gradient(
+    110deg,
+    #c4b5fd 0%,
+    #e0e7ff 22%,
+    #ffffff 35%,
+    #c4b5fd 48%,
+    #8b5cf6 72%,
+    #c4b5fd 100%
+  );
+  background-size: 260% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  display: inline-block;
+  animation: eternalShimmerSweep 5.5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+/* Suavização de animação em dispositivos móveis */
+@media (max-width: 640px) {
+  .aether-text-shimmer {
+    animation-duration: 7.5s;
+  }
+}
+
+/* Desativação completa em prefers-reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  .aether-text-shimmer {
+    animation: none !important;
+    background-position: 0 0 !important;
+  }
+}
+

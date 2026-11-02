@@ -21,6 +21,8 @@ import {
   Camera
 } from 'lucide-react';
 import { UserProfile, NotificationItem, AnimeItem, AUTHORIZED_ADMIN_UID } from '../types';
+import { HikariEternalBadge } from './badge/HikariEternalBadge';
+import { AetherAnimatedName } from './badge/AetherAnimatedName';
 
 interface HeaderProps {
   currentUser: UserProfile;
@@ -188,9 +190,9 @@ export const Header: React.FC<HeaderProps> = ({
             {
               type: 'user' as const,
               id: AUTHORIZED_ADMIN_UID,
-              name: 'Elizabeth',
-              sub: '@elizabeth_admin (Hikari Admin)',
-              avatar: '/src/assets/images/elizabeth_admin_avatar_1793603523814.jpg',
+              name: 'Aether',
+              sub: '@aether (Hikari Eternal)',
+              avatar: '',
             },
             {
               type: 'user' as const,
@@ -313,12 +315,15 @@ export const Header: React.FC<HeaderProps> = ({
                           className="h-8 w-8 rounded-full object-cover border border-purple-500/30"
                         />
                       ) : (
-                        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-purple-950/60 border border-purple-800/40 text-purple-400">
-                          <Search className="h-3.5 w-3.5" />
+                        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-[#2D1B4E] to-[#170E2B] border border-purple-500/40 text-purple-200 font-bold text-xs select-none">
+                          {item.name ? item.name.charAt(0).toUpperCase() : 'U'}
                         </div>
                       )}
                       <div className="flex-1 min-w-0">
-                        <div className="truncate text-xs font-medium text-white">{item.name}</div>
+                        <div className="flex items-center gap-1.5 truncate text-xs font-medium text-white">
+                          <AetherAnimatedName name={item.name} profileOrUid={item.id} />
+                          <HikariEternalBadge profileOrUid={item.id} size="sm" />
+                        </div>
                         <div className="truncate text-[11px] text-purple-300/60">{item.sub}</div>
                       </div>
                     </button>
@@ -654,7 +659,10 @@ export const Header: React.FC<HeaderProps> = ({
                 >
                 {/* User info mini header inside menu */}
                 <div className="border-b border-purple-900/40 px-3 py-2.5 mb-1">
-                  <div className="font-semibold text-sm text-white truncate">{currentUser.displayName}</div>
+                  <div className="flex items-center gap-1.5 font-semibold text-sm text-white truncate">
+                    <AetherAnimatedName name={currentUser.displayName} profileOrUid={currentUser.id} />
+                    <HikariEternalBadge profileOrUid={currentUser.id} size="sm" />
+                  </div>
                   <div className="text-xs text-purple-400/80 truncate">@{currentUser.username}</div>
                   {isAuthenticated && authenticatedEmail && (
                     <div className="mt-0.5 text-[11px] text-purple-200/75 truncate">
