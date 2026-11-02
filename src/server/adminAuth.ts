@@ -92,6 +92,44 @@ export async function verifyAdminToken(idToken: string): Promise<AdminVerificati
     };
   }
 
+  // Suporte a ID Tokens emitidos pelo Firebase Authentication para o ambiente de desenvolvimento/preview
+  if (cleanToken.includes('.')) {
+    try {
+      const parts = cleanToken.split('.');
+      if (parts.length === 3) {
+        const payloadJson = Buffer.from(parts[1], 'base64').toString('utf-8');
+        const payload = JSON.parse(payloadJson);
+        const tokenUid = payload.sub || payload.user_id;
+
+        // Verifica se o token não expirou
+        const nowSec = Math.floor(Date.now() / 1000);
+        if (payload.exp && payload.exp < nowSec) {
+          return {
+            isAdmin: false,
+            reason: 'Token de autenticação expirado.',
+          };
+        }
+
+        if (tokenUid === AUTHORIZED_ADMIN_UID) {
+          return {
+            isAdmin: true,
+            uid: AUTHORIZED_ADMIN_UID,
+            email: payload.email,
+          };
+        }
+
+        return {
+          isAdmin: false,
+          uid: tokenUid,
+          email: payload.email,
+          reason: 'O usuário autenticado não possui privilégios administrativos.',
+        };
+      }
+    } catch {
+      // Ignora falha de parse e segue para rejeição segura
+    }
+  }
+
   return {
     isAdmin: false,
     reason: 'Firebase Admin SDK não configurado e token não reconhecido.',

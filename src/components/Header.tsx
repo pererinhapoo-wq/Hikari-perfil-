@@ -18,7 +18,8 @@ import {
   CheckCircle2,
   XCircle,
   MessageSquare,
-  Camera
+  Camera,
+  Shield
 } from 'lucide-react';
 import { UserProfile, NotificationItem, AnimeItem, AUTHORIZED_ADMIN_UID } from '../types';
 import { HikariEternalBadge } from './badge/HikariEternalBadge';
@@ -50,6 +51,7 @@ interface HeaderProps {
   onOpenAuth?: (mode?: 'login' | 'signup') => void;
   onOpenMessages?: () => void;
   unreadMessagesCount?: number;
+  onOpenAdminPanel?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -76,7 +78,8 @@ export const Header: React.FC<HeaderProps> = ({
   onLogout,
   onOpenAuth,
   onOpenMessages,
-  unreadMessagesCount = 0
+  unreadMessagesCount = 0,
+  onOpenAdminPanel,
 }) => {
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -689,7 +692,25 @@ export const Header: React.FC<HeaderProps> = ({
                     <span>Meu perfil</span>
                   </button>
 
-                  {/* 1.1 Editar perfil e foto */}
+                  {/* 1.1 Painel de administração (Exclusivo da Conta Proprietária Aether) */}
+                  {currentUser.id === AUTHORIZED_ADMIN_UID && onOpenAdminPanel && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsUserMenuOpen(false);
+                        onOpenAdminPanel();
+                      }}
+                      className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-purple-200 hover:bg-purple-900/40 hover:text-white transition-colors cursor-pointer border border-purple-800/30 bg-purple-950/20"
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <Shield className="h-4 w-4 text-purple-400" />
+                        <span className="font-semibold text-purple-100">Painel de administração</span>
+                      </div>
+                      <HikariEternalBadge profileOrUid={currentUser.id} size="sm" />
+                    </button>
+                  )}
+
+                  {/* 1.2 Editar perfil e foto */}
                   <button
                     type="button"
                     onClick={() => {

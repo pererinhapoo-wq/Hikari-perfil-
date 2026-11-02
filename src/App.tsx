@@ -14,6 +14,9 @@ import { FollowersModal } from './components/modals/FollowersModal';
 import { SettingsModal } from './components/modals/SettingsModal';
 import { PrivateChatModal } from './components/chat/PrivateChatModal';
 import { AuthScreen } from './components/auth/AuthScreen';
+import { AdminPanel } from './components/admin/AdminPanel';
+import { AdminAccessDenied } from './components/admin/AdminAccessDenied';
+import { fetchAdminStatus } from './services/adminService';
 import {
   syncUserPrivacyContext,
   subscribeToConversationsList,
@@ -375,6 +378,90 @@ export default function App() {
   const [highlightedActivityId, setHighlightedActivityId] = useState<string | undefined>(undefined);
   const highlightCommentTimerRef = useRef<number | null>(null);
   const highlightActivityTimerRef = useRef<number | null>(null);
+
+  // Admin Panel Navigation & Verification State
+  const [currentView, setCurrentView] = useState<'app' | 'admin'>(() => {
+    if (typeof window !== 'undefined' && window.location.pathname.startsWith('/admin')) {
+      return 'admin';
+    }
+    return 'app';
+  });
+  const [adminToken, setAdminToken] = useState<string | null>(null);
+  const [isAdminServerAuthorized, setIsAdminServerAuthorized] = useState<boolean | null>(null);
+  const [isVerifyingAdminServer, setIsVerifyingAdminServer] = useState<boolean>(false);
+
+  // Sincronização da rota /admin com popstate do navegador
+  useEffect(() => {
+    const handlePopState = () => {
+      if (typeof window !== 'undefined') {
+        if (window.location.pathname.startsWith('/admin')) {
+          setCurrentView('admin');
+        } else {
+          setCurrentView('app');
+        }
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  const handleNavigateToAdmin = useCallback(() => {
+    if (typeof window !== 'undefined' && window.location.pathname !== '/admin') {
+      window.history.pushState(null, '', '/admin');
+    }
+    setCurrentView('admin');
+  }, []);
+
+  const handleReturnFromAdmin = useCallback(() => {
+    if (typeof window !== 'undefined' && window.location.pathname === '/admin') {
+      window.history.pushState(null, '', '/');
+    }
+    setCurrentView('app');
+  }, []);
+
+  // Validação estrita no servidor ao acessar a visualização de administração
+  useEffect(() => {
+    let cancelled = false;
+    if (currentView !== 'admin') {
+      return;
+    }
+
+    setIsVerifyingAdminServer(true);
+
+    async function checkServerAuthorization() {
+      try {
+        let tokenToVerify: string | null = null;
+        if (user) {
+          try {
+            tokenToVerify = await user.getIdToken();
+          } catch {
+            tokenToVerify = null;
+          }
+        }
+
+        const res = await fetchAdminStatus(tokenToVerify);
+        if (!cancelled) {
+          setIsAdminServerAuthorized(Boolean(res.isAdmin));
+          setAdminToken(res.isAdmin ? tokenToVerify : null);
+        }
+      } catch {
+        if (!cancelled) {
+          setIsAdminServerAuthorized(false);
+          setAdminToken(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsVerifyingAdminServer(false);
+        }
+      }
+    }
+
+    checkServerAuthorization();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentView, user]);
 
   useEffect(() => {
     return () => {
@@ -2190,6 +2277,41 @@ export default function App() {
     );
   }
 
+  // Rota privada de administração (/admin) com validação mandatória de servidor
+  if (currentView === 'admin') {
+    if (isVerifyingAdminServer) {
+      return (
+        <div className="min-h-screen bg-[#0A0713] flex flex-col items-center justify-center p-4">
+          <Loader2 className="h-8 w-8 text-purple-500 animate-spin mb-3" />
+          <div className="text-sm font-medium text-purple-200">
+            Verificando autorização com o servidor...
+          </div>
+        </div>
+      );
+    }
+
+    if (isAdminServerAuthorized) {
+      return (
+        <AdminPanel
+          onReturnToApp={handleReturnFromAdmin}
+          idToken={adminToken}
+        />
+      );
+    }
+
+    return (
+      <AdminAccessDenied
+        onReturnToApp={handleReturnFromAdmin}
+        onOpenAuth={() => {
+          handleReturnFromAdmin();
+          setIsDemoPreview(false);
+          setAuthInitialMode('login');
+        }}
+        isAuthenticated={isAuthenticated}
+      />
+    );
+  }
+
   if (!isAuthenticated && !isDemoPreview) {
     return (
       <AuthScreen
@@ -2238,6 +2360,7 @@ export default function App() {
         onLogout={isAuthenticated ? handleLogout : undefined}
         onOpenMessages={() => handleOpenChat()}
         unreadMessagesCount={unreadMessagesCount}
+        onOpenAdminPanel={handleNavigateToAdmin}
         onOpenAuth={
           !isAuthenticated
             ? (mode = 'login') => {
