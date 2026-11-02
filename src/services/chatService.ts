@@ -342,31 +342,171 @@ export async function markConversationAsRead(convId: string, userId: string): Pr
 }
 
 /**
- * Assina atualizações em tempo real de uma conversa (com limpeza garantida)
+ * Alterna reação em uma mensagem (adiciona, substitui ou remove)
+ */
+export async function toggleMessageReaction(
+  convId: string,
+  msgId: string,
+  userId: string,
+  emoji: string
+): Promise<PrivateMessage> {
+  const res = await fetch(
+    `/api/chat/conversations/${encodeURIComponent(convId)}/messages/${encodeURIComponent(msgId)}/reaction`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, emoji }),
+    }
+  );
+
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.error || 'Não foi possível atualizar a reação.');
+  }
+
+  const data = await res.json();
+  const updatedMessage: PrivateMessage = data.message;
+
+  // Atualiza cache local
+  const cached = readCachedMessages(convId);
+  const updated = cached.map((m) => (m.id === msgId ? updatedMessage : m));
+  writeCachedMessages(convId, updated);
+
+  return updatedMessage;
+}
+
+/**
+ * Envia indicador de digitação para a conversa
+ */
+export async function sendTypingIndicator(
+  convId: string,
+  userId: string,
+  isTyping: boolean
+): Promise<void> {
+  try {
+    await fetch(`/api/chat/conversations/${encodeURIComponent(convId)}/typing`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, isTyping }),
+    });
+  } catch {
+    // Silencioso
+  }
+}
+
+/**
+ * Envia batimento de presença ativo
+ */
+export async function sendPresenceHeartbeat(
+  userId: string,
+  showOnlineStatus?: boolean
+): Promise<void> {
+  try {
+    await fetch('/api/chat/presence/heartbeat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, showOnlineStatus }),
+    });
+  } catch {
+    // Silencioso
+  }
+}
+
+/**
+ * Envia evento de desconexão (ao fechar janela ou ocultar aba)
+ */
+export function sendPresenceOffline(userId: string): void {
+  try {
+    const payload = JSON.stringify({ userId });
+    if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
+      const blob = new Blob([payload], { type: 'application/json' });
+      navigator.sendBeacon('/api/chat/presence/offline', blob);
+    } else {
+      fetch('/api/chat/presence/offline', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload,
+        keepalive: true,
+      }).catch(() => {});
+    }
+  } catch {
+    // Silencioso
+  }
+}
+
+function areMessagesAndTypingEqual(
+  prevMsgs: PrivateMessage[],
+  newMsgs: PrivateMessage[],
+  prevTyping: string[],
+  newTyping: string[]
+): boolean {
+  if (prevMsgs.length !== newMsgs.length) return false;
+  if (prevTyping.length !== newTyping.length) return false;
+  for (let i = 0; i < prevTyping.length; i++) {
+    if (prevTyping[i] !== newTyping[i]) return false;
+  }
+
+  for (let i = 0; i < newMsgs.length; i++) {
+    const p = prevMsgs[i];
+    const n = newMsgs[i];
+    if (p.id !== n.id || p.isRead !== n.isRead || p.text !== n.text) return false;
+
+    const pReact = p.reactions || {};
+    const nReact = n.reactions || {};
+    const pKeys = Object.keys(pReact);
+    const nKeys = Object.keys(nReact);
+    if (pKeys.length !== nKeys.length) return false;
+    for (const key of nKeys) {
+      const pUsers = pReact[key] || [];
+      const nUsers = nReact[key] || [];
+      if (pUsers.length !== nUsers.length) return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Assina atualizações em tempo real de uma conversa (com limpeza garantida e deduplicação)
  */
 export function subscribeToConversation(
   convId: string,
   userId: string,
-  onUpdate: (messages: PrivateMessage[]) => void
+  onUpdate: (payload: { messages: PrivateMessage[]; typingUsers: string[] }) => void
 ): () => void {
   let isSubscribed = true;
+  let lastKnownMessages: PrivateMessage[] = readCachedMessages(convId);
+  let lastKnownTyping: string[] = [];
 
-  // 1. Emissão imediata do cache local
-  const initial = readCachedMessages(convId);
-  if (initial.length > 0) {
-    onUpdate(initial);
+  // 1. Emissão inicial do cache se houver
+  if (lastKnownMessages.length > 0) {
+    onUpdate({ messages: lastKnownMessages, typingUsers: [] });
   }
 
   // 2. Polling inteligente no backend (mantém sincronizado sem recarregar a página)
   const poll = async () => {
     if (!isSubscribed) return;
     try {
-      const res = await fetch(`/api/chat/conversations/${encodeURIComponent(convId)}/messages?userId=${encodeURIComponent(userId)}&limit=50`);
+      const res = await fetch(
+        `/api/chat/conversations/${encodeURIComponent(convId)}/messages?userId=${encodeURIComponent(userId)}&limit=50`
+      );
       if (res.ok && isSubscribed) {
         const data = await res.json();
-        if (Array.isArray(data.messages)) {
-          writeCachedMessages(convId, data.messages);
-          onUpdate(data.messages);
+        const incomingMessages: PrivateMessage[] = Array.isArray(data.messages) ? data.messages : [];
+        const incomingTyping: string[] = Array.isArray(data.typingUsers) ? data.typingUsers : [];
+
+        const isEqual = areMessagesAndTypingEqual(
+          lastKnownMessages,
+          incomingMessages,
+          lastKnownTyping,
+          incomingTyping
+        );
+
+        if (!isEqual) {
+          lastKnownMessages = incomingMessages;
+          lastKnownTyping = incomingTyping;
+          writeCachedMessages(convId, incomingMessages);
+          onUpdate({ messages: incomingMessages, typingUsers: incomingTyping });
         }
       }
     } catch {
@@ -375,7 +515,7 @@ export function subscribeToConversation(
   };
 
   poll();
-  const intervalId = window.setInterval(poll, 3000);
+  const intervalId = window.setInterval(poll, 2500);
 
   // 3. Listener Firestore nativo se o Firebase estiver online
   let firestoreUnsubscribe: (() => void) | null = null;
@@ -404,18 +544,29 @@ export function subscribeToConversation(
               mediaUrl: data.mediaUrl,
               mediaMetadata: data.mediaMetadata,
               linkPreview: data.linkPreview,
+              reactions: data.reactions || {},
               isRead: data.isRead ?? false,
               createdAt: createdAtMs,
               status: 'sent',
             });
           });
+
           if (remoteMsgs.length > 0) {
-            writeCachedMessages(convId, remoteMsgs);
-            onUpdate(remoteMsgs);
+            const isEqual = areMessagesAndTypingEqual(
+              lastKnownMessages,
+              remoteMsgs,
+              lastKnownTyping,
+              lastKnownTyping
+            );
+            if (!isEqual) {
+              lastKnownMessages = remoteMsgs;
+              writeCachedMessages(convId, remoteMsgs);
+              onUpdate({ messages: remoteMsgs, typingUsers: lastKnownTyping });
+            }
           }
         },
         () => {
-          // Erro no snapshot: ignora e usa o polling HTTP
+          // Erro no snapshot: ignora e continua usando polling
         }
       );
     } catch {
@@ -461,3 +612,4 @@ export function subscribeToConversationsList(
     window.clearInterval(intervalId);
   };
 }
+

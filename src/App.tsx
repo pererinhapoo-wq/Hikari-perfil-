@@ -892,6 +892,7 @@ export default function App() {
       avatarUrl: currentUser.avatarUrl,
       allowDirectMessages: currentUser.privacySettings?.allowDirectMessages !== false,
       directMessagesFrom: currentUser.privacySettings?.directMessagesFrom || 'everyone',
+      showOnlineStatus: currentUser.privacySettings?.showOnlineStatus !== false,
       followingIds: Array.from(followingIds),
       followerIds: currentFollowerIds,
       blockedIds: Array.from(blockedIds),

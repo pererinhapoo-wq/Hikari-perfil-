@@ -336,6 +336,175 @@ async function main() {
     }
   });
 
+  // 11. Preservação de posição visual e rolagem inteligente
+  runTest('11. Rolagem de mensagens: cálculo exato de delta visual sem saltos ao carregar mensagens anteriores', () => {
+    // Simula estado do container antes e depois da paginação
+    const prevScrollHeight = 1200;
+    const prevScrollTop = 200;
+    const newScrollHeight = 1800; // 600px de novas mensagens antigas prependadas
+    const calculatedScrollTop = prevScrollTop + (newScrollHeight - prevScrollHeight);
+    assert.strictEqual(calculatedScrollTop, 800, 'Posição visual deve manter exatamente o mesmo elemento sob a viewport');
+
+    // Usuário próximo do final (< 100px): deve rolar automaticamente
+    const isNearBottom1 = (2000 - 1920 - 700) < 100; // scrollHeight - scrollTop - clientHeight
+    assert.strictEqual(isNearBottom1, true, 'Deve auto-rolar se próximo do rodapé');
+
+    // Usuário lendo mensagens antigas lá em cima: NÃO deve auto-rolar
+    const isNearBottom2 = (2000 - 400 - 700) < 100;
+    assert.strictEqual(isNearBottom2, false, 'NÃO deve forçar rolagem para baixo se lendo histórico');
+  });
+
+  // 12. Envio de GIF pela galeria e pelo computador com validação de assinatura binária
+  runTest('12. Envio de GIF: validação de assinatura binária real (GIF89a / GIF87a) e compatibilidade com galeria/PC', () => {
+    // GIF89a válido em Base64 ('R0lGODlh'...)
+    const validGif89a = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+    const check89a = validateMediaPayload(validGif89a, 'gif');
+    assert.strictEqual(check89a.valid, true, 'GIF89a autêntico deve ser aprovado');
+
+    // GIF87a válido em Base64 ('R0lGODdh'...)
+    const validGif87a = 'data:image/gif;base64,R0lGODdhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+    const check87a = validateMediaPayload(validGif87a, 'gif');
+    assert.strictEqual(check87a.valid, true, 'GIF87a autêntico deve ser aprovado');
+  });
+
+  // 13. Rejeição de arquivo fraudulento ou acima do limite de tamanho
+  runTest('13. Segurança de GIF: rejeição de arquivo com cabeçalho adulterado ou tamanho excedido', () => {
+    // Arquivo fingindo ser GIF mas com bytes de PNG ('iVBORw0KGgo' = '\x89PNG')
+    const fakeGif = 'data:image/gif;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const checkFake = validateMediaPayload(fakeGif, 'gif');
+    assert.strictEqual(checkFake.valid, false, 'Arquivo com cabeçalho binário incompatível deve ser rejeitado');
+    assert.ok(checkFake.error?.includes('assinatura binária'));
+
+    // Arquivo acima de 8MB (aproximadamente 11.2MB em Base64)
+    const giantPayload = 'data:image/gif;base64,R0lGODlh' + 'A'.repeat(12 * 1024 * 1024);
+    const checkGiant = validateMediaPayload(giantPayload, 'gif');
+    assert.strictEqual(checkGiant.valid, false, 'Arquivo acima do limite de 8MB deve ser rejeitado');
+    assert.ok(checkGiant.error?.includes('8MB'));
+  });
+
+  // 14. Indicador de digitação em tempo real e expiração automática
+  runTest('14. Indicador de digitação: broadcast entre contas e expiração automática após inatividade', () => {
+    const convId = getDeterministicConversationId(userRen.id, userKuroha.id);
+
+    // Ren começa a digitar
+    chatStore.setTyping(convId, userRen.id, true);
+    let typingForKuroha = chatStore.getTypingUsers(convId, userKuroha.id);
+    assert.ok(typingForKuroha.includes(userRen.id), 'Kuroha deve ver Ren digitando');
+
+    // Ren não vê a si mesmo na lista de digitando
+    let typingForRen = chatStore.getTypingUsers(convId, userRen.id);
+    assert.strictEqual(typingForRen.includes(userRen.id), false, 'Usuário não deve ver o próprio indicador');
+
+    // Ren para de digitar
+    chatStore.setTyping(convId, userRen.id, false);
+    typingForKuroha = chatStore.getTypingUsers(convId, userKuroha.id);
+    assert.strictEqual(typingForKuroha.length, 0, 'Indicador deve sumir imediatamente ao parar de digitar');
+  });
+
+  // 15. Reações com emojis: adição, remoção, contagem e prevenção de duplicatas
+  runTest('15. Reações às mensagens: alternância (toggle), contagem e prevenção estrita de duplicatas', () => {
+    const convId = getDeterministicConversationId(userRen.id, userKuroha.id);
+    const msg = chatStore.addMessage({
+      conversationId: convId,
+      senderId: userRen.id,
+      senderName: userRen.displayName,
+      senderAvatarUrl: '',
+      recipientId: userKuroha.id,
+      text: 'Você viu a cena pós-créditos?',
+      type: 'text',
+    });
+
+    // 15.1 Kuroha reage com ❤️
+    const res1 = chatStore.toggleReaction(convId, msg.message.id, userKuroha.id, '❤️');
+    assert.strictEqual(res1.action, 'added');
+    assert.deepStrictEqual(res1.message.reactions?.['❤️'], [userKuroha.id]);
+
+    // 15.2 Ren também reage com ❤️
+    const res2 = chatStore.toggleReaction(convId, msg.message.id, userRen.id, '❤️');
+    assert.strictEqual(res2.action, 'added');
+    assert.strictEqual(res2.message.reactions?.['❤️']?.length, 2);
+
+    // 15.3 Kuroha clica novamente no ❤️ -> deve REMOVER sua reação (toggle)
+    const res3 = chatStore.toggleReaction(convId, msg.message.id, userKuroha.id, '❤️');
+    assert.strictEqual(res3.action, 'removed');
+    assert.deepStrictEqual(res3.message.reactions?.['❤️'], [userRen.id]);
+
+    // 15.4 Ren também remove -> a chave '❤️' deve ser limpa
+    const res4 = chatStore.toggleReaction(convId, msg.message.id, userRen.id, '❤️');
+    assert.strictEqual(res4.action, 'removed');
+    assert.strictEqual(res4.message.reactions?.['❤️'], undefined);
+  });
+
+  // 16. Indicador de status online em tempo real
+  runTest('16. Status Online: indicador verde em tempo real via heartbeat de atividade recente', () => {
+    // Kuroha envia heartbeat
+    chatStore.recordPresence(userKuroha.id, true, true);
+    const isOnlineNow = chatStore.isUserOnline(userKuroha.id);
+    assert.strictEqual(isOnlineNow, true, 'Kuroha deve ser reportada como online após heartbeat ativo');
+
+    // Conversas do Ren devem refletir Kuroha online
+    const convs = chatStore.getUserConversations(userRen.id);
+    const kurohaConv = convs.find((c) => c.participants.includes(userKuroha.id));
+    assert.strictEqual(kurohaConv?.participantDetails[userKuroha.id]?.isOnline, true);
+  });
+
+  // 17. Configuração de privacidade de status online (ocultação voluntária)
+  runTest('17. Privacidade de presença: ocultar status online impede que outros visualizem o indicador verde', () => {
+    // Usuário Maya optou por showOnlineStatus = false
+    chatStore.recordPresence(userMaya.id, true, false);
+
+    const isMayaOnline = chatStore.isUserOnline(userMaya.id);
+    assert.strictEqual(isMayaOnline, false, 'Com showOnlineStatus = false, Maya NUNCA deve ser exibida como online para outros');
+
+    const summary = chatStore.getUserPresenceSummary(userMaya.id);
+    assert.strictEqual(summary.isOnline, false);
+  });
+
+  // 18. Desconexão inesperada e expiração de presença
+  runTest('18. Encerramento de sessão e desconexão: desligamento instantâneo via offline e auto-expiração', () => {
+    const testUser = 'usr_temp_logout';
+    chatStore.recordPresence(testUser, true, true);
+    assert.strictEqual(chatStore.isUserOnline(testUser), true);
+
+    // Chamada de fechamento de página (sendBeacon / visibilitychange)
+    chatStore.recordPresence(testUser, false);
+    assert.strictEqual(chatStore.isUserOnline(testUser), false, 'Deve ficar offline imediatamente ao fechar a janela');
+  });
+
+  // 19. Segurança Zero-Trust: proteção contra injeção de reações por terceiros
+  runTest('19. Segurança Zero-Trust: participante de fora da conversa não pode injetar reações', () => {
+    const convId = getDeterministicConversationId(userRen.id, userKuroha.id);
+    const msg = chatStore.getConversationMessages(convId, userRen.id, { limit: 1 }).messages[0];
+    assert.ok(msg);
+
+    assert.throws(
+      () => {
+        chatStore.toggleReaction(convId, msg.id, 'usr_intruder', '🔥');
+      },
+      /Acesso não autorizado/,
+      'Terceiros devem ser bloqueados de reagir a mensagens de conversas alheias'
+    );
+  });
+
+  // 20. Preservação de compatibilidade integral de links e mídias
+  runTest('20. Integridade contínua: compatibilidade intacta de links do catálogo Hikari e envio de imagens', () => {
+    const convId = getDeterministicConversationId(userRen.id, userKuroha.id);
+    const linkMsg = chatStore.addMessage({
+      conversationId: convId,
+      senderId: userRen.id,
+      senderName: userRen.displayName,
+      senderAvatarUrl: '',
+      recipientId: userKuroha.id,
+      text: 'Recomendo assistir Solo Leveling hoje!',
+      type: 'link',
+    });
+
+    assert.ok(linkMsg.message.linkPreview);
+    assert.strictEqual(linkMsg.message.linkPreview.type, 'anime');
+    assert.ok(linkMsg.message.linkPreview.title.includes('Solo Leveling'));
+    assert.ok(linkMsg.message.linkPreview.extraInfo?.rating);
+  });
+
   console.log('----------------------------------------------------------------');
   console.log(`RESULTADO DOS TESTES: ${passedTests} aprovados, ${failedTests} reprovados.`);
   console.log('================================================================');

@@ -109,7 +109,8 @@ chatRouter.get('/conversations/:id/messages', (req: Request, res: Response) => {
   const before = beforeStr ? parseInt(beforeStr, 10) : undefined;
 
   const result = chatStore.getConversationMessages(convId, userId, { limit, before });
-  return res.json(result);
+  const typingUsers = chatStore.getTypingUsers(convId, userId);
+  return res.json({ ...result, typingUsers });
 });
 
 /**
@@ -240,3 +241,89 @@ chatRouter.get('/preview', (req: Request, res: Response) => {
 
   return res.json({ preview });
 });
+
+/**
+ * Atualiza o indicador de digitação na conversa
+ */
+chatRouter.post('/conversations/:id/typing', (req: Request, res: Response) => {
+  const convId = req.params.id;
+  const { userId, isTyping } = req.body;
+  if (!userId) {
+    return res.status(400).json({ error: 'userId obrigatório.' });
+  }
+
+  chatStore.setTyping(convId, userId, Boolean(isTyping));
+  const typingUsers = chatStore.getTypingUsers(convId, userId);
+  return res.json({ success: true, typingUsers });
+});
+
+/**
+ * Alterna ou registra reação com emoji em uma mensagem
+ */
+chatRouter.post('/conversations/:id/messages/:msgId/reaction', (req: Request, res: Response) => {
+  const { id: convId, msgId } = req.params;
+  const { userId, emoji } = req.body;
+
+  if (!userId || !emoji) {
+    return res.status(400).json({ error: 'userId e emoji são obrigatórios para registrar reação.' });
+  }
+
+  try {
+    const result = chatStore.toggleReaction(convId, msgId, userId, emoji);
+    return res.json(result);
+  } catch (err) {
+    return res.status(400).json({ error: err instanceof Error ? err.message : 'Falha ao registrar reação.' });
+  }
+});
+
+/**
+ * Envia heartbeat de presença do usuário
+ */
+chatRouter.post('/presence/heartbeat', (req: Request, res: Response) => {
+  const { userId, showOnlineStatus } = req.body;
+  if (!userId) {
+    return res.status(400).json({ error: 'userId obrigatório.' });
+  }
+
+  chatStore.recordPresence(userId, true, showOnlineStatus);
+  return res.json({ success: true, isOnline: chatStore.isUserOnline(userId) });
+});
+
+/**
+ * Notifica desconexão ou fechamento de aba
+ */
+chatRouter.post('/presence/offline', (req: Request, res: Response) => {
+  let userId = req.body?.userId;
+  if (!userId && typeof req.body === 'string') {
+    try {
+      const parsed = JSON.parse(req.body);
+      userId = parsed.userId;
+    } catch {
+      // ignore
+    }
+  }
+
+  if (userId) {
+    chatStore.recordPresence(userId, false);
+  }
+  return res.json({ success: true });
+});
+
+/**
+ * Consulta status de presença de uma lista de usuários
+ */
+chatRouter.get('/presence/users', (req: Request, res: Response) => {
+  const idsParam = req.query.ids as string;
+  if (!idsParam) {
+    return res.json({ presence: {} });
+  }
+
+  const ids = idsParam.split(',').map((id) => id.trim()).filter(Boolean);
+  const presenceMap: Record<string, boolean> = {};
+  for (const id of ids) {
+    presenceMap[id] = chatStore.isUserOnline(id);
+  }
+
+  return res.json({ presence: presenceMap });
+});
+

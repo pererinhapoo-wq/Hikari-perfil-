@@ -7,6 +7,7 @@ export interface PrivacySettings {
   showCommentsOnProfile: boolean;
   allowDirectMessages?: boolean;
   directMessagesFrom?: DirectMessagesPrivacy;
+  showOnlineStatus?: boolean; // Se verdadeiro (padrão), exibe o ponto verde de status online
 }
 
 export interface UserProfile {
@@ -185,6 +186,7 @@ export interface PrivateMessage {
     mimeType?: string;
   };
   linkPreview?: HikariLinkPreview;
+  reactions?: Record<string, string[]>; // emoji -> array of user IDs
   isRead: boolean;
   createdAt: number;
   status?: 'sending' | 'sent' | 'failed';

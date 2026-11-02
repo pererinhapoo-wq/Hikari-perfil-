@@ -16,6 +16,7 @@ export interface UserCheckContext {
   avatarUrl: string;
   allowDirectMessages?: boolean;
   directMessagesFrom?: DirectMessagesPrivacy;
+  showOnlineStatus?: boolean;
   followingIds: string[];
   followerIds: string[];
   blockedIds: string[];
@@ -96,8 +97,8 @@ export function validateMediaPayload(
   mediaUrl: string | undefined,
   type: MessageType
 ): { valid: boolean; error?: string } {
-  if (type === 'text') {
-    return { valid: true };
+  if (type === 'text' || type === 'link') {
+    if (!mediaUrl) return { valid: true };
   }
 
   if (!mediaUrl || typeof mediaUrl !== 'string') {
@@ -126,12 +127,24 @@ export function validateMediaPayload(
     if (!validDataHeader) {
       return { valid: false, error: 'Apenas imagens PNG, JPEG, WEBP e GIF em Base64 são suportadas.' };
     }
-    // Limite de 5MB para data URLs
-    if (trimmed.length > 7 * 1024 * 1024) {
-      return { valid: false, error: 'A imagem enviada excede o limite máximo permitido de 5MB.' };
+    // Limite de 8MB para data URLs (aprox. 11MB em base64)
+    if (trimmed.length > 11 * 1024 * 1024) {
+      return { valid: false, error: 'O arquivo de imagem ou GIF excede o limite máximo permitido de 8MB.' };
     }
-    if (type === 'gif' && !lower.startsWith('data:image/gif')) {
-      return { valid: false, error: 'O arquivo enviado deve ser um GIF animado.' };
+    if (type === 'gif') {
+      if (!lower.startsWith('data:image/gif')) {
+        return { valid: false, error: 'O arquivo enviado deve ser um GIF animado.' };
+      }
+      // Validação do conteúdo real dos bytes do arquivo (Magic bytes: GIF87a ou GIF89a)
+      // Em Base64: 'GIF89a' = 'R0lGODlh', 'GIF87a' = 'R0lGODdh'
+      const base64Index = trimmed.indexOf(';base64,');
+      if (base64Index !== -1) {
+        const rawBase64 = trimmed.slice(base64Index + 8).trim();
+        const isRealGifHeader = rawBase64.startsWith('R0lGODlh') || rawBase64.startsWith('R0lGODdh');
+        if (!isRealGifHeader) {
+          return { valid: false, error: 'Arquivo inválido: o conteúdo real não corresponde à assinatura binária de um GIF animado.' };
+        }
+      }
     }
     return { valid: true };
   }
@@ -193,8 +206,9 @@ export function extractHikariLinkPreview(
   // 2. Detecção inteligente de títulos do catálogo oficial Hikari citados na mensagem
   for (const anime of catalog) {
     const lowerTitle = anime.title.toLowerCase();
+    const baseTitle = anime.title.replace(/\s*\([^)]*\)/g, '').trim().toLowerCase();
     const cleanText = text.toLowerCase();
-    if (cleanText.includes(lowerTitle) && lowerTitle.length >= 5) {
+    if ((cleanText.includes(lowerTitle) || (baseTitle.length >= 4 && cleanText.includes(baseTitle))) && lowerTitle.length >= 4) {
       return {
         url: `https://hikari.tv/anime/${anime.id}`,
         type: 'anime',
@@ -241,6 +255,10 @@ class ChatStore {
   private conversations = new Map<string, PrivateConversation>();
   private messages = new Map<string, PrivateMessage[]>(); // conversationId -> messages (sorted ascending by createdAt)
   private userContexts = new Map<string, UserCheckContext>();
+  // Presença: userId -> { lastSeen: number, isOnline: boolean, showOnlineStatus: boolean }
+  private userPresence = new Map<string, { lastSeen: number; isOnline: boolean; showOnlineStatus: boolean }>();
+  // Digitando: convId -> Map(userId -> lastTypingTimestamp)
+  private typingStates = new Map<string, Map<string, number>>();
 
   constructor() {
     this.seedInitialConversations();
@@ -248,10 +266,104 @@ class ChatStore {
 
   public registerUserContext(ctx: UserCheckContext): void {
     this.userContexts.set(ctx.id, { ...ctx });
+    // Se o contexto possuir showOnlineStatus explícito, sincroniza também na presença
+    if (ctx.showOnlineStatus !== undefined) {
+      const existing = this.userPresence.get(ctx.id);
+      if (existing) {
+        existing.showOnlineStatus = ctx.showOnlineStatus;
+      }
+    }
   }
 
   public getUserContext(userId: string): UserCheckContext | undefined {
     return this.userContexts.get(userId);
+  }
+
+  /**
+   * Registra presença do usuário (heartbeat ativo ou desconexão)
+   */
+  public recordPresence(userId: string, isOnline: boolean, showOnlineStatus?: boolean): void {
+    const cleanId = userId.trim();
+    if (!cleanId) return;
+
+    // Se showOnlineStatus não foi enviado no payload, tenta obter do UserCheckContext
+    let visibility = showOnlineStatus;
+    if (visibility === undefined) {
+      const ctx = this.userContexts.get(cleanId);
+      visibility = ctx?.showOnlineStatus ?? true;
+    }
+
+    this.userPresence.set(cleanId, {
+      lastSeen: Date.now(),
+      isOnline,
+      showOnlineStatus: visibility !== false,
+    });
+  }
+
+  /**
+   * Verifica se o usuário está online no momento, respeitando a privacidade e expiração
+   */
+  public isUserOnline(userId: string): boolean {
+    const entry = this.userPresence.get(userId);
+    if (!entry) return false;
+
+    // Se o usuário optou por ocultar seu status online, outros nunca veem online
+    if (!entry.showOnlineStatus) return false;
+
+    // Se foi marcado como offline explicitamente (ex: fechamento da aba)
+    if (!entry.isOnline) return false;
+
+    // Expiração automática: considera offline se não houve heartbeat nos últimos 45 segundos
+    const isRecent = Date.now() - entry.lastSeen < 45000;
+    return isRecent;
+  }
+
+  public getUserPresenceSummary(userId: string): { isOnline: boolean; lastSeen?: number } {
+    const entry = this.userPresence.get(userId);
+    if (!entry || !entry.showOnlineStatus) {
+      return { isOnline: false };
+    }
+    const online = entry.isOnline && Date.now() - entry.lastSeen < 45000;
+    return { isOnline: online, lastSeen: entry.lastSeen };
+  }
+
+  /**
+   * Atualiza o estado de digitação com expiração automática
+   */
+  public setTyping(convId: string, userId: string, isTyping: boolean): void {
+    let convTyping = this.typingStates.get(convId);
+    if (!convTyping) {
+      convTyping = new Map<string, number>();
+      this.typingStates.set(convId, convTyping);
+    }
+
+    if (isTyping) {
+      convTyping.set(userId, Date.now());
+    } else {
+      convTyping.delete(userId);
+    }
+  }
+
+  /**
+   * Retorna os IDs dos participantes que estão digitando no momento (expiração de 4.5s)
+   */
+  public getTypingUsers(convId: string, excludeUserId?: string): string[] {
+    const convTyping = this.typingStates.get(convId);
+    if (!convTyping) return [];
+
+    const now = Date.now();
+    const active: string[] = [];
+
+    for (const [uid, timestamp] of convTyping.entries()) {
+      if (now - timestamp > 4500) {
+        // Expirou: limpa para não deixar preso
+        convTyping.delete(uid);
+      } else if (!excludeUserId || uid !== excludeUserId) {
+        active.push(uid);
+      }
+    }
+
+    return active;
   }
 
   private seedInitialConversations(): void {
@@ -414,7 +526,19 @@ class ChatStore {
     const list: PrivateConversation[] = [];
     for (const conv of this.conversations.values()) {
       if (conv.participants.includes(userId)) {
-        list.push({ ...conv });
+        const copy: PrivateConversation = {
+          ...conv,
+          participantDetails: { ...conv.participantDetails },
+        };
+        for (const pId of copy.participants) {
+          if (copy.participantDetails[pId]) {
+            copy.participantDetails[pId] = {
+              ...copy.participantDetails[pId],
+              isOnline: this.isUserOnline(pId),
+            };
+          }
+        }
+        list.push(copy);
       }
     }
     // Ordena da mais recente para a mais antiga
@@ -427,7 +551,19 @@ class ChatStore {
     if (requestingUserId && !conv.participants.includes(requestingUserId)) {
       return null;
     }
-    return { ...conv };
+    const copy: PrivateConversation = {
+      ...conv,
+      participantDetails: { ...conv.participantDetails },
+    };
+    for (const pId of copy.participants) {
+      if (copy.participantDetails[pId]) {
+        copy.participantDetails[pId] = {
+          ...copy.participantDetails[pId],
+          isOnline: this.isUserOnline(pId),
+        };
+      }
+    }
+    return copy;
   }
 
   public getConversationMessages(
@@ -465,8 +601,8 @@ class ChatStore {
     const existing = this.conversations.get(convId);
     if (existing) {
       // Atualiza metadados dos participantes se mudaram
-      existing.participantDetails[sender.id] = { ...sender };
-      existing.participantDetails[recipient.id] = { ...recipient };
+      existing.participantDetails[sender.id] = { ...sender, isOnline: this.isUserOnline(sender.id) };
+      existing.participantDetails[recipient.id] = { ...recipient, isOnline: this.isUserOnline(recipient.id) };
       return { conversation: { ...existing }, isNew: false };
     }
 
@@ -475,8 +611,8 @@ class ChatStore {
       id: convId,
       participants: [sender.id, recipient.id],
       participantDetails: {
-        [sender.id]: { ...sender },
-        [recipient.id]: { ...recipient },
+        [sender.id]: { ...sender, isOnline: this.isUserOnline(sender.id) },
+        [recipient.id]: { ...recipient, isOnline: this.isUserOnline(recipient.id) },
       },
       unreadCounts: {
         [sender.id]: 0,
@@ -539,6 +675,7 @@ class ChatStore {
       mediaUrl: payload.mediaUrl,
       mediaMetadata: payload.mediaMetadata,
       linkPreview,
+      reactions: payload.reactions ? { ...payload.reactions } : {},
       isRead: false,
       createdAt: now,
       status: 'sent',
@@ -562,7 +699,62 @@ class ChatStore {
     };
     conv.updatedAt = now;
 
+    // Remove estado de digitação do remetente ao enviar a mensagem
+    this.setTyping(conv.id, senderId, false);
+
     return { message, conversation: { ...conv } };
+  }
+
+  /**
+   * Adiciona, altera ou remove a reação com emoji de um participante na mensagem
+   */
+  public toggleReaction(
+    convId: string,
+    msgId: string,
+    userId: string,
+    rawEmoji: string
+  ): { message: PrivateMessage; action: 'added' | 'removed' } {
+    const conv = this.conversations.get(convId);
+    if (!conv || !conv.participants.includes(userId)) {
+      throw new Error('Acesso não autorizado para reagir a mensagens desta conversa.');
+    }
+
+    const emoji = rawEmoji.trim();
+    if (!emoji || emoji.length > 8) {
+      throw new Error('Emoji de reação inválido.');
+    }
+
+    const convMessages = this.messages.get(convId) || [];
+    const targetMsg = convMessages.find((m) => m.id === msgId);
+    if (!targetMsg) {
+      throw new Error('Mensagem não encontrada nesta conversa.');
+    }
+
+    if (!targetMsg.reactions) {
+      targetMsg.reactions = {};
+    }
+
+    const currentList = targetMsg.reactions[emoji] || [];
+    const userIndex = currentList.indexOf(userId);
+
+    let action: 'added' | 'removed' = 'added';
+
+    if (userIndex !== -1) {
+      // Já havia reagido com este emoji -> remove a reação
+      const updated = currentList.filter((id) => id !== userId);
+      action = 'removed';
+      if (updated.length === 0) {
+        delete targetMsg.reactions[emoji];
+      } else {
+        targetMsg.reactions[emoji] = updated;
+      }
+    } else {
+      // Adiciona a reação garantindo ausência de duplicatas
+      targetMsg.reactions[emoji] = [...new Set([...currentList, userId])];
+      action = 'added';
+    }
+
+    return { message: { ...targetMsg }, action };
   }
 
   public markAsRead(convId: string, readerUserId: string): { updatedCount: number } {
@@ -592,6 +784,8 @@ class ChatStore {
     this.conversations.clear();
     this.messages.clear();
     this.userContexts.clear();
+    this.userPresence.clear();
+    this.typingStates.clear();
   }
 }
 

@@ -117,6 +117,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [directMessagesFrom, setDirectMessagesFrom] = useState<'everyone' | 'followers' | 'mutual'>(
     profile.privacySettings?.directMessagesFrom ?? 'everyone'
   );
+  const [showOnlineStatus, setShowOnlineStatus] = useState(profile.privacySettings?.showOnlineStatus !== false);
   
   const [saveSuccess, setSaveSuccess] = useState(false);
 
@@ -526,6 +527,7 @@ function formatExternalAccountDate(rawDate?: string | null): string | null {
         showCommentsOnProfile,
         allowDirectMessages,
         directMessagesFrom,
+        showOnlineStatus,
       },
       externalAccounts: {
         anilist: { 
@@ -1175,6 +1177,53 @@ function formatExternalAccountDate(rawDate?: string | null): string | null {
                       </div>
                     </div>
                   )}
+                </div>
+
+                {/* Section: Status Online no Chat (Presença) */}
+                <div className="space-y-3 pt-2 border-t border-purple-900/30">
+                  <div className="flex items-center gap-2">
+                    <span className="h-2.5 w-2.5 rounded-full bg-emerald-500 shadow-sm shadow-emerald-500/50" />
+                    <h4 className="text-xs font-semibold uppercase tracking-wider text-purple-400">
+                      Status de Presença no Chat
+                    </h4>
+                  </div>
+
+                  <div className="flex items-start justify-between gap-4 rounded-xl border border-purple-900/30 bg-[#0A0713] p-3.5">
+                    <div className="space-y-0.5">
+                      <span className="text-xs font-bold text-white">Mostrar quando estou online</span>
+                      <p className="text-[11px] text-purple-300/70">
+                        Exibir um pequeno ponto verde ao lado do seu nome e avatar no chat quando você estiver ativo no Hikari.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={showOnlineStatus}
+                      aria-label="Mostrar status online no chat"
+                      onClick={() => setShowOnlineStatus(!showOnlineStatus)}
+                      className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                        showOnlineStatus ? 'bg-emerald-600' : 'bg-neutral-800'
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                          showOnlineStatus ? 'translate-x-5' : 'translate-x-0'
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  <div className="rounded-xl bg-[#0c0819] border border-purple-900/40 p-2.5 text-[11px] text-purple-200/80 leading-relaxed">
+                    {showOnlineStatus ? (
+                      <span>
+                        Seu status de presença está <strong>visível</strong>. Outros participantes verão o indicador verde discreto enquanto você estiver navegando ou conversando.
+                      </span>
+                    ) : (
+                      <span>
+                        Seu status de presença está <strong>oculto</strong>. Os outros membros da comunidade não visualizarão o indicador verde no seu perfil nem nas conversas.
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 {/* Section: Blocked Users Management */}

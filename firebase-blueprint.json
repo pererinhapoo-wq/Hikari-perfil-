@@ -53,6 +53,7 @@
         "mediaUrl": { "type": "string", "maxLength": 6000000 },
         "mediaMetadata": { "type": "object" },
         "linkPreview": { "type": "object" },
+        "reactions": { "type": "object" },
         "isRead": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time" }
       },

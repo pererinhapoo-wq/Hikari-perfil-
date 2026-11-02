@@ -57,13 +57,23 @@ service cloud.firestore {
             'allowDirectMessages',
             'directMessagesFrom'
           ])
+          || settings.keys().hasOnly([
+            'showAnimeList',
+            'showFavorites',
+            'showActivity',
+            'showCommentsOnProfile',
+            'allowDirectMessages',
+            'directMessagesFrom',
+            'showOnlineStatus'
+          ])
         )
         && settings.showAnimeList is bool
         && settings.showFavorites is bool
         && settings.showActivity is bool
         && settings.showCommentsOnProfile is bool
         && (!('allowDirectMessages' in settings) || settings.allowDirectMessages is bool)
-        && (!('directMessagesFrom' in settings) || (settings.directMessagesFrom in ['everyone', 'followers', 'mutual']));
+        && (!('directMessagesFrom' in settings) || (settings.directMessagesFrom in ['everyone', 'followers', 'mutual']))
+        && (!('showOnlineStatus' in settings) || settings.showOnlineStatus is bool);
     }
 
     function isValidConversation(data) {
@@ -122,6 +132,7 @@ service cloud.firestore {
           'mediaUrl',
           'mediaMetadata',
           'linkPreview',
+          'reactions',
           'isRead',
           'createdAt'
         ])
@@ -140,6 +151,7 @@ service cloud.firestore {
         && data.text.size() <= 2000
         && data.type in ['text', 'image', 'gif', 'link']
         && (!('mediaUrl' in data) || (data.mediaUrl is string && data.mediaUrl.size() <= 6000000))
+        && (!('reactions' in data) || data.reactions is map)
         && data.isRead is bool
         && data.createdAt == request.time;
     }
@@ -582,8 +594,10 @@ service cloud.firestore {
           && isValidId(convId)
           && isValidId(msgId)
           && (request.auth.uid in get(/databases/$(database)/documents/conversations/$(convId)).data.participants)
-          && incoming().diff(existing()).affectedKeys().hasOnly(['isRead'])
-          && incoming().isRead is bool;
+          && (
+            (incoming().diff(existing()).affectedKeys().hasOnly(['isRead']) && incoming().isRead is bool)
+            || (incoming().diff(existing()).affectedKeys().hasOnly(['reactions']) && incoming().reactions is map)
+          );
 
         allow delete: if false;
       }

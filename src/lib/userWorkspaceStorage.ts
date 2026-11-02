@@ -180,6 +180,7 @@ export function buildProfileFromFirebaseUser(
       showCommentsOnProfile: true,
       allowDirectMessages: true,
       directMessagesFrom: 'everyone',
+      showOnlineStatus: true,
     },
     externalAccounts: overrides.externalAccounts ?? {
       anilist: { connected: false },
@@ -216,7 +217,8 @@ function sanitizeOverrides(raw: unknown): UserProfileOverrides {
       typeof ps.showActivity === 'boolean' ||
       typeof ps.showCommentsOnProfile === 'boolean' ||
       typeof ps.allowDirectMessages === 'boolean' ||
-      typeof ps.directMessagesFrom === 'string';
+      typeof ps.directMessagesFrom === 'string' ||
+      typeof ps.showOnlineStatus === 'boolean';
     if (hasAnyPrivacyKey) {
       overrides.privacySettings = {
         showAnimeList: typeof ps.showAnimeList === 'boolean' ? ps.showAnimeList : true,
@@ -234,6 +236,8 @@ function sanitizeOverrides(raw: unknown): UserProfileOverrides {
           ps.directMessagesFrom === 'followers' || ps.directMessagesFrom === 'mutual'
             ? ps.directMessagesFrom
             : 'everyone',
+        showOnlineStatus:
+          typeof ps.showOnlineStatus === 'boolean' ? ps.showOnlineStatus : true,
       };
     }
   }

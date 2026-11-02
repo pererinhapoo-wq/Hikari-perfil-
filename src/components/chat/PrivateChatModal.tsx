@@ -5,17 +5,16 @@ import {
   Image as ImageIcon,
   Film,
   Sparkles,
-  Paperclip,
   Check,
   CheckCheck,
   Clock,
   Search,
   ArrowLeft,
+  ArrowDown,
   ShieldAlert,
   UserCheck,
   UserPlus,
   Lock,
-  ExternalLink,
   Loader2,
   Trash2,
   Smile,
@@ -39,7 +38,10 @@ import {
   subscribeToConversation,
   subscribeToConversationsList,
   canUserMessageRecipient,
-  getDeterministicConversationId,
+  toggleMessageReaction,
+  sendTypingIndicator,
+  sendPresenceHeartbeat,
+  sendPresenceOffline,
   type UserCheckContext,
 } from '../../services/chatService';
 import { HikariCardPreview } from './HikariCardPreview';
@@ -61,6 +63,8 @@ interface PrivateChatModalProps {
   onToggleFollow?: (userId: string) => void;
   onToggleBlock?: (userId: string) => void;
 }
+
+const QUICK_REACTION_EMOJIS = ['❤️', '🔥', '✨', '😂', '🌸', '👏', '😮', '💯'];
 
 function formatMessageTime(timestamp: number): string {
   const date = new Date(timestamp);
@@ -116,10 +120,16 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
 
+  // Typing & Online state
+  const [typingUserIds, setTypingUserIds] = useState<string[]>([]);
+  const [activeReactionPickerMsgId, setActiveReactionPickerMsgId] = useState<string | null>(null);
+  const [unreadNewMessagesCount, setUnreadNewMessagesCount] = useState(0);
+
   // Composition State
   const [inputText, setInputText] = useState('');
   const [pendingMediaUrl, setPendingMediaUrl] = useState<string | null>(null);
   const [pendingMediaType, setPendingMediaType] = useState<'image' | 'gif' | null>(null);
+  const [pendingMediaTitle, setPendingMediaTitle] = useState<string | null>(null);
   const [pendingPreview, setPendingPreview] = useState<HikariLinkPreview | null>(null);
   const [isSending, setIsSending] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -132,9 +142,16 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
   // Mobile View Navigation State: 'list' or 'chat'
   const [mobileView, setMobileView] = useState<'list' | 'chat'>('list');
 
+  // DOM Refs & Scroll state tracking
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const isNearBottomRef = useRef<boolean>(true);
+  const isInitialLoadRef = useRef<boolean>(true);
+  const prevMessagesLengthRef = useRef<number>(0);
+  const scrollStateBeforePrependRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastTypingPingRef = useRef<number>(0);
 
   const currentSummary: ParticipantSummary = useMemo(
     () => ({
@@ -157,6 +174,7 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
         avatarUrl: profile.avatarUrl,
         allowDirectMessages: profile.privacySettings?.allowDirectMessages ?? true,
         directMessagesFrom: profile.privacySettings?.directMessagesFrom ?? 'everyone',
+        showOnlineStatus: profile.privacySettings?.showOnlineStatus !== false,
         followingIds: isCurrent ? Array.from(followingIds) : [],
         followerIds: isCurrent ? Array.from(followersIds) : [],
         blockedIds: isCurrent ? Array.from(blockedIds) : [],
@@ -164,6 +182,37 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
     },
     [currentUser, followingIds, followersIds, blockedIds]
   );
+
+  // Presence Heartbeat Loop (respeita preferência showOnlineStatus e desconexão em pagehide/beforeunload)
+  useEffect(() => {
+    if (!isOpen || !currentUser.id) return;
+    const showOnline = currentUser.privacySettings?.showOnlineStatus !== false;
+
+    // Heartbeat inicial
+    sendPresenceHeartbeat(currentUser.id, showOnline);
+
+    const intervalId = window.setInterval(() => {
+      sendPresenceHeartbeat(currentUser.id, showOnline);
+    }, 20000);
+
+    const handleVisibilityOrUnload = () => {
+      if (document.visibilityState === 'hidden') {
+        sendPresenceOffline(currentUser.id);
+      } else {
+        sendPresenceHeartbeat(currentUser.id, showOnline);
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityOrUnload);
+    window.addEventListener('beforeunload', handleVisibilityOrUnload);
+
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibilityOrUnload);
+      window.removeEventListener('beforeunload', handleVisibilityOrUnload);
+      sendPresenceOffline(currentUser.id);
+    };
+  }, [isOpen, currentUser.id, currentUser.privacySettings?.showOnlineStatus]);
 
   // Subscribe to Conversations List
   useEffect(() => {
@@ -192,7 +241,6 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
       .then((conv) => {
         setActiveConvId(conv.id);
         setMobileView('chat');
-        // Adiciona na lista se ainda não presente
         setConversations((prev) => {
           if (prev.some((c) => c.id === conv.id)) return prev;
           return [conv, ...prev];
@@ -203,30 +251,86 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
       });
   }, [isOpen, initialRecipientId, currentUser.id, currentSummary, otherProfiles]);
 
-  // Subscribe to Active Conversation Messages
+  // Subscribe to Active Conversation Messages & Typing
   useEffect(() => {
     if (!isOpen || !activeConvId || !currentUser.id) {
       setMessages([]);
+      setTypingUserIds([]);
+      setUnreadNewMessagesCount(0);
       return;
     }
 
     setIsLoadingMessages(true);
+    isInitialLoadRef.current = true;
+    setUnreadNewMessagesCount(0);
     markConversationAsRead(activeConvId, currentUser.id);
 
-    const unsubscribe = subscribeToConversation(activeConvId, currentUser.id, (newMsgs) => {
+    const unsubscribe = subscribeToConversation(activeConvId, currentUser.id, ({ messages: newMsgs, typingUsers }) => {
       setMessages(newMsgs);
+      setTypingUserIds(typingUsers);
       setIsLoadingMessages(false);
     });
 
-    return () => unsubscribe();
+    return () => {
+      unsubscribe();
+      // Ao sair da conversa, limpa o estado de digitação imediatamente
+      if (activeConvId && currentUser.id) {
+        sendTypingIndicator(activeConvId, currentUser.id, false);
+      }
+    };
   }, [isOpen, activeConvId, currentUser.id]);
 
-  // Scroll to bottom on new messages
-  useEffect(() => {
-    if (messages.length > 0 && !isLoadingOlder) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  // Detect scroll position to check if user is near bottom
+  const handleContainerScroll = useCallback(() => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+
+    const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const isNear = distanceToBottom < 100;
+    isNearBottomRef.current = isNear;
+
+    if (isNear) {
+      setUnreadNewMessagesCount(0);
     }
-  }, [messages, isLoadingOlder]);
+  }, []);
+
+  // Precise scroll restoration: nunca forçar rolagem para baixo quando o usuário subiu para ler
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container || messages.length === 0) return;
+
+    // 1. Primeira abertura da conversa: rola diretamente para o final
+    if (isInitialLoadRef.current) {
+      container.scrollTop = container.scrollHeight;
+      isInitialLoadRef.current = false;
+      isNearBottomRef.current = true;
+      prevMessagesLengthRef.current = messages.length;
+      return;
+    }
+
+    // 2. Preservar exatamente a posição visual ao carregar mensagens anteriores (paginação)
+    if (scrollStateBeforePrependRef.current) {
+      const delta = container.scrollHeight - scrollStateBeforePrependRef.current.scrollHeight;
+      container.scrollTop = scrollStateBeforePrependRef.current.scrollTop + delta;
+      scrollStateBeforePrependRef.current = null;
+      prevMessagesLengthRef.current = messages.length;
+      return;
+    }
+
+    const lastMsg = messages[messages.length - 1];
+    const isSentByMe = lastMsg?.senderId === currentUser.id;
+
+    // 3. Rolar para o final somente se o próprio usuário enviou ou se ele já estava próximo do final
+    if (isSentByMe || isNearBottomRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      setUnreadNewMessagesCount(0);
+    } else if (messages.length > prevMessagesLengthRef.current) {
+      // Chegou mensagem nova enquanto o usuário lia mensagens antigas: não interrompe a leitura!
+      setUnreadNewMessagesCount((prev) => prev + (messages.length - prevMessagesLengthRef.current));
+    }
+
+    prevMessagesLengthRef.current = messages.length;
+  }, [messages, currentUser.id]);
 
   // Active conversation object and partner profile
   const activeConversation = useMemo(() => {
@@ -238,7 +342,6 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
     const partnerId = activeConversation.participants.find((id) => id !== currentUser.id);
     if (!partnerId) return null;
 
-    // Tenta dados do perfil mais recente, com fallback para detalhes registrados na conversa
     const profile = otherProfiles[partnerId];
     const registered = activeConversation.participantDetails[partnerId];
 
@@ -267,7 +370,6 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
     };
     const recipientCtx = getContextForUser(partnerProfile as UserProfile);
 
-    // Contexto reverso de seguidores
     recipientCtx.followerIds = followingIds.has(activePartner.id) ? [currentUser.id] : [];
     senderCtx.followerIds = followersIds.has(activePartner.id) ? [activePartner.id] : [];
 
@@ -289,9 +391,17 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
     });
   }, [conversations, searchQuery, currentUser.id, otherProfiles]);
 
-  // Load older messages for progressive pagination
+  // Load older messages for progressive pagination without visual jumps
   const handleLoadOlderMessages = async () => {
     if (!activeConvId || isLoadingOlder || messages.length === 0) return;
+    const container = messagesContainerRef.current;
+    if (container) {
+      scrollStateBeforePrependRef.current = {
+        scrollHeight: container.scrollHeight,
+        scrollTop: container.scrollTop,
+      };
+    }
+
     setIsLoadingOlder(true);
     const oldestTimestamp = messages[0]?.createdAt;
 
@@ -306,9 +416,67 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
       }
       setHasMoreMessages(result.hasMore);
     } catch {
-      // Ignora erro de paginação
+      scrollStateBeforePrependRef.current = null;
     } finally {
       setIsLoadingOlder(false);
+    }
+  };
+
+  // Typing event handler with debounced broadcast
+  const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const val = e.target.value;
+    setInputText(val);
+
+    if (!activeConvId || !currentUser.id) return;
+
+    const now = Date.now();
+    if (val.trim() && now - lastTypingPingRef.current > 2000) {
+      lastTypingPingRef.current = now;
+      sendTypingIndicator(activeConvId, currentUser.id, true);
+    }
+
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current);
+    }
+
+    typingTimeoutRef.current = setTimeout(() => {
+      if (activeConvId && currentUser.id) {
+        sendTypingIndicator(activeConvId, currentUser.id, false);
+      }
+    }, 2500);
+  };
+
+  // Toggle emoji reaction on message
+  const handleToggleReaction = async (msgId: string, emoji: string) => {
+    if (!activeConvId || !currentUser.id) return;
+    setActiveReactionPickerMsgId(null);
+
+    // Otimista
+    setMessages((prev) =>
+      prev.map((m) => {
+        if (m.id !== msgId) return m;
+        const reactions = { ...(m.reactions || {}) };
+        const currentList = reactions[emoji] || [];
+        const hasUser = currentList.includes(currentUser.id);
+        if (hasUser) {
+          const updated = currentList.filter((id) => id !== currentUser.id);
+          if (updated.length === 0) {
+            delete reactions[emoji];
+          } else {
+            reactions[emoji] = updated;
+          }
+        } else {
+          reactions[emoji] = [...currentList, currentUser.id];
+        }
+        return { ...m, reactions };
+      })
+    );
+
+    try {
+      const updatedMsg = await toggleMessageReaction(activeConvId, msgId, currentUser.id, emoji);
+      setMessages((prev) => prev.map((m) => (m.id === msgId ? updatedMsg : m)));
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Falha ao atualizar reação.');
     }
   };
 
@@ -327,6 +495,11 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
 
     setIsSending(true);
     setErrorMessage(null);
+
+    // Notifica que parou de digitar
+    if (activeConvId && currentUser.id) {
+      sendTypingIndicator(activeConvId, currentUser.id, false);
+    }
 
     const partnerSummary: ParticipantSummary = {
       id: activePartner.id,
@@ -348,11 +521,12 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
         linkPreview: pendingPreview || undefined,
       });
 
-      // Atualização otimista imediata na lista
+      // Atualização imediata
       setMessages((prev) => [...prev, sentMsg]);
       setInputText('');
       setPendingMediaUrl(null);
       setPendingMediaType(null);
+      setPendingMediaTitle(null);
       setPendingPreview(null);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : 'Falha ao enviar mensagem.');
@@ -361,25 +535,27 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
     }
   };
 
-  // Image Upload File Handler
+  // Image / GIF Upload File Handler (validação de tamanho e MIME)
   const handleImageFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 5 * 1024 * 1024) {
-      setErrorMessage('O arquivo de imagem excede o tamanho máximo de 5MB.');
+    if (file.size > 8 * 1024 * 1024) {
+      setErrorMessage('O arquivo excede o tamanho máximo de 8MB.');
       return;
     }
+
+    const isGif = file.type === 'image/gif' || file.name.toLowerCase().endsWith('.gif');
 
     const reader = new FileReader();
     reader.onload = () => {
       if (typeof reader.result === 'string') {
         setPendingMediaUrl(reader.result);
-        setPendingMediaType(file.type.includes('gif') ? 'gif' : 'image');
+        setPendingMediaType(isGif ? 'gif' : 'image');
+        setPendingMediaTitle(file.name);
       }
     };
     reader.readAsDataURL(file);
-    // Limpa o valor do input para permitir selecionar o mesmo arquivo novamente
     e.target.value = '';
   };
 
@@ -391,13 +567,15 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
     }
   };
 
-  // Dismiss on Escape
+  // Dismiss popovers / lightbox on Escape
   useEffect(() => {
     if (!isOpen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         if (enlargedImageUrl) {
           setEnlargedImageUrl(null);
+        } else if (activeReactionPickerMsgId) {
+          setActiveReactionPickerMsgId(null);
         } else if (isGifPickerOpen) {
           setIsGifPickerOpen(false);
         } else if (isAnimePickerOpen) {
@@ -409,7 +587,7 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [isOpen, enlargedImageUrl, isGifPickerOpen, isAnimePickerOpen, onClose]);
+  }, [isOpen, enlargedImageUrl, activeReactionPickerMsgId, isGifPickerOpen, isAnimePickerOpen, onClose]);
 
   if (!isOpen) return null;
 
@@ -423,7 +601,10 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
     >
       <div
         className="relative w-full sm:max-w-4xl md:max-w-5xl h-full sm:h-[min(88dvh,760px)] rounded-none sm:rounded-2xl border-0 sm:border border-purple-900/40 bg-[#0A0713] shadow-2xl flex flex-col overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          setActiveReactionPickerMsgId(null);
+        }}
       >
         {/* Hidden Image Input */}
         <input
@@ -445,7 +626,7 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                 Mensagens Privadas
               </h2>
               <p className="text-[11px] text-purple-300/60 hidden sm:block">
-                Comunicação direta, segura e protegida por regras Zero-Trust
+                Comunicação segura com reações, GIFs animados e status online em tempo real
               </p>
             </div>
           </div>
@@ -454,7 +635,7 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="rounded-xl p-1.5 text-purple-300/70 hover:bg-purple-900/30 hover:text-white transition-colors cursor-pointer"
+              className="rounded-xl p-1.5 text-purple-300/70 hover:bg-purple-900/30 hover:text-white transition-colors cursor-pointer active:scale-95"
               title="Fechar chat"
             >
               <X className="h-5 w-5" />
@@ -463,7 +644,7 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
         </div>
 
         {/* Main Body: Two Columns on Desktop, Switchable on Mobile */}
-        <div className="flex flex-1 min-h-0 overflow-hidden">
+        <div className="flex flex-1 min-h-0 overflow-hidden relative">
           {/* COLUMN 1: Conversation List */}
           <div
             className={`w-full sm:w-80 md:w-96 flex-col border-r border-purple-900/30 bg-[#0d081b] shrink-0 ${
@@ -504,13 +685,13 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                       setActiveConvId(conv.id);
                       setMobileView('chat');
                     }}
-                    className={`w-full text-left flex items-start gap-3 p-3 transition-colors cursor-pointer group ${
+                    className={`w-full text-left flex items-start gap-3 p-3 transition-colors cursor-pointer group active:scale-[0.99] ${
                       isActive
                         ? 'bg-purple-950/60 border-l-4 border-l-purple-500'
                         : 'hover:bg-purple-950/30'
                     }`}
                   >
-                    {/* Avatar */}
+                    {/* Avatar with discreet online green dot */}
                     <div className="relative shrink-0">
                       {avatarUrl ? (
                         <img
@@ -526,7 +707,7 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                       )}
                       {registered?.isOnline && (
                         <span
-                          className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full bg-emerald-500 border-2 border-[#0d081b]"
+                          className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full bg-emerald-500 border-2 border-[#0d081b] animate-pulse motion-reduce:animate-none shadow-sm shadow-emerald-500/50"
                           title="Online agora"
                         />
                       )}
@@ -545,8 +726,11 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                         )}
                       </div>
 
-                      <div className="text-[11px] text-purple-400/70 truncate">
-                        @{username}
+                      <div className="text-[11px] text-purple-400/70 truncate flex items-center gap-1.5">
+                        <span>@{username}</span>
+                        {registered?.isOnline && (
+                          <span className="text-[10px] text-emerald-400 font-semibold">• online</span>
+                        )}
                       </div>
 
                       <div className="flex items-center justify-between gap-2 mt-1">
@@ -599,13 +783,13 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
 
           {/* COLUMN 2: Active Chat View */}
           <div
-            className={`flex-1 flex-col bg-[#0A0713] ${
+            className={`flex-1 flex-col bg-[#0A0713] relative ${
               mobileView === 'list' ? 'hidden sm:flex' : 'flex'
             }`}
           >
             {activePartner ? (
               <>
-                {/* Active Chat Header */}
+                {/* Active Chat Header with Online Indicator */}
                 <div className="flex items-center justify-between border-b border-purple-900/30 px-4 py-2.5 bg-[#0e091d]/80 shrink-0">
                   <div className="flex items-center gap-3 min-w-0">
                     {/* Mobile Back Button */}
@@ -618,7 +802,7 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                       <ArrowLeft className="h-4 w-4" />
                     </button>
 
-                    {/* Partner Avatar */}
+                    {/* Partner Avatar with Online Dot */}
                     <div
                       className="relative shrink-0 cursor-pointer"
                       onClick={() => onNavigateToProfile(activePartner.id)}
@@ -635,9 +819,15 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                           {activePartner.displayName.charAt(0) || 'U'}
                         </div>
                       )}
+                      {activePartner.isOnline && (
+                        <span
+                          className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full bg-emerald-500 border-2 border-[#0e091d] animate-pulse motion-reduce:animate-none shadow-sm shadow-emerald-500/50"
+                          title="Online agora"
+                        />
+                      )}
                     </div>
 
-                    {/* Partner Names & Profile shortcut */}
+                    {/* Partner Names & Online Indicator Text */}
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5">
                         <button
@@ -653,8 +843,16 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                           </span>
                         )}
                       </div>
-                      <div className="text-[11px] text-purple-400 truncate">
-                        @{activePartner.username}
+                      <div className="flex items-center gap-1.5 text-[11px] truncate">
+                        <span className="text-purple-400/80">@{activePartner.username}</span>
+                        {activePartner.isOnline ? (
+                          <span className="flex items-center gap-1 text-emerald-400 font-semibold text-[10px]">
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                            Online agora
+                          </span>
+                        ) : (
+                          <span className="text-purple-400/40 text-[10px]">• Offline</span>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -665,7 +863,7 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                       <button
                         type="button"
                         onClick={() => onToggleFollow(activePartner.id)}
-                        className={`hidden sm:inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold border transition-all cursor-pointer ${
+                        className={`hidden sm:inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold border transition-all cursor-pointer active:scale-95 ${
                           followingIds.has(activePartner.id)
                             ? 'bg-purple-950/70 border-purple-800/50 text-purple-200 hover:border-rose-500/50 hover:text-rose-200'
                             : 'bg-purple-600 hover:bg-purple-500 text-white border-purple-500 shadow-sm'
@@ -689,7 +887,7 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                       <button
                         type="button"
                         onClick={() => onToggleBlock(activePartner.id)}
-                        className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium border transition-colors cursor-pointer ${
+                        className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium border transition-colors cursor-pointer active:scale-95 ${
                           blockedIds.has(activePartner.id)
                             ? 'bg-rose-950 border-rose-500 text-rose-200'
                             : 'bg-purple-950/40 border-purple-900/40 text-purple-400 hover:text-rose-300'
@@ -713,12 +911,11 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                       <span className="leading-snug">{privacyCheck.reason}</span>
                     </div>
 
-                    {/* Quick follow shortcut if blocked by "followers only" rule */}
                     {!followingIds.has(activePartner.id) && onToggleFollow && (
                       <button
                         type="button"
                         onClick={() => onToggleFollow(activePartner.id)}
-                        className="rounded-lg bg-amber-600 hover:bg-amber-500 text-white px-2.5 py-1 text-xs font-semibold shrink-0 cursor-pointer transition-colors"
+                        className="rounded-lg bg-amber-600 hover:bg-amber-500 text-white px-2.5 py-1 text-xs font-semibold shrink-0 cursor-pointer transition-colors active:scale-95"
                       >
                         Seguir @{activePartner.username}
                       </button>
@@ -729,7 +926,8 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                 {/* Message Stream */}
                 <div
                   ref={messagesContainerRef}
-                  className="flex-1 overflow-y-auto p-4 space-y-3.5 bg-gradient-to-b from-[#0A0713] via-[#0c0817] to-[#0A0713]"
+                  onScroll={handleContainerScroll}
+                  className="flex-1 overflow-y-auto p-4 space-y-3.5 bg-gradient-to-b from-[#0A0713] via-[#0c0817] to-[#0A0713] relative"
                 >
                   {/* Load more button */}
                   {hasMoreMessages && (
@@ -738,7 +936,7 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                         type="button"
                         disabled={isLoadingOlder}
                         onClick={handleLoadOlderMessages}
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-purple-950/60 hover:bg-purple-900/70 border border-purple-800/40 px-3 py-1 text-xs font-medium text-purple-300 transition-colors cursor-pointer"
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-purple-950/60 hover:bg-purple-900/70 border border-purple-800/40 px-3 py-1 text-xs font-medium text-purple-300 transition-colors cursor-pointer active:scale-95"
                       >
                         {isLoadingOlder && <Loader2 className="h-3 w-3 animate-spin" />}
                         <span>Carregar mensagens anteriores</span>
@@ -754,11 +952,12 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
 
                   {messages.map((msg) => {
                     const isSender = msg.senderId === currentUser.id;
+                    const isReactionPickerOpen = activeReactionPickerMsgId === msg.id;
 
                     return (
                       <div
                         key={msg.id}
-                        className={`flex items-end gap-2 ${
+                        className={`group relative flex items-end gap-2 animate-in fade-in slide-in-from-bottom-1 duration-200 ${
                           isSender ? 'justify-end' : 'justify-start'
                         }`}
                       >
@@ -779,24 +978,69 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                           </div>
                         )}
 
+                        {/* Floating quick reaction trigger button */}
+                        <div
+                          className={`opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity flex items-center mb-1 shrink-0 ${
+                            isSender ? 'order-first mr-1' : 'ml-1'
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setActiveReactionPickerMsgId(isReactionPickerOpen ? null : msg.id);
+                            }}
+                            className="p-1 rounded-full text-purple-400/70 hover:text-purple-200 hover:bg-purple-900/40 cursor-pointer active:scale-90 transition-transform"
+                            title="Reagir com emoji"
+                          >
+                            <Smile className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+
+                        {/* Quick Reaction Emoji Popover */}
+                        {isReactionPickerOpen && (
+                          <div
+                            className={`absolute z-30 -top-10 flex items-center gap-1 rounded-full border border-purple-800/60 bg-[#160e2b] px-2 py-1 shadow-2xl backdrop-blur-xl animate-in fade-in zoom-in-95 duration-100 ${
+                              isSender ? 'right-4' : 'left-8'
+                            }`}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            {QUICK_REACTION_EMOJIS.map((emoji) => (
+                              <button
+                                key={emoji}
+                                type="button"
+                                onClick={() => handleToggleReaction(msg.id, emoji)}
+                                className="rounded-full p-1 text-sm hover:scale-125 transition-transform cursor-pointer active:scale-95"
+                              >
+                                {emoji}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+
                         {/* Message Bubble Container */}
                         <div
-                          className={`max-w-[85%] sm:max-w-md rounded-2xl px-3.5 py-2.5 shadow-md ${
+                          className={`max-w-[85%] sm:max-w-md rounded-2xl px-3.5 py-2.5 shadow-md transition-all ${
                             isSender
                               ? 'bg-gradient-to-br from-purple-700 via-purple-600 to-indigo-700 text-white rounded-br-xs border border-purple-500/40'
                               : 'bg-[#18112e] text-[#EDE8F5] rounded-bl-xs border border-purple-900/50'
                           }`}
                         >
-                          {/* Attached Media (Image / GIF) */}
+                          {/* Attached Media (Image / Animated GIF) */}
                           {msg.mediaUrl && (
-                            <div className="mb-2 overflow-hidden rounded-xl border border-purple-900/50 bg-black/40">
+                            <div className="mb-2 overflow-hidden rounded-xl border border-purple-900/50 bg-black/40 relative">
                               <img
                                 src={msg.mediaUrl}
                                 alt="Mídia compartilhada"
-                                className="max-h-64 w-full object-cover cursor-pointer hover:opacity-95 transition-opacity"
+                                className="max-h-72 w-full object-cover cursor-pointer hover:opacity-95 transition-opacity"
                                 loading="lazy"
                                 onClick={() => setEnlargedImageUrl(msg.mediaUrl!)}
                               />
+                              {msg.type === 'gif' && (
+                                <span className="absolute bottom-2 right-2 rounded-md bg-black/70 px-1.5 py-0.5 text-[9px] font-bold text-white uppercase tracking-wider backdrop-blur-sm pointer-events-none">
+                                  GIF
+                                </span>
+                              )}
                             </div>
                           )}
 
@@ -813,6 +1057,32 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                               preview={msg.linkPreview}
                               onSelectAnime={onSelectAnime}
                             />
+                          )}
+
+                          {/* Reactions Pill Display */}
+                          {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+                            <div className="flex flex-wrap items-center gap-1.5 mt-2 pt-1 border-t border-purple-800/30">
+                              {Object.entries(msg.reactions).map(([emoji, userIds]) => {
+                                if (!userIds || userIds.length === 0) return null;
+                                const hasReacted = userIds.includes(currentUser.id);
+                                return (
+                                  <button
+                                    key={emoji}
+                                    type="button"
+                                    onClick={() => handleToggleReaction(msg.id, emoji)}
+                                    className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold border transition-all cursor-pointer active:scale-90 ${
+                                      hasReacted
+                                        ? 'bg-purple-950/90 border-purple-400 text-white shadow-sm shadow-purple-900'
+                                        : 'bg-[#0e0720]/80 border-purple-900/60 text-purple-200/90 hover:border-purple-600'
+                                    }`}
+                                    title={`${userIds.length} pessoa(s) reagiram com ${emoji}`}
+                                  >
+                                    <span className="text-xs leading-none">{emoji}</span>
+                                    <span className="text-[10px] font-bold">{userIds.length}</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
                           )}
 
                           {/* Timestamp and delivery state */}
@@ -843,29 +1113,80 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                     );
                   })}
 
+                  {/* Typing Indicator: 3 Animated Violet Dots in Stream */}
+                  {typingUserIds.length > 0 && (
+                    <div className="flex items-end gap-2 animate-in fade-in slide-in-from-bottom-1 duration-150">
+                      <div className="h-7 w-7 rounded-lg overflow-hidden border border-purple-800/40 shrink-0 mb-1">
+                        {activePartner.avatarUrl ? (
+                          <img
+                            src={activePartner.avatarUrl}
+                            alt={activePartner.displayName}
+                            className="h-full w-full object-cover"
+                          />
+                        ) : (
+                          <div className="flex h-full w-full items-center justify-center bg-purple-900 text-[10px] font-bold text-white">
+                            {activePartner.displayName.charAt(0)}
+                          </div>
+                        )}
+                      </div>
+                      <div className="bg-[#18112e] text-[#EDE8F5] rounded-2xl rounded-bl-xs border border-purple-900/50 px-3.5 py-2 shadow-md flex items-center gap-2">
+                        <div className="flex items-center gap-1">
+                          <span className="h-1.5 w-1.5 rounded-full bg-purple-400 animate-bounce [animation-delay:-0.3s]" />
+                          <span className="h-1.5 w-1.5 rounded-full bg-purple-400 animate-bounce [animation-delay:-0.15s]" />
+                          <span className="h-1.5 w-1.5 rounded-full bg-purple-400 animate-bounce" />
+                        </div>
+                        <span className="text-[11px] text-purple-300/80 italic font-medium">
+                          {activePartner.displayName} está digitando...
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
                   <div ref={messagesEndRef} />
                 </div>
+
+                {/* Floating "Novas mensagens ↓" Pill Button */}
+                {unreadNewMessagesCount > 0 && (
+                  <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-20 animate-in fade-in slide-in-from-bottom-2 duration-150">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+                        setUnreadNewMessagesCount(0);
+                      }}
+                      className="flex items-center gap-2 rounded-full bg-purple-600 hover:bg-purple-500 text-white px-3.5 py-1.5 text-xs font-semibold shadow-lg shadow-purple-950/80 border border-purple-400/50 cursor-pointer active:scale-95 transition-all"
+                    >
+                      <span>Novas mensagens ({unreadNewMessagesCount})</span>
+                      <ArrowDown className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                )}
 
                 {/* Staged Media / Link Preview Bar before sending */}
                 {(pendingMediaUrl || pendingPreview) && (
                   <div className="p-3 bg-[#130B24] border-t border-purple-900/40 flex items-center justify-between gap-3 animate-in fade-in">
                     <div className="flex items-center gap-3">
                       {pendingMediaUrl && (
-                        <div className="relative h-14 w-14 rounded-lg overflow-hidden border border-purple-600/50">
+                        <div className="relative h-14 w-14 rounded-lg overflow-hidden border border-purple-600/50 bg-black/50">
                           <img
                             src={pendingMediaUrl}
                             alt="Prévia anexo"
                             className="h-full w-full object-cover"
                           />
+                          {pendingMediaType === 'gif' && (
+                            <span className="absolute bottom-1 right-1 rounded bg-black/80 px-1 text-[8px] font-bold text-white uppercase">
+                              GIF
+                            </span>
+                          )}
                         </div>
                       )}
                       <div>
                         <span className="text-xs font-bold text-white block">
                           {pendingMediaType === 'gif'
-                            ? 'GIF Animado pronto para envio'
+                            ? `GIF Animado pronto: ${pendingMediaTitle || 'Galeria'}`
                             : pendingPreview
                             ? `Card Hikari: ${pendingPreview.title}`
-                            : 'Imagem pronta para envio'}
+                            : `Imagem pronta: ${pendingMediaTitle || 'Arquivo'}`}
                         </span>
                         <span className="text-[11px] text-purple-300/70">
                           Pressione Enter ou clique em Enviar.
@@ -878,9 +1199,10 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                       onClick={() => {
                         setPendingMediaUrl(null);
                         setPendingMediaType(null);
+                        setPendingMediaTitle(null);
                         setPendingPreview(null);
                       }}
-                      className="rounded-lg p-1 text-purple-400 hover:text-rose-300 cursor-pointer"
+                      className="rounded-lg p-1 text-purple-400 hover:text-rose-300 cursor-pointer active:scale-90"
                       title="Remover anexo"
                     >
                       <Trash2 className="h-4 w-4" />
@@ -911,6 +1233,7 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                     onSelectGif={(url, title) => {
                       setPendingMediaUrl(url);
                       setPendingMediaType('gif');
+                      setPendingMediaTitle(title);
                       if (!inputText) {
                         setInputText(title);
                       }
@@ -934,13 +1257,13 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                         type="button"
                         disabled={!privacyCheck.allowed || isSending}
                         onClick={() => fileInputRef.current?.click()}
-                        className="rounded-xl p-2 text-purple-300 hover:bg-purple-900/40 hover:text-white transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                        className="rounded-xl p-2 text-purple-300 hover:bg-purple-900/40 hover:text-white transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed active:scale-95"
                         title="Enviar imagem (PNG, JPEG, WebP, GIF)"
                       >
                         <ImageIcon className="h-4 w-4" />
                       </button>
 
-                      {/* GIF Selector */}
+                      {/* GIF Selector (Curated + Mobile Gallery + PC Upload) */}
                       <button
                         type="button"
                         disabled={!privacyCheck.allowed || isSending}
@@ -948,12 +1271,12 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                           setIsAnimePickerOpen(false);
                           setIsGifPickerOpen(!isGifPickerOpen);
                         }}
-                        className={`rounded-xl p-2 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+                        className={`rounded-xl p-2 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed active:scale-95 ${
                           isGifPickerOpen
                             ? 'bg-purple-600 text-white'
                             : 'text-purple-300 hover:bg-purple-900/40 hover:text-white'
                         }`}
-                        title="Reações em GIF animado"
+                        title="Reações em GIF e galeria"
                       >
                         <Sparkles className="h-4 w-4" />
                       </button>
@@ -966,7 +1289,7 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                           setIsGifPickerOpen(false);
                           setIsAnimePickerOpen(!isAnimePickerOpen);
                         }}
-                        className={`rounded-xl p-2 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+                        className={`rounded-xl p-2 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed active:scale-95 ${
                           isAnimePickerOpen
                             ? 'bg-purple-600 text-white'
                             : 'text-purple-300 hover:bg-purple-900/40 hover:text-white'
@@ -983,7 +1306,7 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                         rows={1}
                         disabled={!privacyCheck.allowed || isSending}
                         value={inputText}
-                        onChange={(e) => setInputText(e.target.value)}
+                        onChange={handleTextareaChange}
                         onKeyDown={handleKeyDown}
                         placeholder={
                           privacyCheck.allowed
@@ -1028,22 +1351,22 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
           </div>
         </div>
 
-        {/* Lightbox Modal for enlarged image view */}
+        {/* Lightbox Modal for enlarged image and GIF view */}
         {enlargedImageUrl && (
           <div
             className="fixed inset-0 z-60 flex items-center justify-center bg-black/90 p-4 animate-in fade-in cursor-zoom-out"
             onClick={() => setEnlargedImageUrl(null)}
           >
-            <div className="relative max-w-4xl max-h-[90vh] overflow-hidden rounded-2xl border border-purple-900/50">
+            <div className="relative max-w-4xl max-h-[90vh] overflow-hidden rounded-2xl border border-purple-900/50 bg-black/70">
               <img
                 src={enlargedImageUrl}
-                alt="Imagem ampliada"
+                alt="Visualização ampliada"
                 className="max-h-[85vh] max-w-full object-contain"
               />
               <button
                 type="button"
                 onClick={() => setEnlargedImageUrl(null)}
-                className="absolute top-3 right-3 rounded-xl bg-black/70 p-2 text-white hover:bg-purple-900/80 cursor-pointer"
+                className="absolute top-3 right-3 rounded-xl bg-black/70 p-2 text-white hover:bg-purple-900/80 cursor-pointer active:scale-90"
               >
                 <X className="h-5 w-5" />
               </button>
