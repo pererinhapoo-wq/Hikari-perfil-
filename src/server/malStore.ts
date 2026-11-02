@@ -10,6 +10,7 @@ export interface OAuthHandshakeRecord {
   codeVerifier: string;
   uid: string;
   trustedOrigin: string;
+  redirectUri?: string;
   createdAt: number;
   expiresAt: number;
 }
@@ -97,6 +98,7 @@ export async function createOAuthHandshake(
     codeVerifier: string;
     uid: string;
     trustedOrigin: string;
+    redirectUri?: string;
   }
 ): Promise<OAuthHandshakeRecord> {
   if (!input.state || typeof input.state !== 'string' || !input.state.trim()) {
@@ -113,11 +115,17 @@ export async function createOAuthHandshake(
   }
 
   const now = Date.now();
+  const cleanRedirectUri =
+    typeof input.redirectUri === 'string' && input.redirectUri.trim()
+      ? input.redirectUri.trim()
+      : undefined;
+
   const record: OAuthHandshakeRecord = {
     state: input.state.trim(),
     codeVerifier: input.codeVerifier.trim(),
     uid: input.uid.trim(),
     trustedOrigin: input.trustedOrigin.trim(),
+    ...(cleanRedirectUri ? { redirectUri: cleanRedirectUri } : {}),
     createdAt: now,
     expiresAt: now + HANDSHAKE_TTL_MS,
   };

@@ -310,7 +310,29 @@ malRouter.get('/auth-url', requireFirebaseAuth, async (req: AuthenticatedExpress
       : undefined;
 
   const defaultRedirectUri = `${serverOrigin}/api/mal/callback`;
-  const redirectUri = clientRedirectUri || defaultRedirectUri;
+  let redirectUri = defaultRedirectUri;
+
+  // Validação estrita para impedir redirecionamentos arbitrários
+  if (clientRedirectUri) {
+    try {
+      const parsedRedirect = new URL(clientRedirectUri);
+      const isCallbackPath =
+        parsedRedirect.pathname === '/api/mal/callback' ||
+        parsedRedirect.pathname === '/api/mal/callback/' ||
+        parsedRedirect.pathname === '/mal/callback' ||
+        parsedRedirect.pathname === '/mal/callback/';
+
+      const isAllowedOrigin =
+        parsedRedirect.origin === trustedOrigin ||
+        parsedRedirect.origin === serverOrigin;
+
+      if (isCallbackPath && isAllowedOrigin) {
+        redirectUri = clientRedirectUri;
+      }
+    } catch {
+      redirectUri = defaultRedirectUri;
+    }
+  }
 
   const codeVerifier = crypto.randomBytes(48).toString('base64url');
   const state = crypto.randomBytes(24).toString('base64url');
@@ -321,6 +343,7 @@ malRouter.get('/auth-url', requireFirebaseAuth, async (req: AuthenticatedExpress
       codeVerifier,
       uid,
       trustedOrigin,
+      redirectUri,
     });
   } catch (err) {
     return res.status(500).json({
@@ -513,12 +536,17 @@ malRouter.get(['/callback', '/callback/'], async (req, res) => {
 
   try {
     const defaultRedirectUri = `${defaultOrigin}/api/mal/callback`;
+    const effectiveRedirectUri =
+      typeof handshake.redirectUri === 'string' && handshake.redirectUri.trim()
+        ? handshake.redirectUri.trim()
+        : defaultRedirectUri;
+
     const tokenBody = new URLSearchParams({
       client_id: clientId,
       code,
       code_verifier: handshake.codeVerifier,
       grant_type: 'authorization_code',
-      redirect_uri: defaultRedirectUri,
+      redirect_uri: effectiveRedirectUri,
     });
 
     if (clientSecret) {
