@@ -508,7 +508,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   return (
     <div 
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150 overscroll-contain"
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150 overscroll-contain"
       onClick={onClose}
       onTouchMove={(e) => {
         if (e.target === e.currentTarget) {
@@ -517,7 +517,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       }}
     >
       <div 
-        className="relative w-full max-w-2xl rounded-2xl border border-purple-900/40 bg-[#130E24] shadow-2xl flex flex-col max-h-[90vh] overscroll-contain"
+        className="relative w-full max-w-2xl rounded-2xl border border-purple-900/40 bg-[#130E24] shadow-2xl flex flex-col h-[90vh] sm:h-[85vh] max-h-[820px] overflow-hidden overscroll-contain"
         onClick={(e) => e.stopPropagation()}
         onTouchMove={(e) => e.stopPropagation()}
       >
@@ -526,42 +526,87 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <input ref={bannerInputRef} type="file" accept="image/*" className="hidden" onChange={handleBannerFile} />
 
         {/* Modal Header */}
-        <div className="flex items-center justify-between border-b border-purple-900/30 px-6 py-4">
-          <div>
-            <h2 className="text-lg font-bold text-white">
+        <div className="flex items-center justify-between border-b border-purple-900/30 px-5 sm:px-6 py-3.5 sm:py-4 shrink-0 bg-[#0e0a1b]">
+          <div className="min-w-0 pr-3">
+            <h2 className="text-base sm:text-lg font-bold text-white truncate">
               {activeTab === 'profile' && 'Editar Perfil'}
-              {activeTab === 'privacy' && 'Configurações & Privacidade'}
+              {activeTab === 'privacy' && 'Configurações de Privacidade'}
               {activeTab === 'connected' && 'Contas Conectadas'}
-              {activeTab === 'security' && 'Segurança e Conta'}
+              {activeTab === 'security' && 'Configurações de Privacidade'}
             </h2>
-            <p className="text-[11px] text-purple-300/60">
+            <p className="text-[11px] sm:text-xs text-purple-300/60 mt-0.5 truncate">
               {activeTab === 'profile' && 'Personalize suas fotos, nome de exibição, usuário e biografia.'}
-              {activeTab === 'privacy' && 'Preferências de visibilidade do perfil e histórico de comentários.'}
+              {activeTab === 'privacy' && 'Preferências de visibilidade do perfil e listas de animes.'}
               {activeTab === 'connected' && 'Gerencie conexões seguras com plataformas externas parceiras.'}
-              {activeTab === 'security' && 'Informações de registro e segurança da sua conta Hikari.'}
+              {activeTab === 'security' && 'Preferências de visibilidade do perfil e listas de animes.'}
             </p>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="rounded-lg p-1 text-purple-400 hover:bg-purple-900/30 hover:text-white transition-colors"
+            aria-label="Fechar"
+            className="rounded-xl p-2 text-purple-400 hover:bg-purple-900/30 hover:text-white transition-colors cursor-pointer shrink-0"
           >
             <X className="h-5 w-5" />
           </button>
         </div>
 
-        {/* Modal Body with Sidebar and Content */}
-        <div className="flex flex-col sm:flex-row flex-1 overflow-hidden">
-          {/* Navigation Sidebar */}
-          <div className="w-full sm:w-52 border-b sm:border-b-0 sm:border-r border-purple-900/30 bg-[#0e0a1b] p-3 space-y-3">
+        {/* Mobile Navigation Tabs (Horizontal Bar) */}
+        <div className="flex sm:hidden border-b border-purple-900/30 bg-[#0c0818] px-3 py-2 gap-2 overflow-x-auto shrink-0">
+          <button
+            type="button"
+            onClick={() => setActiveTab('profile')}
+            className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold whitespace-nowrap transition-colors shrink-0 cursor-pointer ${
+              activeTab === 'profile'
+                ? 'bg-purple-600 text-white shadow-sm shadow-purple-900/50'
+                : 'text-purple-300/70 hover:bg-purple-900/20 hover:text-white'
+            }`}
+          >
+            <User className="h-3.5 w-3.5" />
+            <span>Editar Perfil</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('privacy')}
+            className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold whitespace-nowrap transition-colors shrink-0 cursor-pointer ${
+              activeTab === 'privacy' || activeTab === 'security'
+                ? 'bg-purple-600 text-white shadow-sm shadow-purple-900/50'
+                : 'text-purple-300/70 hover:bg-purple-900/20 hover:text-white'
+            }`}
+          >
+            <Shield className="h-3.5 w-3.5" />
+            <span>Privacidade</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('connected')}
+            className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold whitespace-nowrap transition-colors shrink-0 cursor-pointer ${
+              activeTab === 'connected'
+                ? 'bg-purple-600 text-white shadow-sm shadow-purple-900/50'
+                : 'text-purple-300/70 hover:bg-purple-900/20 hover:text-white'
+            }`}
+          >
+            <Link2 className="h-3.5 w-3.5" />
+            <span>Contas Conectadas</span>
+          </button>
+        </div>
+
+        {/* Modal Body with Desktop Sidebar and Content */}
+        <div className="flex flex-1 min-h-0 overflow-hidden">
+          {/* Navigation Sidebar (Desktop) */}
+          <div className="hidden sm:flex sm:w-56 flex-col shrink-0 border-r border-purple-900/30 bg-[#0e0a1b] p-3.5 space-y-3.5">
             <div>
-              <div className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-purple-400/60">
+              <div className="px-3 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-purple-400/60">
                 Perfil
               </div>
               <button
+                type="button"
                 onClick={() => setActiveTab('profile')}
-                className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-xs font-semibold transition-colors ${
+                className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-xs font-semibold transition-colors cursor-pointer ${
                   activeTab === 'profile'
-                    ? 'bg-purple-600 text-white'
+                    ? 'bg-purple-600 text-white shadow-sm shadow-purple-950'
                     : 'text-purple-300/70 hover:bg-purple-900/20 hover:text-white'
                 }`}
               >
@@ -571,15 +616,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
 
             <div>
-              <div className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-purple-400/60">
+              <div className="px-3 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-purple-400/60">
                 Configurações da Conta
               </div>
               <div className="space-y-1">
                 <button
+                  type="button"
                   onClick={() => setActiveTab('privacy')}
-                  className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-xs font-semibold transition-colors ${
-                    activeTab === 'privacy'
-                      ? 'bg-purple-600 text-white'
+                  className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-xs font-semibold transition-colors cursor-pointer ${
+                    activeTab === 'privacy' || activeTab === 'security'
+                      ? 'bg-purple-600 text-white shadow-sm shadow-purple-950'
                       : 'text-purple-300/70 hover:bg-purple-900/20 hover:text-white'
                   }`}
                 >
@@ -588,34 +634,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </button>
 
                 <button
+                  type="button"
                   onClick={() => setActiveTab('connected')}
-                  className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-xs font-semibold transition-colors ${
+                  className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-xs font-semibold transition-colors cursor-pointer ${
                     activeTab === 'connected'
-                      ? 'bg-purple-600 text-white'
+                      ? 'bg-purple-600 text-white shadow-sm shadow-purple-950'
                       : 'text-purple-300/70 hover:bg-purple-900/20 hover:text-white'
                   }`}
                 >
                   <Link2 className="h-4 w-4" />
                   <span>Contas Conectadas</span>
                 </button>
-
-                <button
-                  onClick={() => setActiveTab('security')}
-                  className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-xs font-semibold transition-colors ${
-                    activeTab === 'security'
-                      ? 'bg-purple-600 text-white'
-                      : 'text-purple-300/70 hover:bg-purple-900/20 hover:text-white'
-                  }`}
-                >
-                  <ShieldCheck className="h-4 w-4" />
-                  <span>Segurança e Dados</span>
-                </button>
               </div>
             </div>
           </div>
 
           {/* Form Content Area */}
-          <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-6">
+          <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6 space-y-6 pb-8">
             {activeTab === 'profile' && (
               <div className="space-y-5">
                 {/* Visual Image Customization */}
@@ -731,34 +766,34 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 {/* Text Fields */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-purple-200">Nome de Exibição</label>
+                    <label className="text-xs font-semibold text-purple-200">Nome de Exibição</label>
                     <input
                       type="text"
                       value={displayName}
                       onChange={(e) => setDisplayName(e.target.value)}
-                      className="w-full rounded-xl border border-purple-900/40 bg-[#0A0713] px-3 py-2 text-xs text-white focus:border-purple-500 focus:outline-none"
+                      className="w-full rounded-xl border border-purple-900/50 bg-[#0A0713] px-3.5 py-2.5 text-xs sm:text-sm text-white focus:border-purple-500 focus:outline-none transition-colors"
                     />
                   </div>
 
                   <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-purple-200">Nome de Usuário (@)</label>
+                    <label className="text-xs font-semibold text-purple-200">Nome de Usuário (@)</label>
                     <input
                       type="text"
                       value={username}
                       onChange={(e) => setUsername(e.target.value)}
-                      className="w-full rounded-xl border border-purple-900/40 bg-[#0A0713] px-3 py-2 text-xs text-white focus:border-purple-500 focus:outline-none"
+                      className="w-full rounded-xl border border-purple-900/50 bg-[#0A0713] px-3.5 py-2.5 text-xs sm:text-sm text-white focus:border-purple-500 focus:outline-none transition-colors"
                     />
                   </div>
                 </div>
 
                 <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-purple-200">Biografia</label>
+                  <label className="text-xs font-semibold text-purple-200">Biografia</label>
                   <textarea
                     rows={3}
                     value={bio}
                     onChange={(e) => setBio(e.target.value)}
                     placeholder="Conte sobre seus gêneros favoritos de anime e interesses..."
-                    className="w-full rounded-xl border border-purple-900/40 bg-[#0A0713] px-3 py-2 text-xs text-white placeholder:text-purple-400/40 focus:border-purple-500 focus:outline-none"
+                    className="w-full rounded-xl border border-purple-900/50 bg-[#0A0713] px-3.5 py-2.5 text-xs sm:text-sm text-white placeholder:text-purple-400/40 focus:border-purple-500 focus:outline-none transition-colors leading-relaxed"
                   />
                 </div>
               </div>
@@ -2047,26 +2082,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
         </div>
 
-        {/* Modal Footer with Save Button */}
-        <div className="flex items-center justify-between border-t border-purple-900/30 px-6 py-4 bg-[#0e0a1b]">
-          <div>
+        {/* Modal Footer with Action Buttons */}
+        <div className="flex items-center justify-between border-t border-purple-900/30 px-4 sm:px-6 py-3.5 sm:py-4 bg-[#0e0a1b] shrink-0">
+          <div className="min-h-5 flex items-center">
             {saveSuccess && (
-              <span className="flex items-center gap-1.5 text-xs text-emerald-400 font-medium">
+              <span className="flex items-center gap-1.5 text-xs text-emerald-400 font-medium animate-in fade-in">
                 <Check className="h-4 w-4" />
                 Alterações salvas!
               </span>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 sm:gap-3">
             <button
+              type="button"
               onClick={onClose}
-              className="rounded-xl px-4 py-2 text-xs font-semibold text-purple-300 hover:text-white transition-colors"
+              className="rounded-xl px-4 py-2.5 text-xs font-semibold text-purple-300 hover:text-white hover:bg-purple-950/40 transition-colors cursor-pointer"
             >
               Cancelar
             </button>
             <button
+              type="button"
               onClick={handleSave}
-              className="rounded-xl bg-purple-600 hover:bg-purple-500 px-5 py-2 text-xs font-semibold text-white shadow-md shadow-purple-950 transition-all border border-purple-400/40"
+              className="rounded-xl bg-purple-600 hover:bg-purple-500 px-5 py-2.5 text-xs font-semibold text-white shadow-md shadow-purple-950 transition-all border border-purple-400/40 cursor-pointer active:scale-98"
             >
               Salvar Alterações
             </button>

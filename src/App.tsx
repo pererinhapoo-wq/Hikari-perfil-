@@ -41,7 +41,12 @@ import {
 } from './data/mockData';
 import { inferOffsetMsFromLabel } from './utils/relativeTime';
 import { computeAnimeStats, EMPTY_ANIME_STATS } from './utils/animeStats';
-import { getLastFetchedAniListCharacters, mergeFavoriteCharacters } from './services/anilistService';
+import { 
+  getLastFetchedAniListCharacters, 
+  mergeFavoriteCharacters,
+  isGenericOrMissingPoster,
+  normalizeTitle
+} from './services/anilistService';
 import { useAuth } from './contexts/AuthContext';
 import {
   PUBLIC_PROFILES_STORAGE_KEY,
@@ -184,15 +189,39 @@ function loadInitialDemoProfileData(): PersistedDemoProfileData {
           parsed.notifications,
           INITIAL_NOTIFICATIONS
         );
+
+        // Sanitização de animes e personagens carregados do cache do navegador:
+        // Se continham capas genéricas antigas do Unsplash, atualiza para as capas e retratos oficiais verificados.
+        // Imagens personalizadas do usuário (Data URLs, outros servidores) e capas oficiais são 100% preservadas.
+        const officialAnimeMap = new Map(INITIAL_ANIMES.map((a) => [a.id, a.posterUrl]));
+        const officialAnimeTitleMap = new Map(INITIAL_ANIMES.map((a) => [normalizeTitle(a.title), a.posterUrl]));
+        const sanitizedAnimes = parsed.animes.map((a) => {
+          if (isGenericOrMissingPoster(a.posterUrl)) {
+            const officialUrl = officialAnimeMap.get(a.id) || officialAnimeTitleMap.get(normalizeTitle(a.title));
+            if (officialUrl) return { ...a, posterUrl: officialUrl };
+          }
+          return a;
+        });
+
+        const officialCharMap = new Map(FAVORITE_CHARACTERS.map((c) => [c.id, c.imageUrl]));
+        const officialCharNameMap = new Map(FAVORITE_CHARACTERS.map((c) => [normalizeTitle(c.name), c.imageUrl]));
+        const sanitizedCharacters = Array.isArray(parsed.favoriteCharacters)
+          ? parsed.favoriteCharacters.map((c) => {
+              if (isGenericOrMissingPoster(c.imageUrl)) {
+                const officialUrl = officialCharMap.get(c.id) || officialCharNameMap.get(normalizeTitle(c.name));
+                if (officialUrl) return { ...c, imageUrl: officialUrl };
+              }
+              return c;
+            })
+          : undefined;
+
         return {
           profileOverrides:
             parsed.profileOverrides && typeof parsed.profileOverrides === 'object'
               ? parsed.profileOverrides
               : undefined,
-          animes: parsed.animes,
-          favoriteCharacters: Array.isArray(parsed.favoriteCharacters)
-            ? (parsed.favoriteCharacters as FavoriteCharacter[])
-            : undefined,
+          animes: sanitizedAnimes,
+          favoriteCharacters: sanitizedCharacters,
           comments: parsed.comments,
           activities: parsed.activities,
           notifications: mergedNotifications
@@ -698,6 +727,11 @@ export default function App() {
     activeProfile.id,
     demoAnimes,
   ]);
+
+  // Memoize favorites count to avoid O(N) array filtering directly inside the JSX render loop
+  const exposedFavoritesCount = useMemo(() => {
+    return exposedAnimes.filter((a) => a.isFavorite).length;
+  }, [exposedAnimes]);
 
   const displayedFavoriteCharacters = isAuthenticated
     ? isOwnProfile
@@ -2001,7 +2035,7 @@ export default function App() {
           onTabChange={handleTabChange}
           animeCount={activeProfileAnimeStats.totalEntries}
           commentsCount={displayedComments.length}
-          favoritesCount={exposedAnimes.filter(a => a.isFavorite).length}
+          favoritesCount={exposedFavoritesCount}
           isPrivateLocked={isPrivateLocked}
         />
 

@@ -90,8 +90,8 @@ export const CommentsTab: React.FC<CommentsTabProps> = ({
                       )}
                     </div>
                     {isHighlighted && (
-                      <span className="inline-flex items-center gap-1 rounded-md bg-purple-900/80 px-2 py-0.5 text-[10px] font-semibold text-purple-200 border border-purple-500/40">
-                        ✦ Comentário da Notificação
+                      <span className="inline-flex items-center rounded-md bg-purple-900/80 px-2 py-0.5 text-[10px] font-semibold text-purple-200 border border-purple-500/40">
+                        Comentário da Notificação
                       </span>
                     )}
                   </div>

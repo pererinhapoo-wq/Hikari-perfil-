@@ -178,11 +178,18 @@ const AnimeEditModalContent: React.FC<AnimeEditModalContentProps> = ({
         {/* Header: Title and Close button */}
         <div className="flex items-start justify-between gap-3 border-b border-purple-900/40 pb-4">
           <div className="flex items-center gap-3 min-w-0">
-            <img 
-              src={anime.posterUrl} 
-              alt={anime.title} 
-              className="h-14 w-10 rounded-lg object-cover border border-purple-800/40 shrink-0" 
-            />
+            {anime.posterUrl ? (
+              <img 
+                src={anime.posterUrl} 
+                alt={anime.title} 
+                referrerPolicy="no-referrer"
+                className="h-14 w-10 rounded-lg object-cover border border-purple-800/40 shrink-0" 
+              />
+            ) : (
+              <div className="flex h-14 w-10 items-center justify-center rounded-lg bg-purple-950/60 border border-purple-800/40 shrink-0 text-purple-400">
+                <Tv className="h-5 w-5" />
+              </div>
+            )}
             <div className="min-w-0">
               <h3 className="text-sm sm:text-base font-bold text-white leading-snug truncate" title={anime.title}>
                 {anime.title}

@@ -6,9 +6,16 @@ import {
   findMatchingAnimeInIndex,
   isGenericOrMissingPoster,
   isValidPosterUrl,
+  isGenericOrMissingImage,
+  isValidImageUrl,
 } from './anilistService';
 
-export { isGenericOrMissingPoster, isValidPosterUrl };
+export {
+  isGenericOrMissingPoster,
+  isValidPosterUrl,
+  isGenericOrMissingImage,
+  isValidImageUrl,
+};
 
 export interface MALAnimeEntry {
   malId: number;

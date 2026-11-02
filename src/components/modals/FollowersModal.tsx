@@ -167,11 +167,18 @@ export const FollowersModal: React.FC<FollowersModalProps> = ({
                     className="flex items-center justify-between gap-3 rounded-xl border border-purple-900/30 bg-[#17112c] p-3 shadow-md"
                   >
                     <div className="flex items-center gap-3 min-w-0">
-                      <img
-                        src={req.user.avatarUrl}
-                        alt={req.user.displayName}
-                        className="h-10 w-10 rounded-full object-cover border border-purple-500/30 shrink-0"
-                      />
+                      {req.user.avatarUrl ? (
+                        <img
+                          src={req.user.avatarUrl}
+                          alt={req.user.displayName}
+                          referrerPolicy="no-referrer"
+                          className="h-10 w-10 rounded-full object-cover border border-purple-500/30 shrink-0"
+                        />
+                      ) : (
+                        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-purple-700 to-indigo-800 text-xs font-bold text-white border border-purple-500/30 shrink-0 select-none">
+                          {(req.user.displayName || req.user.username || 'U').charAt(0).toUpperCase()}
+                        </div>
+                      )}
                       <div className="min-w-0">
                         <div className="text-xs font-bold text-white truncate">{req.user.displayName}</div>
                         <div className="text-[11px] text-purple-400 truncate">@{req.user.username}</div>
@@ -209,11 +216,18 @@ export const FollowersModal: React.FC<FollowersModalProps> = ({
                 className="flex items-center justify-between gap-3 rounded-xl border border-purple-900/30 bg-[#17112c]/60 p-3 hover:bg-[#1a1333] transition-colors"
               >
                 <div className="flex items-center gap-3 min-w-0">
-                  <img
-                    src={user.avatarUrl}
-                    alt={user.displayName}
-                    className="h-9 w-9 rounded-full object-cover border border-purple-500/30 shrink-0"
-                  />
+                  {user.avatarUrl ? (
+                    <img
+                      src={user.avatarUrl}
+                      alt={user.displayName}
+                      referrerPolicy="no-referrer"
+                      className="h-9 w-9 rounded-full object-cover border border-purple-500/30 shrink-0"
+                    />
+                  ) : (
+                    <div className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-purple-700 to-indigo-800 text-xs font-bold text-white border border-purple-500/30 shrink-0 select-none">
+                      {(user.displayName || user.username || 'U').charAt(0).toUpperCase()}
+                    </div>
+                  )}
                   <div className="min-w-0">
                     <div className="text-xs font-bold text-white truncate">{user.displayName}</div>
                     <div className="text-[11px] text-purple-400 truncate">@{user.username}</div>

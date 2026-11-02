@@ -1,10 +1,10 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { 
   MessageSquare, 
   ArrowRight, 
-  TrendingUp,
   BarChart3,
-  Lock
+  Lock,
+  Tv
 } from 'lucide-react';
 import {
   UserProfile,
@@ -19,6 +19,19 @@ import {
 import { FavoritesTab } from './FavoritesTab';
 import { useCurrentTime, formatRelativeTime, formatExactDateTime } from '../../utils/relativeTime';
 import { computeAnimeStats, type AnimeStatsSummary } from '../../utils/animeStats';
+
+/**
+ * Isolated leaf component that subscribes to useCurrentTime()
+ * so timer ticks do NOT cause the parent OverviewTab or its 2,000+ animes to re-render.
+ */
+const RelativeTimeSpan: React.FC<{
+  timestamp: number | undefined;
+  fallbackText?: string;
+  lowercase?: boolean;
+}> = ({ timestamp, fallbackText = '', lowercase = false }) => {
+  const now = useCurrentTime();
+  return <>{formatRelativeTime(timestamp, now, fallbackText, lowercase)}</>;
+};
 
 interface OverviewTabProps {
   profile: UserProfile;
@@ -51,21 +64,32 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
   onSelectAnimeStatus,
   onToggleFavorite
 }) => {
-  const now = useCurrentTime();
-
   const isListPrivate = profile.privacySettings?.showAnimeList === false;
   const canOpenLists = canAccessAnimeLists ?? (Boolean(isOwnProfile) || !isListPrivate);
 
-  // Deduplicate visible anime entries by ID (empty for visitors when lists are private)
-  const uniqueAnimes = canOpenLists
-    ? Array.from(new Map(animes.map((a) => [a.id, a])).values())
-    : [];
+  // Memoize deduplication of visible anime entries by ID
+  const uniqueAnimes = useMemo(() => {
+    return canOpenLists
+      ? Array.from(new Map(animes.map((a) => [a.id, a])).values())
+      : [];
+  }, [canOpenLists, animes]);
 
-  const watchingAnimes = uniqueAnimes.filter((a) => a.status === 'watching');
-  const favorites = uniqueAnimes.filter((a) => a.isFavorite);
+  // Memoize filtered subsets to avoid array allocations on re-render
+  const watchingAnimes = useMemo(
+    () => uniqueAnimes.filter((a) => a.status === 'watching'),
+    [uniqueAnimes]
+  );
 
-  // Aggregated numbers remain visible even when anime lists are private
-  const stats = animeStats ?? computeAnimeStats(animes);
+  const favorites = useMemo(
+    () => uniqueAnimes.filter((a) => a.isFavorite),
+    [uniqueAnimes]
+  );
+
+  // Memoize stats calculation (reuses cached summary when available)
+  const stats = useMemo(
+    () => animeStats ?? computeAnimeStats(animes),
+    [animeStats, animes]
+  );
 
   const handleOpenStatusList = (status: AnimeStatus) => {
     if (!canOpenLists) return;
@@ -76,26 +100,30 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
     }
   };
 
-  // Proportional stacked bar segments (SVG viewBox width = 1000)
-  const barSegments = stats.totalEntries > 0
-    ? [
-        { key: 'watching', count: stats.watchingCount, fill: 'fill-emerald-500' },
-        { key: 'completed', count: stats.completedCount, fill: 'fill-purple-500' },
-        { key: 'on_hold', count: stats.onHoldCount, fill: 'fill-amber-400' },
-        { key: 'dropped', count: stats.droppedCount, fill: 'fill-rose-500' },
-        { key: 'planned', count: stats.plannedCount, fill: 'fill-indigo-300/60' }
-      ]
-    : [];
+  // Memoize proportional stacked bar segments (SVG viewBox width = 1000)
+  const { renderedSegments } = useMemo(() => {
+    const segments = stats.totalEntries > 0
+      ? [
+          { key: 'watching', count: stats.watchingCount, fill: 'fill-emerald-500' },
+          { key: 'completed', count: stats.completedCount, fill: 'fill-purple-500' },
+          { key: 'on_hold', count: stats.onHoldCount, fill: 'fill-amber-400' },
+          { key: 'dropped', count: stats.droppedCount, fill: 'fill-rose-500' },
+          { key: 'planned', count: stats.plannedCount, fill: 'fill-indigo-300/60' }
+        ]
+      : [];
 
-  let cumulativeBarX = 0;
-  const renderedSegments = barSegments
-    .filter((seg) => seg.count > 0)
-    .map((seg) => {
-      const width = (seg.count / stats.totalEntries) * 1000;
-      const x = cumulativeBarX;
-      cumulativeBarX += width;
-      return { ...seg, x, width };
-    });
+    let cumulativeBarX = 0;
+    const rendered = segments
+      .filter((seg) => seg.count > 0)
+      .map((seg) => {
+        const width = (seg.count / stats.totalEntries) * 1000;
+        const x = cumulativeBarX;
+        cumulativeBarX += width;
+        return { ...seg, x, width };
+      });
+
+    return { renderedSegments: rendered };
+  }, [stats]);
 
   const statusRows: {
     status: Exclude<AnimeStatus, 'all'>;
@@ -358,7 +386,6 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
             <div className="mt-6 space-y-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <TrendingUp className="h-4 w-4 text-purple-400" />
                   <h3 className="text-sm font-bold text-white">Assistindo Atualmente</h3>
                   <span className="rounded-full bg-purple-950 px-2 py-0.5 text-[10px] font-mono text-purple-300 border border-purple-900/40 tabular-nums">
                     {watchingAnimes.length}
@@ -387,12 +414,20 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                       className="group flex items-center gap-3 rounded-xl border border-purple-900/30 bg-[#130E24] p-3 shadow-md hover:border-purple-600/40 hover:bg-[#17102e] transition-all cursor-pointer"
                       title={`Ver ${anime.title} na lista de animes`}
                     >
-                      <img
-                        src={anime.posterUrl}
-                        alt={anime.title}
-                        referrerPolicy="no-referrer"
-                        className="h-14 w-11 rounded-lg object-cover shrink-0 border border-purple-900/40 group-hover:scale-105 transition-transform"
-                      />
+                      {anime.posterUrl ? (
+                        <img
+                          src={anime.posterUrl}
+                          alt={anime.title}
+                          loading="lazy"
+                          decoding="async"
+                          referrerPolicy="no-referrer"
+                          className="h-14 w-11 rounded-lg object-cover shrink-0 border border-purple-900/40 group-hover:scale-105 transition-transform"
+                        />
+                      ) : (
+                        <div className="flex h-14 w-11 items-center justify-center rounded-lg bg-purple-950/60 border border-purple-900/40 shrink-0 text-purple-400">
+                          <Tv className="h-5 w-5" />
+                        </div>
+                      )}
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center justify-between gap-2">
                           <h4 className="truncate text-xs font-semibold text-white group-hover:text-purple-300 transition-colors">{anime.title}</h4>
@@ -465,7 +500,6 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                 </p>
               ) : (
                 activities.slice(0, 5).map((act) => {
-                  const relativeLabel = formatRelativeTime(act.createdAtTimestamp, now, act.timestamp, true);
                   const exactDate = formatExactDateTime(act.createdAtTimestamp);
                   return (
                     <div key={act.id} className="relative flex items-start gap-2.5 text-xs">
@@ -477,7 +511,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                             className="text-purple-400/75 font-normal"
                             title={exactDate || undefined}
                           >
-                            {' '}— {relativeLabel}
+                            {' '}— <RelativeTimeSpan timestamp={act.createdAtTimestamp} fallbackText={act.timestamp} lowercase={true} />
                           </span>
                         </p>
                         {act.description && (
@@ -514,7 +548,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                 <div className="mt-2 flex items-center justify-between text-[11px] text-purple-300/60">
                   <span className="truncate max-w-[150px] text-purple-400 font-medium">{comments[0].animeTitle}</span>
                   <span title={formatExactDateTime(comments[0].createdAtTimestamp) || undefined}>
-                    {formatRelativeTime(comments[0].createdAtTimestamp, now, comments[0].createdAt, false)}
+                    <RelativeTimeSpan timestamp={comments[0].createdAtTimestamp} fallbackText={comments[0].createdAt} lowercase={false} />
                   </span>
                 </div>
               </div>

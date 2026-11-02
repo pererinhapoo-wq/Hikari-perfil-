@@ -165,7 +165,7 @@ export const STATUS_LABELS_PT: Record<AnimeItem['status'], string> = {
 };
 
 /**
- * Determina se a capa é genérica (comprovadamente do domínio images.unsplash.com) ou está ausente/vazia.
+ * Determina se a capa ou imagem é genérica (comprovadamente do domínio images.unsplash.com) ou está ausente/vazia.
  */
 export function isGenericOrMissingPoster(posterUrl?: string | null): boolean {
   if (!posterUrl || typeof posterUrl !== 'string' || !posterUrl.trim()) {
@@ -180,8 +180,10 @@ export function isGenericOrMissingPoster(posterUrl?: string | null): boolean {
   }
 }
 
+export const isGenericOrMissingImage = isGenericOrMissingPoster;
+
 /**
- * Valida se a capa recebida da plataforma externa é uma URL válida (HTTP/HTTPS) e não-vazia.
+ * Valida se a capa ou imagem recebida da plataforma externa é uma URL válida (HTTP/HTTPS) e não-vazia.
  */
 export function isValidPosterUrl(url?: string | null): boolean {
   if (!url || typeof url !== 'string') return false;
@@ -194,6 +196,8 @@ export function isValidPosterUrl(url?: string | null): boolean {
     return false;
   }
 }
+
+export const isValidImageUrl = isValidPosterUrl;
 
 
 /**
@@ -374,27 +378,58 @@ export function mapAniListCharacter(raw: any): FavoriteCharacter {
 }
 
 /**
- * Mescla personagens favoritos locais com os favoritos importados do AniList,
- * preservando a ordem original dos favoritos manuais e evitando duplicatas.
+ * Mescla personagens favoritos locais com os favoritos importados do AniList:
+ * - Preserva a ordem original dos favoritos manuais e evita duplicatas.
+ * - Substitui imagens genéricas do Unsplash ou ausentes por imagem oficial válida recebida.
+ * - Preserva imagens oficiais existentes e imagens personalizadas pelo usuário (Data URLs, serviços externos, caminhos locais).
+ * - Proteção contra URLs vazias ou inválidas da API (nunca sobrescrevem uma imagem válida).
+ * - Mantém rigorosamente intactos todos os demais campos (id, name, originalName, animeName, role).
  */
 export function mergeFavoriteCharacters(
   existingCharacters: FavoriteCharacter[],
   incomingCharacters: FavoriteCharacter[]
 ): FavoriteCharacter[] {
-  const result: FavoriteCharacter[] = [...existingCharacters];
-  const seenIds = new Set(existingCharacters.map((c) => c.id));
-  const seenNames = new Set(
-    existingCharacters.map((c) => normalizeTitle(c.name)).filter(Boolean)
-  );
+  const result: FavoriteCharacter[] = existingCharacters.map((char) => ({ ...char }));
+  const idIndexMap = new Map<string, number>();
+  const nameIndexMap = new Map<string, number>();
+
+  result.forEach((char, idx) => {
+    if (char.id) idIndexMap.set(char.id, idx);
+    const normName = normalizeTitle(char.name);
+    if (normName && !nameIndexMap.has(normName)) {
+      nameIndexMap.set(normName, idx);
+    }
+  });
 
   for (const inc of incomingCharacters) {
     const normName = normalizeTitle(inc.name);
-    if (seenIds.has(inc.id) || (normName && seenNames.has(normName))) {
-      continue;
+    let matchIdx = -1;
+
+    if (inc.id && idIndexMap.has(inc.id)) {
+      matchIdx = idIndexMap.get(inc.id)!;
+    } else if (normName && nameIndexMap.has(normName)) {
+      matchIdx = nameIndexMap.get(normName)!;
     }
-    result.push(inc);
-    seenIds.add(inc.id);
-    if (normName) seenNames.add(normName);
+
+    if (matchIdx >= 0) {
+      const existingChar = result[matchIdx];
+      // Atualiza apenas se a imagem atual for genérica (Unsplash) ou vazia,
+      // e a recebida for uma URL válida oficial
+      if (isGenericOrMissingPoster(existingChar.imageUrl) && isValidPosterUrl(inc.imageUrl)) {
+        result[matchIdx] = {
+          ...existingChar,
+          imageUrl: inc.imageUrl,
+        };
+      }
+    } else {
+      // Novo personagem: adiciona sem duplicar
+      result.push({ ...inc });
+      const newIdx = result.length - 1;
+      if (inc.id) idIndexMap.set(inc.id, newIdx);
+      if (normName && !nameIndexMap.has(normName)) {
+        nameIndexMap.set(normName, newIdx);
+      }
+    }
   }
 
   return result;

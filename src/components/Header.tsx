@@ -274,8 +274,8 @@ export const Header: React.FC<HeaderProps> = ({
                           className="h-8 w-8 rounded-full object-cover border border-purple-500/30"
                         />
                       ) : (
-                        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-purple-950/60 border border-purple-800/40 text-purple-300 text-xs font-semibold">
-                          ✦
+                        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-purple-950/60 border border-purple-800/40 text-purple-400">
+                          <Search className="h-3.5 w-3.5" />
                         </div>
                       )}
                       <div className="flex-1 min-w-0">

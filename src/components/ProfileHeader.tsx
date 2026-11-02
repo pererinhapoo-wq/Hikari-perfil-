@@ -4,7 +4,6 @@ import {
   Trash2, 
   Calendar, 
   Lock, 
-  Globe, 
   UserCheck, 
   UserPlus, 
   Clock, 
@@ -184,24 +183,13 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
                   {profile.displayName}
                 </h1>
                 
-                {/* Privacy Badge */}
-                <span className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium border ${
-                  profile.isPrivate 
-                    ? 'border-amber-700/40 bg-amber-950/40 text-amber-300' 
-                    : 'border-purple-800/40 bg-purple-950/50 text-purple-300'
-                }`}>
-                  {profile.isPrivate ? (
-                    <>
-                      <Lock className="h-3 w-3" />
-                      Perfil Privado
-                    </>
-                  ) : (
-                    <>
-                      <Globe className="h-3 w-3" />
-                      Perfil Público
-                    </>
-                  )}
-                </span>
+                {/* Privacy Badge (exibido apenas quando o perfil for privado) */}
+                {profile.isPrivate && (
+                  <span className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium border border-amber-700/40 bg-amber-950/40 text-amber-300">
+                    <Lock className="h-3 w-3" />
+                    Perfil Privado
+                  </span>
+                )}
               </div>
               <div className="text-sm font-medium text-purple-400">
                 @{profile.username}

@@ -65,7 +65,7 @@ export const OTHER_USERS: Record<string, UserProfile> = {
     id: 'usr_shinji',
     username: 'shinji_mecha',
     displayName: 'Shinji Kazuki',
-    avatarUrl: '/src/assets/images/hikari_user_avatar_1793518815544.jpg',
+    avatarUrl: '',
     bannerUrl: '/src/assets/images/hikari_profile_banner_1793518804213.jpg',
     bio: 'Crítico amador de mechas, animação fluida e direções de arte dos anos 90.',
     createdAt: '12 de novembro de 2023',
@@ -420,7 +420,7 @@ export const INITIAL_FOLLOWERS: FollowUser[] = [
     id: 'usr_maya',
     username: 'maya_sakura',
     displayName: 'Maya Sakura',
-    avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200&auto=format&fit=crop&q=80',
+    avatarUrl: '',
     bio: 'Fã de slice-of-life, Kyoto Animation e mangás românticos.',
     isFollowing: true,
     isRequested: false,
@@ -432,7 +432,7 @@ export const INITIAL_FOLLOWERS: FollowUser[] = [
     id: 'usr_daiki',
     username: 'daiki_sub',
     displayName: 'Daiki Tanaka',
-    avatarUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=200&auto=format&fit=crop&q=80',
+    avatarUrl: '',
     bio: 'Tradutor voluntário e caçador de referências nos encerramentos.',
     isFollowing: false,
     isRequested: false,
@@ -459,7 +459,7 @@ export const INITIAL_FOLLOWING: FollowUser[] = [
     id: 'usr_maya',
     username: 'maya_sakura',
     displayName: 'Maya Sakura',
-    avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200&auto=format&fit=crop&q=80',
+    avatarUrl: '',
     bio: 'Fã de slice-of-life, Kyoto Animation e mangás românticos.',
     isFollowing: true,
     isRequested: false,
@@ -471,7 +471,7 @@ export const INITIAL_FOLLOWING: FollowUser[] = [
     id: 'usr_shinji',
     username: 'shinji_mecha',
     displayName: 'Shinji Kazuki',
-    avatarUrl: '/src/assets/images/hikari_user_avatar_1793518815544.jpg',
+    avatarUrl: '',
     bio: 'Crítico de animação fluida e mechas dos anos 90.',
     isFollowing: true,
     isRequested: false,
@@ -488,7 +488,7 @@ export const INITIAL_FOLLOW_REQUESTS: FollowRequest[] = [
       id: 'usr_yuki',
       username: 'yuki_frost',
       displayName: 'Yuki Vinter',
-      avatarUrl: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=200&auto=format&fit=crop&q=80',
+      avatarUrl: '',
       bio: 'Apaixonado por isekai e fantasia medieval.',
       isFollowing: false,
       isRequested: false,
@@ -504,7 +504,7 @@ export const INITIAL_FOLLOW_REQUESTS: FollowRequest[] = [
       id: 'usr_toru',
       username: 'toru_blade',
       displayName: 'Toru Honda',
-      avatarUrl: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=200&auto=format&fit=crop&q=80',
+      avatarUrl: '',
       bio: 'Maratonando animes clássicos toda sexta.',
       isFollowing: false,
       isRequested: false,
@@ -523,7 +523,7 @@ export const INITIAL_NOTIFICATIONS: NotificationItem[] = [
     actor: {
       displayName: 'Daiki Tanaka',
       username: 'daiki_sub',
-      avatarUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=200&auto=format&fit=crop&q=80'
+      avatarUrl: ''
     },
     message: 'começou a seguir o seu perfil.',
     createdAt: 'Há 15 minutos',
@@ -540,7 +540,7 @@ export const INITIAL_NOTIFICATIONS: NotificationItem[] = [
     actor: {
       displayName: 'Yuki Vinter',
       username: 'yuki_frost',
-      avatarUrl: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=200&auto=format&fit=crop&q=80'
+      avatarUrl: ''
     },
     message: 'enviou uma solicitação para seguir você.',
     createdAt: 'Há 40 minutos',
@@ -575,7 +575,7 @@ export const INITIAL_NOTIFICATIONS: NotificationItem[] = [
     actor: {
       displayName: 'Shinji Kazuki',
       username: 'shinji_mecha',
-      avatarUrl: '/src/assets/images/hikari_user_avatar_1793518815544.jpg'
+      avatarUrl: ''
     },
     message: 'aceitou sua solicitação para seguir.',
     createdAt: 'Ontem',
@@ -595,7 +595,7 @@ export const FAVORITE_CHARACTERS: FavoriteCharacter[] = [
     originalName: 'フリーレン',
     animeName: 'Sousou no Frieren',
     role: 'Protagonista',
-    imageUrl: 'https://images.unsplash.com/photo-1607604276583-eef5d076aa5f?w=400&auto=format&fit=crop&q=80'
+    imageUrl: 'https://s4.anilist.co/file/anilistcdn/character/large/b176754-PCnpqIOkjhFk.png'
   },
   {
     id: 'char_02',
@@ -603,7 +603,7 @@ export const FAVORITE_CHARACTERS: FavoriteCharacter[] = [
     originalName: '성진우',
     animeName: 'Solo Leveling',
     role: 'Monarca das Sombras',
-    imageUrl: 'https://images.unsplash.com/photo-1578632767115-351597cf2477?w=400&auto=format&fit=crop&q=80'
+    imageUrl: 'https://s4.anilist.co/file/anilistcdn/character/large/b129928-BCEjVaP0AQSw.png'
   },
   {
     id: 'char_03',
@@ -611,7 +611,7 @@ export const FAVORITE_CHARACTERS: FavoriteCharacter[] = [
     originalName: '五条悟',
     animeName: 'Jujutsu Kaisen',
     role: 'Feiticeiro Especial',
-    imageUrl: 'https://images.unsplash.com/photo-1563089145-599997674d42?w=400&auto=format&fit=crop&q=80'
+    imageUrl: 'https://s4.anilist.co/file/anilistcdn/character/large/b127691-9zqh1xpIubn7.png'
   },
   {
     id: 'char_04',
@@ -619,7 +619,7 @@ export const FAVORITE_CHARACTERS: FavoriteCharacter[] = [
     originalName: 'デイビッド',
     animeName: 'Cyberpunk: Edgerunners',
     role: 'Mercenário / Edgerunner',
-    imageUrl: 'https://images.unsplash.com/photo-1542751371-adc38448a05e?w=400&auto=format&fit=crop&q=80'
+    imageUrl: 'https://s4.anilist.co/file/anilistcdn/character/large/b284158-z1uGKC3IYVa1.png'
   },
   {
     id: 'char_05',
@@ -627,7 +627,7 @@ export const FAVORITE_CHARACTERS: FavoriteCharacter[] = [
     originalName: 'マキマ',
     animeName: 'Chainsaw Man',
     role: 'Líder da Segurança Pública',
-    imageUrl: 'https://images.unsplash.com/photo-1534447677768-be436bb09401?w=400&auto=format&fit=crop&q=80'
+    imageUrl: 'https://s4.anilist.co/file/anilistcdn/character/large/b137080-UHcynYNjb5ZU.png'
   },
   {
     id: 'char_06',
@@ -635,7 +635,7 @@ export const FAVORITE_CHARACTERS: FavoriteCharacter[] = [
     originalName: 'リヴァイ・アッカーマン',
     animeName: 'Attack on Titan',
     role: 'Capitão da Tropa de Exploração',
-    imageUrl: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=400&auto=format&fit=crop&q=80'
+    imageUrl: 'https://s4.anilist.co/file/anilistcdn/character/large/b45627-CR68RyZmddGG.png'
   },
   {
     id: 'char_07',
@@ -643,7 +643,7 @@ export const FAVORITE_CHARACTERS: FavoriteCharacter[] = [
     originalName: 'フェルン',
     animeName: 'Sousou no Frieren',
     role: 'Maga Ordinária de Primeira Classe',
-    imageUrl: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=400&auto=format&fit=crop&q=80'
+    imageUrl: 'https://s4.anilist.co/file/anilistcdn/character/large/b183965-uGFohBjlFoTp.png'
   },
   {
     id: 'char_08',
@@ -651,7 +651,7 @@ export const FAVORITE_CHARACTERS: FavoriteCharacter[] = [
     originalName: 'ロイド・フォージャー',
     animeName: 'SPY x FAMILY',
     role: 'Espião (Twilight)',
-    imageUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400&auto=format&fit=crop&q=80'
+    imageUrl: 'https://s4.anilist.co/file/anilistcdn/character/large/b138101-7NCB0Md8zA6G.png'
   },
   {
     id: 'char_09',
@@ -659,7 +659,7 @@ export const FAVORITE_CHARACTERS: FavoriteCharacter[] = [
     originalName: 'ロロノア・ゾロ',
     animeName: 'One Piece',
     role: 'Espadachim dos Chapéus de Palha',
-    imageUrl: 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?w=400&auto=format&fit=crop&q=80'
+    imageUrl: 'https://s4.anilist.co/file/anilistcdn/character/large/b62-S7oAeA9WInjV.png'
   },
   {
     id: 'char_10',
@@ -667,7 +667,7 @@ export const FAVORITE_CHARACTERS: FavoriteCharacter[] = [
     originalName: 'ヴァイオレット・エヴァーガーデン',
     animeName: 'Violet Evergarden',
     role: 'Autômata de Automemórias',
-    imageUrl: 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?w=400&auto=format&fit=crop&q=80'
+    imageUrl: 'https://s4.anilist.co/file/anilistcdn/character/large/b90169-4wr1Zehnsac8.png'
   }
 ];
 
@@ -677,70 +677,70 @@ export const FAVORITE_COMPANIES: FavoriteCompany[] = [
     name: 'Madhouse',
     type: 'Estúdio de Animação',
     notableWorks: 'Sousou no Frieren, Hunter x Hunter, Death Note',
-    logoUrl: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=200&auto=format&fit=crop&q=80'
+    logoUrl: 'https://cdn.myanimelist.net/s/common/company_logos/e68488ab-f0a0-411f-850a-18fb3e21b96c_600x600_i?s=21618c9c3183ffded748d303a253b637'
   },
   {
     id: 'comp_02',
     name: 'MAPPA',
     type: 'Estúdio de Animação',
     notableWorks: 'Jujutsu Kaisen, Chainsaw Man, Attack on Titan Final',
-    logoUrl: 'https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=200&auto=format&fit=crop&q=80'
+    logoUrl: 'https://cdn.myanimelist.net/s/common/company_logos/e3a5163d-3b09-4e98-922b-79180a75539f_600x600_i?s=3289c478fd611569ebccd7ff076151df'
   },
   {
     id: 'comp_03',
     name: 'ufotable',
     type: 'Estúdio de Animação & VFX',
     notableWorks: 'Demon Slayer, Fate/stay night: Heaven\'s Feel',
-    logoUrl: 'https://images.unsplash.com/photo-1579783900882-c0d3dad7b119?w=200&auto=format&fit=crop&q=80'
+    logoUrl: 'https://cdn.myanimelist.net/s/common/company_logos/03171393-4a85-451d-a025-4a3f05d1aede_600x600_i?s=48ebfd25c277dd148d41f88568f60aa6'
   },
   {
     id: 'comp_04',
     name: 'CloverWorks',
     type: 'Estúdio de Animação',
     notableWorks: 'Bocchi the Rock!, The Promised Neverland, Spy x Family',
-    logoUrl: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=200&auto=format&fit=crop&q=80'
+    logoUrl: 'https://cdn.myanimelist.net/s/common/company_logos/75875b81-17bb-4f7e-a06f-bb149d54687e_600x600_i?s=b90a570d03511f70dbac7e04869f4835'
   },
   {
     id: 'comp_05',
     name: 'A-1 Pictures',
     type: 'Estúdio de Animação',
     notableWorks: 'Solo Leveling, 86: Eighty Six, Kaguya-sama',
-    logoUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=200&auto=format&fit=crop&q=80'
+    logoUrl: 'https://cdn.myanimelist.net/s/common/company_logos/4713c58b-833f-4c92-bf4a-0e2f7af8a461_600x600_i?s=925a453653da58d385adb82b5d423a69'
   },
   {
     id: 'comp_06',
     name: 'Kyoto Animation',
     type: 'Estúdio de Animação & Arte',
     notableWorks: 'Violet Evergarden, A Silent Voice, Hyouka',
-    logoUrl: 'https://images.unsplash.com/photo-1534447677768-be436bb09401?w=200&auto=format&fit=crop&q=80'
+    logoUrl: 'https://cdn.myanimelist.net/s/common/company_logos/b066ff17-81d3-40db-b1f2-2927de70c0e3_600x600_i?s=edb149cf051e2d7984975063a1b3b3a7'
   },
   {
     id: 'comp_07',
     name: 'WIT Studio',
     type: 'Estúdio de Animação',
     notableWorks: 'Vinland Saga S1, Spy x Family, Vivy',
-    logoUrl: 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?w=200&auto=format&fit=crop&q=80'
+    logoUrl: 'https://cdn.myanimelist.net/s/common/company_logos/e7e64f9e-23f6-4c74-9813-cb4fcdb600cf_600x600_i?s=37f6a1b3342db61d87d4e50803fd6fd6'
   },
   {
     id: 'comp_08',
     name: 'Trigger',
     type: 'Estúdio de Animação Autoral',
     notableWorks: 'Cyberpunk: Edgerunners, Kill la Kill, Delicious in Dungeon',
-    logoUrl: 'https://images.unsplash.com/photo-1542751371-adc38448a05e?w=200&auto=format&fit=crop&q=80'
+    logoUrl: 'https://cdn.myanimelist.net/s/common/company_logos/bc3f892a-8581-45b1-8a95-81b6ac518f3d_600x600_i?s=d2a2e7f05478dbb999b17d35c44445db'
   },
   {
     id: 'comp_09',
     name: 'Bones',
     type: 'Estúdio de Animação',
     notableWorks: 'Mob Psycho 100, Fullmetal Alchemist: Brotherhood',
-    logoUrl: 'https://images.unsplash.com/photo-1563089145-599997674d42?w=200&auto=format&fit=crop&q=80'
+    logoUrl: 'https://cdn.myanimelist.net/s/common/company_logos/969047f0-a8ec-475e-ad0d-6e0d5cd8e17f_600x600_i?s=4145bdb95a29f3fe1447baa8045a7420'
   },
   {
     id: 'comp_10',
     name: 'Aniplex',
     type: 'Produtora & Distribuidora',
     notableWorks: 'Demon Slayer, Sword Art Online, Fate Series',
-    logoUrl: 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?w=200&auto=format&fit=crop&q=80'
+    logoUrl: 'https://cdn.myanimelist.net/s/common/company_logos/ba2241ea-7f83-45b6-9360-1f1d4de0d65a_600x600_i?s=369f1423117062ab3c7f4c7a90b2005a'
   }
 ];
 
@@ -750,69 +750,69 @@ export const FAVORITE_PEOPLE: FavoritePerson[] = [
     name: 'Hiroyuki Sawano',
     role: 'Compositor & Produtor Musical',
     notableWork: 'Attack on Titan, Solo Leveling, Kill la Kill',
-    imageUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=200&auto=format&fit=crop&q=80'
+    imageUrl: 'https://s4.anilist.co/file/anilistcdn/staff/large/n103509-IzuF5bIsiQnH.jpg'
   },
   {
     id: 'person_02',
     name: 'Keiichirou Saitou',
     role: 'Diretor de Animação',
     notableWork: 'Sousou no Frieren, Bocchi the Rock!',
-    imageUrl: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=200&auto=format&fit=crop&q=80'
+    imageUrl: 'https://s4.anilist.co/file/anilistcdn/staff/large/n134254-bqcsuWzJr87n.png'
   },
   {
     id: 'person_03',
     name: 'Makoto Shinkai',
     role: 'Diretor & Roteirista de Cinema',
     notableWork: 'Your Name, Weathering With You, Suzume',
-    imageUrl: 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=200&auto=format&fit=crop&q=80'
+    imageUrl: 'https://s4.anilist.co/file/anilistcdn/staff/large/n96117-X0ivK1cAvdzA.png'
   },
   {
     id: 'person_04',
     name: 'Kenjiro Tsuda',
     role: 'Dublador / Seiyuu',
     notableWork: 'Kento Nanami (JJK), Kishibe (Chainsaw Man)',
-    imageUrl: 'https://images.unsplash.com/photo-1519085360753-af0119f7cbe7?w=200&auto=format&fit=crop&q=80'
+    imageUrl: 'https://s4.anilist.co/file/anilistcdn/staff/large/n95591-WQGdD3ubbeoq.jpg'
   },
   {
     id: 'person_05',
     name: 'Rie Takahashi',
     role: 'Dubladora / Seiyuu',
     notableWork: 'Megumin (KonoSuba), Ai Hoshino (Oshi no Ko)',
-    imageUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200&auto=format&fit=crop&q=80'
+    imageUrl: 'https://s4.anilist.co/file/anilistcdn/staff/large/n119331-5dPuMCxu4RWf.jpg'
   },
   {
     id: 'person_06',
     name: 'Yuki Kaji',
     role: 'Dublador / Seiyuu',
     notableWork: 'Eren Yeager (AOT), Shoto Todoroki (MHA)',
-    imageUrl: 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?w=200&auto=format&fit=crop&q=80'
+    imageUrl: 'https://s4.anilist.co/file/anilistcdn/staff/large/n95672-T33YV7yCDKnL.png'
   },
   {
     id: 'person_07',
     name: 'Evan Call',
     role: 'Compositor Orquestral',
     notableWork: 'Sousou no Frieren, Violet Evergarden',
-    imageUrl: 'https://images.unsplash.com/photo-1519085360753-af0119f7cbe7?w=200&auto=format&fit=crop&q=80'
+    imageUrl: 'https://s4.anilist.co/file/anilistcdn/staff/large/n119999-D6YFCpQPSoHf.png'
   },
   {
     id: 'person_08',
     name: 'Shingo Yamashita',
     role: 'Animador & Diretor de Aberturas',
     notableWork: 'Jujutsu Kaisen OP1, Chainsaw Man ED',
-    imageUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=200&auto=format&fit=crop&q=80'
+    imageUrl: 'https://s4.anilist.co/file/anilistcdn/staff/large/n114914-aZHfx54YFvVl.png'
   },
   {
     id: 'person_09',
     name: 'Aoi Yuuki',
     role: 'Dubladora / Seiyuu',
     notableWork: 'Tanya Degurechaff, Madoka Kaname, Maomao',
-    imageUrl: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=200&auto=format&fit=crop&q=80'
+    imageUrl: 'https://s4.anilist.co/file/anilistcdn/staff/large/n101686-PTd0lQZMsmcv.png'
   },
   {
     id: 'person_10',
     name: 'Hiromu Arakawa',
     role: 'Mangaká Autora',
     notableWork: 'Fullmetal Alchemist, Silver Spoon',
-    imageUrl: 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?w=200&auto=format&fit=crop&q=80'
+    imageUrl: 'https://s4.anilist.co/file/anilistcdn/staff/large/n96874-afKcZQmOlrJL.png'
   }
 ];

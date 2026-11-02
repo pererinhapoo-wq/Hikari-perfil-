@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { 
   Tv, 
   Sparkles, 
@@ -26,6 +26,12 @@ export const FavoritesTab: React.FC<FavoritesTabProps> = ({
   onToggleFavorite: _onToggleFavorite,
   onNavigateToAnimes
 }) => {
+  const [failedImageIds, setFailedImageIds] = useState<Record<string, boolean>>({});
+
+  const markImageFailed = (id: string) => {
+    setFailedImageIds((prev) => (prev[id] ? prev : { ...prev, [id]: true }));
+  };
+
   // Sliced to maximum 10 items strictly as demanded by specification
   const animeFavorites = favorites.slice(0, 10);
   const characterFavorites = characters.slice(0, 10);
@@ -37,10 +43,7 @@ export const FavoritesTab: React.FC<FavoritesTabProps> = ({
       {/* SECTION 1: Favoritos - Anime (Max 10, Compact 3-Column Mobile Grid, Proportional Covers, NO 'Ver todos') */}
       <section className="space-y-3">
         <div className="flex items-center justify-between border-b border-purple-900/30 pb-2.5">
-          <div className="flex items-center gap-2">
-            <Tv className="h-4 w-4 text-purple-400" />
-            <h2 className="text-sm sm:text-base font-bold text-white">Favoritos — Animes</h2>
-          </div>
+          <h2 className="text-sm sm:text-base font-bold text-white">Favoritos — Animes</h2>
         </div>
 
         {animeFavorites.length === 0 ? (
@@ -76,12 +79,22 @@ export const FavoritesTab: React.FC<FavoritesTabProps> = ({
                   title={`Ver ${anime.title} na lista de animes`}
                 >
                   <div className="relative aspect-3/4 w-full overflow-hidden rounded-lg bg-purple-950/40">
-                    <img
-                      src={anime.posterUrl}
-                      alt={anime.title}
-                      referrerPolicy="no-referrer"
-                      className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-                    />
+                    {anime.posterUrl && !failedImageIds[`anime_${anime.id}`] ? (
+                      <img
+                        src={anime.posterUrl}
+                        alt={anime.title}
+                        loading="lazy"
+                        decoding="async"
+                        referrerPolicy="no-referrer"
+                        onError={() => markImageFailed(`anime_${anime.id}`)}
+                        className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                      />
+                    ) : (
+                      <div className="flex h-full w-full flex-col items-center justify-center gap-1.5 p-2 text-purple-400/50 text-center bg-purple-950/40">
+                        <Tv className="h-6 w-6" />
+                        <span className="text-[10px] font-medium text-purple-300/60 line-clamp-2">{anime.title}</span>
+                      </div>
+                    )}
                     {/* Rating badge - clean score without star glyph */}
                     <div className="absolute top-1 left-1 sm:top-1.5 sm:left-1.5 rounded bg-black/75 px-1 sm:px-1.5 py-0.5 text-[9px] sm:text-[10px] font-bold text-amber-300 backdrop-blur-md border border-amber-500/20">
                       {anime.rating}
@@ -115,10 +128,7 @@ export const FavoritesTab: React.FC<FavoritesTabProps> = ({
       {/* SECTION 2: Favoritos - Personagens (Horizontal Scroll, Max 10, NO 'Ver todos') */}
       <section className="space-y-3">
         <div className="flex items-center justify-between border-b border-purple-900/30 pb-2.5">
-          <div className="flex items-center gap-2">
-            <Sparkles className="h-4 w-4 text-purple-400" />
-            <h2 className="text-sm sm:text-base font-bold text-white">Favoritos — Personagens</h2>
-          </div>
+          <h2 className="text-sm sm:text-base font-bold text-white">Favoritos — Personagens</h2>
         </div>
 
         {characterFavorites.length === 0 ? (
@@ -139,12 +149,22 @@ export const FavoritesTab: React.FC<FavoritesTabProps> = ({
                 className="group flex-shrink-0 w-32 sm:w-36 rounded-xl border border-purple-900/40 bg-[#130E24] p-2 transition-all hover:border-purple-500/50 hover:bg-[#18112e]"
               >
                 <div className="relative aspect-4/5 w-full overflow-hidden rounded-lg bg-purple-950/40">
-                  <img
-                    src={char.imageUrl}
-                    alt={char.name}
-                    referrerPolicy="no-referrer"
-                    className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-                  />
+                  {char.imageUrl && !failedImageIds[`char_${char.id}`] ? (
+                    <img
+                      src={char.imageUrl}
+                      alt={char.name}
+                      loading="lazy"
+                      decoding="async"
+                      referrerPolicy="no-referrer"
+                      onError={() => markImageFailed(`char_${char.id}`)}
+                      className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                    />
+                  ) : (
+                    <div className="flex h-full w-full flex-col items-center justify-center gap-1.5 p-2 text-purple-400/50 text-center bg-purple-950/50">
+                      <Sparkles className="h-6 w-6 text-purple-400/60" />
+                      <span className="text-[10px] font-medium text-purple-300/70 truncate max-w-full">{char.name}</span>
+                    </div>
+                  )}
                 </div>
 
                 <div className="mt-2 px-0.5">
@@ -169,10 +189,7 @@ export const FavoritesTab: React.FC<FavoritesTabProps> = ({
       {/* SECTION 3: Favoritos - Empresas & Estúdios (Horizontal Scroll, Max 10, NO 'Ver todos') */}
       <section className="space-y-3">
         <div className="flex items-center justify-between border-b border-purple-900/30 pb-2.5">
-          <div className="flex items-center gap-2">
-            <Building2 className="h-4 w-4 text-purple-400" />
-            <h2 className="text-sm sm:text-base font-bold text-white">Favoritos — Empresas & Estúdios</h2>
-          </div>
+          <h2 className="text-sm sm:text-base font-bold text-white">Favoritos — Empresas & Estúdios</h2>
         </div>
 
         {companyFavorites.length === 0 ? (
@@ -193,12 +210,21 @@ export const FavoritesTab: React.FC<FavoritesTabProps> = ({
                 className="group flex-shrink-0 w-48 sm:w-56 rounded-xl border border-purple-900/40 bg-[#130E24] p-3 transition-all hover:border-purple-500/50 hover:bg-[#18112e]"
               >
                 <div className="flex items-center gap-3">
-                  <img
-                    src={company.logoUrl}
-                    alt={company.name}
-                    referrerPolicy="no-referrer"
-                    className="h-12 w-12 rounded-lg object-cover border border-purple-900/40 shrink-0"
-                  />
+                  {company.logoUrl && !failedImageIds[`comp_${company.id}`] ? (
+                    <img
+                      src={company.logoUrl}
+                      alt={company.name}
+                      loading="lazy"
+                      decoding="async"
+                      referrerPolicy="no-referrer"
+                      onError={() => markImageFailed(`comp_${company.id}`)}
+                      className="h-12 w-12 rounded-lg object-contain bg-[#17102e] p-1 border border-purple-900/40 shrink-0"
+                    />
+                  ) : (
+                    <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-gradient-to-br from-purple-800 to-indigo-900 text-sm font-bold text-white border border-purple-900/40 shrink-0 select-none">
+                      <Building2 className="h-5 w-5 text-purple-200" />
+                    </div>
+                  )}
                   <div className="min-w-0 flex-1">
                     <h4 className="text-xs sm:text-sm font-bold text-white truncate group-hover:text-purple-300 transition-colors">
                       {company.name}
@@ -250,12 +276,20 @@ export const FavoritesTab: React.FC<FavoritesTabProps> = ({
                 className="group flex-shrink-0 w-36 sm:w-40 rounded-xl border border-purple-900/40 bg-[#130E24] p-2.5 transition-all hover:border-purple-500/50 hover:bg-[#18112e]"
               >
                 <div className="relative aspect-square w-full overflow-hidden rounded-lg bg-purple-950/40">
-                  <img
-                    src={person.imageUrl}
-                    alt={person.name}
-                    referrerPolicy="no-referrer"
-                    className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-                  />
+                  {person.imageUrl && !failedImageIds[`person_${person.id}`] ? (
+                    <img
+                      src={person.imageUrl}
+                      alt={person.name}
+                      referrerPolicy="no-referrer"
+                      onError={() => markImageFailed(`person_${person.id}`)}
+                      className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                    />
+                  ) : (
+                    <div className="flex h-full w-full flex-col items-center justify-center gap-1.5 p-2 text-purple-400/50 text-center bg-purple-950/50">
+                      <Users className="h-6 w-6 text-purple-400/60" />
+                      <span className="text-[10px] font-medium text-purple-300/70 truncate max-w-full">{person.name}</span>
+                    </div>
+                  )}
                 </div>
 
                 <div className="mt-2 px-0.5">

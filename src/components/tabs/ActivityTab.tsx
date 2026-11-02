@@ -93,8 +93,8 @@ export const ActivityTab: React.FC<ActivityTabProps> = ({
                           {activity.title}
                         </span>
                         {isHighlighted && (
-                          <span className="inline-flex items-center gap-1 rounded-md bg-purple-900/80 px-2 py-0.5 text-[10px] font-semibold text-purple-200 border border-purple-500/40">
-                            ✦ Atividade da Notificação
+                          <span className="inline-flex items-center rounded-md bg-purple-900/80 px-2 py-0.5 text-[10px] font-semibold text-purple-200 border border-purple-500/40">
+                            Atividade da Notificação
                           </span>
                         )}
                       </div>
