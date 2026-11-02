@@ -1,5 +1,10 @@
 import { AnimeItem } from '../types';
-import { normalizeTitle } from './anilistService';
+import {
+  normalizeTitle,
+  ExistingAnimeIndex,
+  createExistingAnimeIndex,
+  findMatchingAnimeInIndex,
+} from './anilistService';
 
 export interface MALAnimeEntry {
   malId: number;
@@ -48,6 +53,24 @@ export const MAL_STATUS_LABELS_PT: Record<AnimeItem['status'], string> = {
   on_hold: 'Em espera',
   dropped: 'Abandonado',
 };
+
+/**
+ * Converte e normaliza com precisão notas do MyAnimeList para a escala decimal do Hikari (0 a 10, com 1 casa decimal).
+ * - Retorna 0 para representar ausência de nota (sem avaliação).
+ * - Converte proporcionalmente caso venha na escala de 0 a 100.
+ * - Preserva valores inteiros (1 a 10) do MAL oficial e decimais caso fornecidos, evitando dízimas do IEEE 754.
+ */
+export function normalizeMALScore(score?: number | null): number {
+  if (typeof score !== 'number' || !Number.isFinite(score) || score <= 0) {
+    return 0;
+  }
+  let val = score;
+  if (val > 10 && val <= 100) {
+    val = val / 10;
+  }
+  const rounded = Math.round(val * 10) / 10;
+  return Math.min(10, Math.max(0, rounded));
+}
 
 /**
  * Mapeia os status oficiais da API v2 do MyAnimeList para os status internos do Hikari.
@@ -204,8 +227,13 @@ export async function disconnectMALServer(idToken: string): Promise<void> {
  */
 export function findMatchingExistingAnimeForMAL(
   incoming: MALAnimeEntry,
-  existingList: AnimeItem[]
+  existingList: AnimeItem[],
+  existingIndex?: ExistingAnimeIndex
 ): AnimeItem | undefined {
+  if (existingIndex) {
+    return findMatchingAnimeInIndex(incoming, existingIndex, 'mal_first');
+  }
+
   // 1. Coincidência direta por malId
   if (incoming.malId) {
     const byMalId = existingList.find((e) => e.malId === incoming.malId);
@@ -239,6 +267,7 @@ export function findMatchingExistingAnimeForMAL(
 
 /**
  * Calcula a prévia detalhada comparativa antes de efetuar qualquer gravação no perfil.
+ * Utiliza índice Map em O(N + M) para evitar congelamento da interface em listas extensas.
  */
 export function calculateMALImportPreview(
   incomingEntries: MALAnimeEntry[],
@@ -251,9 +280,10 @@ export function calculateMALImportPreview(
   const itemsIdentical: MALMatchedItem[] = [];
 
   const matchedExistingIds = new Set<string>();
+  const existingIndex = createExistingAnimeIndex(currentList);
 
   for (const incoming of incomingEntries) {
-    const matched = findMatchingExistingAnimeForMAL(incoming, currentList);
+    const matched = findMatchingAnimeInIndex(incoming, existingIndex, 'mal_first');
 
     if (!matched) {
       newItems.push(incoming);
@@ -324,6 +354,7 @@ export function calculateMALImportPreview(
  * - Não cria duplicatas.
  * - Preserva campos locais (isFavorite, posters personalizados existentes, IDs locais, animes manuais, anilistId).
  * - Atualiza status e progresso de correspondências apenas se solicitado (updateExistingProgress).
+ * - Utiliza índice Map para desempenho O(N + M).
  */
 export function mergeMALImport(
   incomingEntries: MALAnimeEntry[],
@@ -339,14 +370,17 @@ export function mergeMALImport(
     resultMap.set(item.id, { ...item });
   }
 
+  const existingIndex = createExistingAnimeIndex(currentList);
+  let nextIndex = currentList.length;
+
   let addedCount = 0;
   let updatedCount = 0;
 
   for (const incoming of incomingEntries) {
-    const existing = findMatchingExistingAnimeForMAL(incoming, Array.from(resultMap.values()));
+    const matched = findMatchingAnimeInIndex(incoming, existingIndex, 'mal_first');
 
-    if (existing) {
-      const currentEntry = resultMap.get(existing.id) || existing;
+    if (matched) {
+      const currentEntry = resultMap.get(matched.id) || matched;
 
       let changed = false;
       const updatedItem: AnimeItem = {
@@ -385,7 +419,15 @@ export function mergeMALImport(
         updatedCount++;
       }
 
-      resultMap.set(existing.id, updatedItem);
+      resultMap.set(matched.id, updatedItem);
+
+      // Atualiza o índice para refletir novos identificadores vinculados
+      if (incoming.malId && !existingIndex.byMalId.has(incoming.malId)) {
+        existingIndex.byMalId.set(incoming.malId, updatedItem);
+      }
+      if (updatedItem.anilistId && !existingIndex.byAnilistId.has(updatedItem.anilistId)) {
+        existingIndex.byAnilistId.set(updatedItem.anilistId, updatedItem);
+      }
     } else {
       const generatedId = `ani_mal_${incoming.malId}_${Date.now()}_${Math.random()
         .toString(36)
@@ -411,6 +453,24 @@ export function mergeMALImport(
 
       resultMap.set(generatedId, newItem);
       addedCount++;
+
+      // Registra no índice para evitar duplicatas no mesmo lote
+      if (newItem.malId && !existingIndex.byMalId.has(newItem.malId)) {
+        existingIndex.byMalId.set(newItem.malId, newItem);
+      }
+      if (newItem.anilistId && !existingIndex.byAnilistId.has(newItem.anilistId)) {
+        existingIndex.byAnilistId.set(newItem.anilistId, newItem);
+      }
+      const normTitle = normalizeTitle(newItem.title);
+      if (normTitle && !existingIndex.byNormalizedTitle.has(normTitle)) {
+        existingIndex.byNormalizedTitle.set(normTitle, { item: newItem, index: nextIndex++ });
+      }
+      if (newItem.titleRomaji) {
+        const normRomaji = normalizeTitle(newItem.titleRomaji);
+        if (normRomaji && !existingIndex.byNormalizedTitle.has(normRomaji)) {
+          existingIndex.byNormalizedTitle.set(normRomaji, { item: newItem, index: nextIndex++ });
+        }
+      }
     }
   }
 

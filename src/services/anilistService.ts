@@ -229,6 +229,24 @@ export async function fetchAniListUser(username: string): Promise<AniListUser> {
 }
 
 /**
+ * Converte e normaliza com precisão notas do AniList para a escala decimal do Hikari (0 a 10, com 1 casa decimal).
+ * - Retorna 0 para representar ausência de nota (sem avaliação).
+ * - Converte proporcionalmente caso venha na escala de 0 a 100 (ex: 85 -> 8.5).
+ * - Preserva até 1 casa decimal exata evitando resíduos de ponto flutuante do IEEE 754.
+ */
+export function normalizeAniListScore(score?: number | null): number {
+  if (typeof score !== 'number' || !Number.isFinite(score) || score <= 0) {
+    return 0;
+  }
+  let val = score;
+  if (val > 10 && val <= 100) {
+    val = val / 10;
+  }
+  const rounded = Math.round(val * 10) / 10;
+  return Math.min(10, Math.max(0, rounded));
+}
+
+/**
  * Consulta a lista completa de animes do usuário no AniList com suporte a paginação por chunks.
  */
 export async function fetchAniListAnimeList(username: string): Promise<AniListAnimeEntry[]> {
@@ -373,11 +391,8 @@ export async function fetchAniListAnimeList(username: string): Promise<AniListAn
     const totalEpisodes =
       typeof media.episodes === 'number' && media.episodes > 0 ? media.episodes : 0;
 
-    // Normalização de nota: AniList format: POINT_10_DECIMAL retorna 0 a 10. Se for 0 ou null, é sem nota.
-    let rating = 0;
-    if (typeof entry.score === 'number' && Number.isFinite(entry.score) && entry.score > 0) {
-      rating = Math.min(10, Math.max(0, Math.round(entry.score * 10) / 10));
-    }
+    // Normalização de nota: AniList POINT_10_DECIMAL retorna 0 a 10 (0 = sem nota)
+    const rating = normalizeAniListScore(entry.score);
 
     const year =
       media.startDate?.year ||
@@ -417,6 +432,90 @@ export async function fetchAniListAnimeList(username: string): Promise<AniListAn
 }
 
 /**
+ * Estrutura de índice em Map para buscas O(1) de animes existentes por identificadores externos e títulos normalizados.
+ */
+export interface ExistingAnimeIndex {
+  byAnilistId: Map<number, AnimeItem>;
+  byMalId: Map<number, AnimeItem>;
+  byNormalizedTitle: Map<string, { item: AnimeItem; index: number }>;
+}
+
+/**
+ * Constrói índices em Map em O(M) para evitar buscas lineares repetidas O(N x M).
+ * Preserva o primeiro elemento encontrado na lista original para manter consistência com Array.find.
+ */
+export function createExistingAnimeIndex(list: AnimeItem[]): ExistingAnimeIndex {
+  const byAnilistId = new Map<number, AnimeItem>();
+  const byMalId = new Map<number, AnimeItem>();
+  const byNormalizedTitle = new Map<string, { item: AnimeItem; index: number }>();
+
+  for (let i = 0; i < list.length; i++) {
+    const item = list[i];
+    if (item.anilistId && !byAnilistId.has(item.anilistId)) {
+      byAnilistId.set(item.anilistId, item);
+    }
+    if (item.malId && !byMalId.has(item.malId)) {
+      byMalId.set(item.malId, item);
+    }
+    const normTitle = normalizeTitle(item.title);
+    if (normTitle && !byNormalizedTitle.has(normTitle)) {
+      byNormalizedTitle.set(normTitle, { item, index: i });
+    }
+    if (item.titleRomaji) {
+      const normRomaji = normalizeTitle(item.titleRomaji);
+      if (normRomaji && !byNormalizedTitle.has(normRomaji)) {
+        byNormalizedTitle.set(normRomaji, { item, index: i });
+      }
+    }
+  }
+
+  return { byAnilistId, byMalId, byNormalizedTitle };
+}
+
+/**
+ * Localiza no índice em Map a correspondência exata para uma entrada externa em O(1),
+ * respeitando a ordem de prioridade definida e evitando ambiguidades de títulos.
+ */
+export function findMatchingAnimeInIndex(
+  incoming: { anilistId?: number; malId?: number; title: string; titleRomaji?: string },
+  index: ExistingAnimeIndex,
+  priority: 'anilist_first' | 'mal_first' = 'anilist_first'
+): AnimeItem | undefined {
+  if (priority === 'anilist_first') {
+    if (incoming.anilistId) {
+      const match = index.byAnilistId.get(incoming.anilistId);
+      if (match) return match;
+    }
+    if (incoming.malId) {
+      const match = index.byMalId.get(incoming.malId);
+      if (match) return match;
+    }
+  } else {
+    if (incoming.malId) {
+      const match = index.byMalId.get(incoming.malId);
+      if (match) return match;
+    }
+    if (incoming.anilistId) {
+      const match = index.byAnilistId.get(incoming.anilistId);
+      if (match) return match;
+    }
+  }
+
+  const incTitleNorm = normalizeTitle(incoming.title);
+  const incRomajiNorm = incoming.titleRomaji ? normalizeTitle(incoming.titleRomaji) : '';
+
+  if (!incTitleNorm && !incRomajiNorm) return undefined;
+
+  const matchTitle = incTitleNorm ? index.byNormalizedTitle.get(incTitleNorm) : undefined;
+  const matchRomaji = incRomajiNorm ? index.byNormalizedTitle.get(incRomajiNorm) : undefined;
+
+  if (matchTitle && matchRomaji) {
+    return matchTitle.index <= matchRomaji.index ? matchTitle.item : matchRomaji.item;
+  }
+  return (matchTitle || matchRomaji)?.item;
+}
+
+/**
  * Localiza no array atual de animes do Hikari a correspondência exata para uma entrada vinda do AniList.
  * 1. Primeiro por identificador anilistId.
  * 2. Segundo por identificador malId (quando disponível).
@@ -424,8 +523,13 @@ export async function fetchAniListAnimeList(username: string): Promise<AniListAn
  */
 export function findMatchingExistingAnime(
   incoming: AniListAnimeEntry,
-  existingList: AnimeItem[]
+  existingList: AnimeItem[],
+  existingIndex?: ExistingAnimeIndex
 ): AnimeItem | undefined {
+  if (existingIndex) {
+    return findMatchingAnimeInIndex(incoming, existingIndex, 'anilist_first');
+  }
+
   // 1. Coincidência direta por anilistId
   if (incoming.anilistId) {
     const byAniId = existingList.find((e) => e.anilistId === incoming.anilistId);
@@ -459,6 +563,7 @@ export function findMatchingExistingAnime(
 
 /**
  * Calcula a prévia detalhada comparativa antes de efetuar qualquer gravação no perfil.
+ * Utiliza índice Map em O(N + M) para evitar congelamento da interface em listas extensas.
  */
 export function calculateAniListImportPreview(
   incomingEntries: AniListAnimeEntry[],
@@ -471,9 +576,10 @@ export function calculateAniListImportPreview(
   const itemsIdentical: AniListMatchedItem[] = [];
 
   const matchedExistingIds = new Set<string>();
+  const existingIndex = createExistingAnimeIndex(currentList);
 
   for (const incoming of incomingEntries) {
-    const matched = findMatchingExistingAnime(incoming, currentList);
+    const matched = findMatchingAnimeInIndex(incoming, existingIndex, 'anilist_first');
 
     if (!matched) {
       newItems.push(incoming);
@@ -499,12 +605,15 @@ export function calculateAniListImportPreview(
         });
       }
 
-      if (incoming.rating > 0 && matched.rating !== incoming.rating) {
+      const incomingRating = normalizeAniListScore(incoming.rating);
+      const existingRating = normalizeAniListScore(matched.rating);
+
+      if (existingRating !== incomingRating) {
         changes.push({
           field: 'rating',
           label: 'Nota',
-          oldVal: matched.rating > 0 ? `${matched.rating}/10` : 'Sem nota',
-          newVal: `${incoming.rating}/10`,
+          oldVal: existingRating > 0 ? `${existingRating}/10` : 'Sem nota',
+          newVal: incomingRating > 0 ? `${incomingRating}/10` : 'Sem nota',
         });
       }
 
@@ -544,6 +653,7 @@ export function calculateAniListImportPreview(
  * - Não cria duplicatas.
  * - Preserva campos locais (isFavorite, posters personalizados existentes, IDs locais, animes manuais).
  * - Atualiza status e progresso de correspondências apenas se solicitado (updateExistingProgress).
+ * - Utiliza índice Map para desempenho O(N + M).
  */
 export function mergeAniListImport(
   incomingEntries: AniListAnimeEntry[],
@@ -560,15 +670,18 @@ export function mergeAniListImport(
     resultMap.set(item.id, { ...item });
   }
 
+  const existingIndex = createExistingAnimeIndex(currentList);
+  let nextIndex = currentList.length;
+
   let addedCount = 0;
   let updatedCount = 0;
 
   for (const incoming of incomingEntries) {
-    const existing = findMatchingExistingAnime(incoming, Array.from(resultMap.values()));
+    const matched = findMatchingAnimeInIndex(incoming, existingIndex, 'anilist_first');
 
-    if (existing) {
+    if (matched) {
       // Anime já existe: vincula o anilistId para rastreamento futuro
-      const currentEntry = resultMap.get(existing.id) || existing;
+      const currentEntry = resultMap.get(matched.id) || matched;
 
       let changed = false;
       const updatedItem: AnimeItem = {
@@ -590,8 +703,10 @@ export function mergeAniListImport(
           updatedItem.totalEpisodes = incoming.totalEpisodes;
           changed = true;
         }
-        if (incoming.rating > 0 && currentEntry.rating !== incoming.rating) {
-          updatedItem.rating = incoming.rating;
+        const incomingRating = normalizeAniListScore(incoming.rating);
+        const existingRating = normalizeAniListScore(currentEntry.rating);
+        if (existingRating !== incomingRating) {
+          updatedItem.rating = incomingRating;
           changed = true;
         }
         if (incoming.rewatchCount && currentEntry.rewatchCount !== incoming.rewatchCount) {
@@ -607,7 +722,15 @@ export function mergeAniListImport(
         updatedCount++;
       }
 
-      resultMap.set(existing.id, updatedItem);
+      resultMap.set(matched.id, updatedItem);
+
+      // Atualiza o índice para refletir novos identificadores vinculados
+      if (incoming.anilistId && !existingIndex.byAnilistId.has(incoming.anilistId)) {
+        existingIndex.byAnilistId.set(incoming.anilistId, updatedItem);
+      }
+      if (updatedItem.malId && !existingIndex.byMalId.has(updatedItem.malId)) {
+        existingIndex.byMalId.set(updatedItem.malId, updatedItem);
+      }
     } else {
       // Novo anime a ser adicionado
       const generatedId = `ani_al_${incoming.anilistId}_${Date.now()}_${Math.random()
@@ -622,7 +745,7 @@ export function mergeAniListImport(
         status: incoming.status,
         currentEpisode: incoming.currentEpisode,
         totalEpisodes: incoming.totalEpisodes,
-        rating: incoming.rating,
+        rating: normalizeAniListScore(incoming.rating),
         isFavorite: false, // Preserva favoritos manuais; novos iniciam false
         year: incoming.year,
         genres: incoming.genres,
@@ -634,6 +757,24 @@ export function mergeAniListImport(
 
       resultMap.set(generatedId, newItem);
       addedCount++;
+
+      // Registra no índice para evitar duplicatas em múltiplos itens recebidos no mesmo lote
+      if (newItem.anilistId && !existingIndex.byAnilistId.has(newItem.anilistId)) {
+        existingIndex.byAnilistId.set(newItem.anilistId, newItem);
+      }
+      if (newItem.malId && !existingIndex.byMalId.has(newItem.malId)) {
+        existingIndex.byMalId.set(newItem.malId, newItem);
+      }
+      const normTitle = normalizeTitle(newItem.title);
+      if (normTitle && !existingIndex.byNormalizedTitle.has(normTitle)) {
+        existingIndex.byNormalizedTitle.set(normTitle, { item: newItem, index: nextIndex++ });
+      }
+      if (newItem.titleRomaji) {
+        const normRomaji = normalizeTitle(newItem.titleRomaji);
+        if (normRomaji && !existingIndex.byNormalizedTitle.has(normRomaji)) {
+          existingIndex.byNormalizedTitle.set(normRomaji, { item: newItem, index: nextIndex++ });
+        }
+      }
     }
   }
 
