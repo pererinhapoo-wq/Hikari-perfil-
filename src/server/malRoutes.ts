@@ -561,8 +561,38 @@ malRouter.get(['/callback', '/callback/'], async (req, res) => {
       body: tokenBody.toString(),
     });
 
-    const tokenData = await tokenRes.json();
+    let tokenData: any = {};
+    const rawContentType = tokenRes.headers.get('content-type') || '';
+    if (rawContentType.includes('application/json')) {
+      try {
+        tokenData = await tokenRes.json();
+      } catch {
+        tokenData = {};
+      }
+    } else {
+      try {
+        await tokenRes.text();
+      } catch {
+        // ignore
+      }
+    }
+
     if (!tokenRes.ok || !tokenData.access_token) {
+      const safeErrorCode = typeof tokenData.error === 'string' ? tokenData.error : undefined;
+      const safeErrorMessage =
+        typeof tokenData.message === 'string'
+          ? tokenData.message
+          : typeof tokenData.hint === 'string'
+          ? tokenData.hint
+          : undefined;
+
+      console.error('[MAL OAuth Token Exchange Error]', {
+        status: tokenRes.status,
+        statusText: tokenRes.statusText,
+        error: safeErrorCode || (rawContentType.includes('application/json') ? 'UNKNOWN_JSON_ERROR' : 'NON_JSON_RESPONSE'),
+        message: safeErrorMessage,
+      });
+
       return renderPopupResult({
         success: false,
         message: 'Falha ao autenticar com o MyAnimeList. Verifique a autorização e tente novamente.',
