@@ -13,6 +13,7 @@ import {
   MessageSquare
 } from 'lucide-react';
 import { UserProfile } from '../types';
+import { ElizabethAdminBadge } from './admin/ElizabethAdminBadge';
 
 interface ProfileHeaderProps {
   profile: UserProfile;
@@ -212,11 +213,14 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
 
             {/* Display Name, Username & Privacy Status */}
             <div className="space-y-1">
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2.5">
                 <h1 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">
                   {profile.displayName}
                 </h1>
                 
+                {/* Selo Administrativo Exclusivo inspirado na Elizabeth (Gintama) — renderizado estritamente para o UID proprietário */}
+                <ElizabethAdminBadge profileOrUid={profile} />
+
                 {/* Privacy Badge (exibido apenas quando o perfil for privado) */}
                 {profile.isPrivate && (
                   <span className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium border border-amber-700/40 bg-amber-950/40 text-amber-300">

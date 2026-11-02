@@ -13,6 +13,7 @@ import { PrivateProfileNotice } from './components/PrivateProfileNotice';
 import { FollowersModal } from './components/modals/FollowersModal';
 import { SettingsModal } from './components/modals/SettingsModal';
 import { PrivateChatModal } from './components/chat/PrivateChatModal';
+import { ElizabethCorner } from './components/admin/ElizabethCorner';
 import { AuthScreen } from './components/auth/AuthScreen';
 import {
   syncUserPrivacyContext,
@@ -30,12 +31,14 @@ import {
   UserActivity, 
   FollowUser, 
   FollowRequest, 
-  NotificationItem 
+  NotificationItem,
+  AUTHORIZED_ADMIN_UID,
 } from './types';
 import { 
   CURRENT_USER, 
   OTHER_USERS, 
   INITIAL_ANIMES, 
+  ELIZABETH_ANIMES,
   FAVORITE_CHARACTERS,
   FAVORITE_COMPANIES,
   FAVORITE_PEOPLE,
@@ -748,7 +751,7 @@ export default function App() {
       : authOtherProfilesMap[activeProfileId] || currentUser
     : isOwnProfile
     ? demoProfile
-    : demoOtherProfiles[activeProfileId] || demoProfile;
+    : demoOtherProfiles[activeProfileId] || OTHER_USERS[activeProfileId] || demoProfile;
 
   const isFollowingActive = followingIds.has(activeProfile.id);
   const isRequestedActive = requestedIds.has(activeProfile.id);
@@ -767,6 +770,9 @@ export default function App() {
     if (isOwnProfile) {
       return computeAnimeStats(animes);
     }
+    if (activeProfile.id === AUTHORIZED_ADMIN_UID) {
+      return computeAnimeStats(ELIZABETH_ANIMES);
+    }
     if (isAuthenticated) {
       return authPublicProfilesMap[activeProfile.id]?.animeStats ?? EMPTY_ANIME_STATS;
     }
@@ -780,6 +786,9 @@ export default function App() {
     }
     if (isOwnProfile) {
       return animes;
+    }
+    if (activeProfile.id === AUTHORIZED_ADMIN_UID) {
+      return ELIZABETH_ANIMES;
     }
     if (isAuthenticated) {
       return authPublicProfilesMap[activeProfile.id]?.publicAnimes ?? [];
@@ -2268,6 +2277,9 @@ export default function App() {
           onRemoveAvatar={handleRemoveAvatar}
           onRemoveBanner={handleRemoveBanner}
         />
+
+        {/* Elizabeth's Corner — Exclusivo do perfil público da Elizabeth (Gintama) */}
+        <ElizabethCorner profileUid={activeProfile.id} />
 
         {/* Navigation Tabs Bar */}
         <TabsNavigation

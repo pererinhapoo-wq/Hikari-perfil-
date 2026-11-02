@@ -8,7 +8,8 @@ import {
   NotificationItem,
   FavoriteCharacter,
   FavoriteCompany,
-  FavoritePerson
+  FavoritePerson,
+  AUTHORIZED_ADMIN_UID
 } from '../types';
 
 export const CURRENT_USER: UserProfile = {
@@ -38,7 +39,36 @@ export const CURRENT_USER: UserProfile = {
   }
 };
 
+export const ELIZABETH_ADMIN_PROFILE: UserProfile = {
+  id: AUTHORIZED_ADMIN_UID,
+  username: 'elizabeth_admin',
+  displayName: 'Elizabeth',
+  avatarUrl: '/src/assets/images/elizabeth_admin_avatar_1793603523814.jpg',
+  bannerUrl: '/src/assets/images/elizabeth_admin_banner_1793603538370.jpg',
+  bio: 'Administradora oficial do Hikari Perfil. Não falo, só me comunico por placas. Pare de adicionar 50 animes na lista de "Planejados" antes de terminar os que começou em 2018.',
+  createdAt: '01 de janeiro de 2023',
+  createdAtTimestamp: 1672531200000,
+  followersCount: 4280,
+  followingCount: 1,
+  isPrivate: false,
+  showCommentsOnProfile: true,
+  privacySettings: {
+    showAnimeList: true,
+    showFavorites: true,
+    showActivity: true,
+    showCommentsOnProfile: true,
+    allowDirectMessages: true,
+    directMessagesFrom: 'everyone',
+    showOnlineStatus: true,
+  },
+  externalAccounts: {
+    anilist: { connected: true, username: 'ElizabethAdmin' },
+    mal: { connected: false },
+  },
+};
+
 export const OTHER_USERS: Record<string, UserProfile> = {
+  [AUTHORIZED_ADMIN_UID]: ELIZABETH_ADMIN_PROFILE,
   'usr_kuroha': {
     id: 'usr_kuroha',
     username: 'kuroha_void',
@@ -144,6 +174,74 @@ export const OTHER_USERS: Record<string, UserProfile> = {
     }
   }
 };
+
+export const ELIZABETH_ANIMES: AnimeItem[] = [
+  {
+    id: 'anime_gintama_final',
+    title: 'Gintama: THE FINAL',
+    titleRomaji: 'Gintama: THE FINAL',
+    posterUrl: 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx110686-2E1Hw6Wp4sXl.jpg',
+    status: 'completed',
+    currentEpisode: 1,
+    totalEpisodes: 1,
+    rating: 10,
+    isFavorite: true,
+    year: 2021,
+    genres: ['Ação', 'Comédia', 'Paródia', 'Sci-Fi'],
+  },
+  {
+    id: 'anime_gintama_s1',
+    title: 'Gintama',
+    titleRomaji: 'Gintama',
+    posterUrl: 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx918-zM01T7G1B4sC.jpg',
+    status: 'completed',
+    currentEpisode: 201,
+    totalEpisodes: 201,
+    rating: 9.9,
+    isFavorite: true,
+    year: 2006,
+    genres: ['Ação', 'Comédia', 'Paródia', 'Samurai'],
+  },
+  {
+    id: 'anime_samurai_champloo',
+    title: 'Samurai Champloo',
+    titleRomaji: 'Samurai Champloo',
+    posterUrl: 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx205-i39k4k4N4b.jpg',
+    status: 'completed',
+    currentEpisode: 26,
+    totalEpisodes: 26,
+    rating: 9.7,
+    isFavorite: true,
+    year: 2004,
+    genres: ['Ação', 'Aventura', 'Comédia'],
+  },
+  {
+    id: 'anime_nichijou',
+    title: 'Nichijou - My Ordinary Life',
+    titleRomaji: 'Nichijou',
+    posterUrl: 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx10165-dMwG3s4b8.jpg',
+    status: 'completed',
+    currentEpisode: 26,
+    totalEpisodes: 26,
+    rating: 9.5,
+    isFavorite: true,
+    year: 2011,
+    genres: ['Comédia', 'Slice of Life'],
+  },
+  {
+    id: 'anime_daily_lives',
+    title: 'Daily Lives of High School Boys',
+    titleRomaji: 'Danshi Koukousei no Nichijou',
+    posterUrl: 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx11843-c0dIe4u2f.jpg',
+    status: 'completed',
+    currentEpisode: 12,
+    totalEpisodes: 12,
+    rating: 9.4,
+    isFavorite: true,
+    year: 2012,
+    genres: ['Comédia', 'Slice of Life'],
+  },
+];
 
 export const INITIAL_ANIMES: AnimeItem[] = [
   {
@@ -602,6 +700,18 @@ export const INITIAL_FOLLOWERS: FollowUser[] = [
 ];
 
 export const INITIAL_FOLLOWING: FollowUser[] = [
+  {
+    id: AUTHORIZED_ADMIN_UID,
+    username: 'elizabeth_admin',
+    displayName: 'Elizabeth',
+    avatarUrl: '/src/assets/images/elizabeth_admin_avatar_1793603523814.jpg',
+    bio: 'Administradora oficial do Hikari Perfil. Não falo, só me comunico por placas.',
+    isFollowing: true,
+    isRequested: false,
+    isFollower: false,
+    isBlocked: false,
+    createdAt: '01 de janeiro de 2023',
+  },
   {
     id: 'usr_kuroha',
     username: 'kuroha_void',

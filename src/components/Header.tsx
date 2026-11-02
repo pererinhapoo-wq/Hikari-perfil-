@@ -20,7 +20,7 @@ import {
   MessageSquare,
   Camera
 } from 'lucide-react';
-import { UserProfile, NotificationItem, AnimeItem } from '../types';
+import { UserProfile, NotificationItem, AnimeItem, AUTHORIZED_ADMIN_UID } from '../types';
 
 interface HeaderProps {
   currentUser: UserProfile;
@@ -184,6 +184,13 @@ export const Header: React.FC<HeaderProps> = ({
               name: currentUser.displayName,
               sub: `@${currentUser.username} (Perfil de Demonstração)`,
               avatar: currentUser.avatarUrl,
+            },
+            {
+              type: 'user' as const,
+              id: AUTHORIZED_ADMIN_UID,
+              name: 'Elizabeth',
+              sub: '@elizabeth_admin (Hikari Admin)',
+              avatar: '/src/assets/images/elizabeth_admin_avatar_1793603523814.jpg',
             },
             {
               type: 'user' as const,

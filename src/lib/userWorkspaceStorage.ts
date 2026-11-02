@@ -21,6 +21,7 @@ import type {
   FollowUser,
   FollowRequest,
 } from '../types';
+import { AUTHORIZED_ADMIN_UID } from '../types';
 import {
   computeAnimeStats,
   EMPTY_ANIME_STATS,
@@ -140,14 +141,26 @@ export function buildProfileFromFirebaseUser(
     year: 'numeric',
   });
 
+  const isAdmin = firebaseUser.uid === AUTHORIZED_ADMIN_UID;
+  const defaultAdminDisplayName = 'Elizabeth';
+  const defaultAdminUsername = 'elizabeth_admin';
+  const defaultAdminAvatar = '/src/assets/images/elizabeth_admin_avatar_1793603523814.jpg';
+  const defaultAdminBanner = '/src/assets/images/elizabeth_admin_banner_1793603538370.jpg';
+  const defaultAdminBio =
+    'Administradora oficial do Hikari Perfil. Não falo, só me comunico por placas. Pare de adicionar 50 animes na lista de "Planejados" antes de terminar os que começou em 2018.';
+
   const resolvedUsername =
     typeof overrides.username === 'string' && overrides.username.trim().length > 0
       ? overrides.username.trim()
+      : isAdmin
+      ? defaultAdminUsername
       : fallbackUsername;
 
   const resolvedDisplayName =
     typeof overrides.displayName === 'string' && overrides.displayName.trim().length > 0
       ? overrides.displayName.trim()
+      : isAdmin
+      ? defaultAdminDisplayName
       : firebaseUser.displayName?.trim() || emailPrefix || 'Usuário Hikari';
 
   return {
@@ -155,9 +168,23 @@ export function buildProfileFromFirebaseUser(
     username: resolvedUsername,
     displayName: resolvedDisplayName,
     avatarUrl:
-      overrides.avatarUrl !== undefined ? overrides.avatarUrl : firebaseUser.photoURL || '',
-    bannerUrl: overrides.bannerUrl !== undefined ? overrides.bannerUrl : '',
-    bio: overrides.bio !== undefined ? overrides.bio : '',
+      overrides.avatarUrl !== undefined
+        ? overrides.avatarUrl
+        : isAdmin
+        ? defaultAdminAvatar
+        : firebaseUser.photoURL || '',
+    bannerUrl:
+      overrides.bannerUrl !== undefined
+        ? overrides.bannerUrl
+        : isAdmin
+        ? defaultAdminBanner
+        : '',
+    bio:
+      overrides.bio !== undefined
+        ? overrides.bio
+        : isAdmin
+        ? defaultAdminBio
+        : '',
     createdAt: formattedCreatedAt,
     createdAtTimestamp: validCreationMs,
     followersCount:
