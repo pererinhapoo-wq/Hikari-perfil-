@@ -387,7 +387,55 @@ service cloud.firestore {
         allow create, delete: if false;
       }
 
-      // 7. Espaço pessoal isolado por UID (/users/{userId}/workspace/personal — leitura e escrita exclusivas do próprio dono)
+      // 7. Subcoleção de metadados e manifesto do armazenamento em blocos escaláveis (Etapa 3)
+      match /anime_storage/{docId} {
+        allow get: if isValidId(userId) && docId == 'manifest' && isOwner(userId);
+        allow list: if false;
+        allow create, update: if isOwner(userId)
+          && isValidId(userId)
+          && docId == 'manifest'
+          && incoming().ownerUid == userId
+          && incoming().version is int
+          && incoming().storageEngine == 'chunked_v1'
+          && incoming().totalAnimes is int
+          && incoming().totalAnimes >= 0
+          && incoming().chunkIds is list
+          && incoming().chunkIds.size() <= 500
+          && incoming().chunkCounts is map
+          && incoming().statusCounts is map
+          && incoming().migratedFromLegacy is bool
+          && incoming().updatedAtMs is int
+          && incoming().updatedAtMs >= 0;
+        allow delete: if false;
+      }
+
+      // 8. Subcoleção de blocos particionados de animes (~300 animes por doc, limite estrito de 450 para garantir < 200 KiB)
+      match /anime_chunks/{chunkId} {
+        allow get: if isValidId(userId) && isValidId(chunkId) && (
+          isOwner(userId) || (
+            isSignedIn()
+            && get(/databases/$(database)/documents/users/$(userId)).data.isPrivate == false
+            && get(/databases/$(database)/documents/users/$(userId)).data.privacySettings.showAnimeList == true
+          )
+        );
+        allow list: if isOwner(userId);
+        allow create, update: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(chunkId)
+          && incoming().ownerUid == userId
+          && incoming().chunkId == chunkId
+          && incoming().chunkIndex is int
+          && incoming().chunkIndex >= 0
+          && incoming().animes is list
+          && incoming().animes.size() <= 450
+          && incoming().count is int
+          && incoming().count >= 0
+          && incoming().updatedAtMs is int
+          && incoming().updatedAtMs >= 0;
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(chunkId);
+      }
+
+      // 9. Espaço pessoal isolado por UID (/users/{userId}/workspace/personal — compatibilidade retroativa e rollback seguro)
       match /workspace/{docId} {
         allow get: if isOwner(userId) && isValidId(userId) && docId == 'personal';
         allow list: if false;

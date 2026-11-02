@@ -69,12 +69,54 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "ownerUid", "updatedAt"]
+    },
+    "AnimeStorageManifest": {
+      "title": "AnimeStorageManifest",
+      "description": "Manifesto do particionamento escalável de animes em blocos (Etapa 3)",
+      "type": "object",
+      "properties": {
+        "version": { "type": "integer" },
+        "storageEngine": { "type": "string" },
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "totalAnimes": { "type": "integer" },
+        "chunkIds": { "type": "array" },
+        "chunkCounts": { "type": "object" },
+        "statusCounts": { "type": "object" },
+        "migratedFromLegacy": { "type": "boolean" },
+        "legacyItemCount": { "type": "integer" },
+        "updatedAtMs": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["version", "storageEngine", "ownerUid", "totalAnimes", "chunkIds", "chunkCounts", "statusCounts", "migratedFromLegacy", "updatedAtMs"]
+    },
+    "AnimeChunk": {
+      "title": "AnimeChunk",
+      "description": "Bloco particionado de animes (aproximadamente 300 itens)",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "chunkId": { "type": "string", "maxLength": 128 },
+        "chunkIndex": { "type": "integer" },
+        "animes": { "type": "array" },
+        "count": { "type": "integer" },
+        "updatedAtMs": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "chunkId", "chunkIndex", "animes", "count", "updatedAtMs"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfile" },
       "description": "Perfis públicos e metadados dos usuários"
+    },
+    "/users/{userId}/anime_storage/{docId}": {
+      "schema": { "$ref": "#/entities/AnimeStorageManifest" },
+      "description": "Manifesto do armazenamento em blocos particionados"
+    },
+    "/users/{userId}/anime_chunks/{chunkId}": {
+      "schema": { "$ref": "#/entities/AnimeChunk" },
+      "description": "Blocos individuais particionados de animes"
     },
     "/conversations/{convId}": {
       "schema": { "$ref": "#/entities/Conversation" },

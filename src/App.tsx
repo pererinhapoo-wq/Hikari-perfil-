@@ -98,10 +98,19 @@ import {
   saveUserWorkspaceToFirestore,
   syncPublicProfileProjection,
   writeLocalUserWorkspace,
+  hydrateWorkspaceFromIndexedDb,
   type FirestoreSyncStatus,
   type UserPersonalWorkspace,
   type UserProfileOverrides,
 } from './lib/userWorkspaceStorage';
+import {
+  clearAllMemoryCache,
+  invalidateAnimeStatusChange,
+  invalidateAnimeCategory,
+  invalidateAllAnimeCategories,
+  invalidateActivitiesCache,
+  updateCachedAnimeLocally,
+} from './lib/profileCacheManager';
 
 const DEMO_PROFILE_STORAGE_KEY = 'hikari_profile_user_data_v1';
 
@@ -622,7 +631,21 @@ export default function App() {
       setCurrentView('admin');
     }
 
-    void loadUserWorkspaceFromFirestore(targetUid).then((remote) => {
+    void hydrateWorkspaceFromIndexedDb(targetUid).then((indexedWorkspace) => {
+      if (cancelled || !indexedWorkspace) return;
+      setAuthSession((prev) => {
+        if (!prev || prev.uid !== targetUid) return prev;
+        if (indexedWorkspace.animes.length >= prev.workspace.animes.length) {
+          return {
+            ...prev,
+            workspace: indexedWorkspace,
+          };
+        }
+        return prev;
+      });
+    });
+
+    void loadUserWorkspaceFromFirestore(targetUid, { loadAllAnimes: false }).then((remote) => {
       if (cancelled) return;
       setAuthSession((prev) => {
         if (!prev || prev.uid !== targetUid) return prev;
@@ -649,6 +672,28 @@ export default function App() {
       cancelled = true;
     };
   }, [user?.uid]);
+
+  // On-demand chunk loading strictly when navigating to the 'animes' tab
+  const hasLoadedFullAnimesRef = useRef(false);
+  useEffect(() => {
+    if (activeTab === 'animes' && isAuthenticated && user?.uid && !hasLoadedFullAnimesRef.current) {
+      hasLoadedFullAnimesRef.current = true;
+      void loadUserWorkspaceFromFirestore(user.uid, { loadAllAnimes: true }).then((remote) => {
+        if (remote.workspace && remote.workspace.animes.length > 0) {
+          setAuthSession((prev) => {
+            if (!prev || prev.uid !== user.uid) return prev;
+            return {
+              ...prev,
+              workspace: {
+                ...prev.workspace,
+                animes: remote.workspace!.animes,
+              },
+            };
+          });
+        }
+      });
+    }
+  }, [activeTab, isAuthenticated, user?.uid]);
 
   // Debounced Demo Mode persistence with synchronous flush on pagehide/beforeunload/visibilitychange
   const pendingDemoPayloadRef = useRef<PersistedDemoProfileData | null>(null);
@@ -1045,6 +1090,15 @@ export default function App() {
     }
     return computeAnimeStats(demoAnimes);
   }, [isOwnProfile, isAuthenticated, animes, authPublicProfilesMap, activeProfile.id, demoAnimes]);
+
+  const activeProfileStatusCounts = useMemo<Record<AnimeStatus, number>>(() => ({
+    all: activeProfileAnimeStats.totalEntries,
+    watching: activeProfileAnimeStats.watchingCount,
+    completed: activeProfileAnimeStats.completedCount,
+    planned: activeProfileAnimeStats.plannedCount,
+    on_hold: activeProfileAnimeStats.onHoldCount,
+    dropped: activeProfileAnimeStats.droppedCount,
+  }), [activeProfileAnimeStats]);
 
   // Raw anime entries are strictly withheld when !canAccessActiveProfileAnimeList
   const exposedAnimes = useMemo<AnimeItem[]>(() => {
@@ -1715,9 +1769,16 @@ export default function App() {
             episode: newEp,
           };
 
+      if (completedNow) {
+        invalidateAnimeStatusChange(currentUser.id, prevAnime.status, 'completed');
+      } else {
+        invalidateAnimeCategory(currentUser.id, updatedAnime.status);
+      }
+      updateCachedAnimeLocally(currentUser.id, updatedAnime, updatedAnime.status);
+      invalidateActivitiesCache(currentUser.id);
       persistAndApply(nextAnimes, activity);
     },
-    [persistAndApply]
+    [currentUser.id, persistAndApply]
   );
 
   // Handler: Update anime status (single-slot update with automatic episode maxing on completion)
@@ -1762,9 +1823,12 @@ export default function App() {
             episode: nextEp,
           };
 
+      invalidateAnimeStatusChange(currentUser.id, prevAnime.status, newStatus);
+      updateCachedAnimeLocally(currentUser.id, updatedAnime, newStatus);
+      invalidateActivitiesCache(currentUser.id);
       persistAndApply(nextAnimes, activity);
     },
-    [persistAndApply]
+    [currentUser.id, persistAndApply]
   );
 
   // Handler: Save anime edit from modal (single-slot update, recording 1 consolidated activity)
@@ -1869,9 +1933,18 @@ export default function App() {
         };
       }
 
+      if (statusChanged) {
+        invalidateAnimeStatusChange(currentUser.id, prevAnime.status, nextStatus);
+      } else {
+        invalidateAnimeCategory(currentUser.id, nextStatus);
+      }
+      updateCachedAnimeLocally(currentUser.id, updatedAnime, nextStatus);
+      if (newActivity) {
+        invalidateActivitiesCache(currentUser.id);
+      }
       persistAndApply(nextAnimes, newActivity);
     },
-    [persistAndApply]
+    [currentUser.id, persistAndApply]
   );
 
   // Handler: Toggle favorite (single-slot update without full-list map cloning)
@@ -1902,9 +1975,12 @@ export default function App() {
         posterUrl: prevAnime.posterUrl,
       };
 
+      invalidateAnimeCategory(currentUser.id, updatedAnime.status);
+      updateCachedAnimeLocally(currentUser.id, updatedAnime, updatedAnime.status);
+      invalidateActivitiesCache(currentUser.id);
       persistAndApply(nextAnimes, activity);
     },
-    [persistAndApply]
+    [currentUser.id, persistAndApply]
   );
 
   // Image updates
@@ -1999,6 +2075,8 @@ export default function App() {
             activities: [syncActivity, ...prev.activities],
           };
         });
+        invalidateAllAnimeCategories(currentUser.id);
+        invalidateActivitiesCache(currentUser.id);
         return;
       }
 
@@ -2020,12 +2098,14 @@ export default function App() {
           ? mergeFavoriteCharacters(demoFavoriteCharacters, fetchedCharacters)
           : demoFavoriteCharacters;
 
+      invalidateAllAnimeCategories(currentUser.id);
+      invalidateActivitiesCache(currentUser.id);
       setDemoProfile(nextDemoProfile);
       setDemoAnimes(mergedAnimes);
       setDemoFavoriteCharacters(nextDemoCharacters);
       setDemoActivities((prev) => [syncActivity, ...prev]);
     },
-    [isAuthenticated, demoProfile, demoFavoriteCharacters, updateAuthWorkspace]
+    [isAuthenticated, currentUser.id, demoProfile, demoFavoriteCharacters, updateAuthWorkspace]
   );
 
   // Handler: Sync imported anime list from MyAnimeList
@@ -2070,6 +2150,8 @@ export default function App() {
             activities: [syncActivity, ...prev.activities],
           };
         });
+        invalidateAllAnimeCategories(currentUser.id);
+        invalidateActivitiesCache(currentUser.id);
         return;
       }
 
@@ -2085,16 +2167,20 @@ export default function App() {
           mal: malPatch,
         },
       };
+      invalidateAllAnimeCategories(currentUser.id);
+      invalidateActivitiesCache(currentUser.id);
       setDemoProfile(nextDemoProfile);
       setDemoAnimes(mergedAnimes);
       setDemoActivities((prev) => [syncActivity, ...prev]);
     },
-    [isAuthenticated, demoProfile, updateAuthWorkspace]
+    [isAuthenticated, currentUser.id, demoProfile, updateAuthWorkspace]
   );
 
   // Real Logout handler: wipes personal memory immediately, terminates Firebase Auth session and returns to login screen
   const handleLogout = useCallback(async () => {
     pendingAdminReturnRef.current = false;
+    hasLoadedFullAnimesRef.current = false;
+    clearAllMemoryCache();
     setAdminVerification({
       uid: null,
       authorized: false,
@@ -2630,6 +2716,7 @@ export default function App() {
                     <LazyAnimeListTab
                       profileId={activeProfile.id}
                       animes={exposedAnimes}
+                      statusCounts={activeProfileStatusCounts}
                       isOwnProfile={isOwnProfile}
                       selectedStatusFilter={selectedAnimeStatusFilter}
                       filterSyncKey={animeFilterSyncKey}

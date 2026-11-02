@@ -27,6 +27,21 @@ import {
   sanitizeAnimeStatsSummary,
   type AnimeStatsSummary,
 } from '../utils/animeStats';
+import {
+  loadAnimeManifestFromFirestore,
+  loadAllChunkedAnimesFromFirestore,
+  saveAllAnimesToChunkedFirestore,
+  DEFAULT_CHUNK_SIZE,
+  type AnimeStorageManifest,
+} from './chunkedAnimeStorage';
+import {
+  saveAnimesToIndexedDb,
+  getAnimesFromIndexedDb,
+  saveActivitiesToIndexedDb,
+  getActivitiesFromIndexedDb,
+  saveCommentsToIndexedDb,
+  getCommentsFromIndexedDb,
+} from './indexedDbStorage';
 
 export const USER_WORKSPACE_STORAGE_PREFIX = 'hikari_user_workspace_v1:';
 export const PUBLIC_PROFILES_STORAGE_KEY = 'hikari_public_profiles_v1';
@@ -174,7 +189,16 @@ function flushSingleWorkspaceToLocalStorage(uid: string): void {
 
   try {
     metricsJsonStringifyCalls++;
-    const serialized = JSON.stringify(cached.workspace);
+    const isLarge = cached.workspace.animes.length > 300;
+    const payload = isLarge
+      ? {
+          ...cached.workspace,
+          animes: cached.workspace.animes.slice(0, 150),
+          _isOffloadedToIndexedDb: true,
+          _totalAnimesCount: cached.workspace.animes.length,
+        }
+      : cached.workspace;
+    const serialized = JSON.stringify(payload);
     cached.lastRaw = serialized;
     window.localStorage.setItem(getUserWorkspaceStorageKey(uid), serialized);
   } catch {
@@ -567,6 +591,10 @@ export function readLocalUserWorkspace(uid: string): UserPersonalWorkspace | nul
     const parsed: unknown = JSON.parse(raw);
     const sanitized = sanitizeWorkspaceForUid(parsed, cleanUid);
     if (sanitized) {
+      const candidateObj = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : null;
+      if (candidateObj?._isOffloadedToIndexedDb && cached && cached.workspace.animes.length >= sanitized.animes.length) {
+        sanitized.animes = cached.workspace.animes;
+      }
       workspaceMemoryCache.set(cleanUid, {
         workspace: sanitized,
         lastRaw: raw,
@@ -576,6 +604,62 @@ export function readLocalUserWorkspace(uid: string): UserPersonalWorkspace | nul
     return sanitized;
   } catch {
     return cached?.workspace ?? null;
+  }
+}
+
+export async function hydrateWorkspaceFromIndexedDb(
+  uid: string
+): Promise<UserPersonalWorkspace | null> {
+  const cleanUid = uid.trim();
+  if (!cleanUid) return null;
+
+  try {
+    const [indexedAnimes, indexedActivities, indexedComments] = await Promise.all([
+      getAnimesFromIndexedDb(cleanUid),
+      getActivitiesFromIndexedDb(cleanUid),
+      getCommentsFromIndexedDb(cleanUid),
+    ]);
+
+    const cached = workspaceMemoryCache.get(cleanUid);
+    const base =
+      cached?.workspace ?? readLocalUserWorkspace(cleanUid) ?? createEmptyUserWorkspace(cleanUid);
+
+    let changed = false;
+    let nextAnimes = base.animes;
+    let nextActivities = base.activities;
+    let nextComments = base.comments;
+
+    if (indexedAnimes && indexedAnimes.length >= base.animes.length) {
+      nextAnimes = indexedAnimes;
+      changed = true;
+    }
+    if (indexedActivities && indexedActivities.length > base.activities.length) {
+      nextActivities = indexedActivities;
+      changed = true;
+    }
+    if (indexedComments && indexedComments.length > base.comments.length) {
+      nextComments = indexedComments;
+      changed = true;
+    }
+
+    if (changed || !cached) {
+      const merged: UserPersonalWorkspace = {
+        ...base,
+        animes: nextAnimes,
+        activities: nextActivities,
+        comments: nextComments,
+      };
+      workspaceMemoryCache.set(cleanUid, {
+        workspace: merged,
+        lastRaw: cached?.lastRaw ?? null,
+        dirty: false,
+      });
+      return merged;
+    }
+
+    return cached.workspace;
+  } catch {
+    return workspaceMemoryCache.get(cleanUid)?.workspace ?? null;
   }
 }
 
@@ -603,6 +687,17 @@ export function writeLocalUserWorkspace(
     lastRaw: existing?.lastRaw ?? null,
     dirty: true,
   });
+
+  // Gravação assíncrona no IndexedDB para contingência offline de grandes volumes sem limites de 5 MiB
+  if (normalized.animes.length > 0) {
+    void saveAnimesToIndexedDb(cleanUid, normalized.animes);
+  }
+  if (normalized.activities.length > 0) {
+    void saveActivitiesToIndexedDb(cleanUid, normalized.activities);
+  }
+  if (normalized.comments.length > 0) {
+    void saveCommentsToIndexedDb(cleanUid, normalized.comments);
+  }
 
   if (options?.immediate) {
     flushSingleWorkspaceToLocalStorage(cleanUid);
@@ -722,9 +817,13 @@ function computeFirestoreUserProfileSignature(resolvedProfile: UserProfile): {
   };
 }
 
-export async function loadUserWorkspaceFromFirestore(uid: string): Promise<{
+export async function loadUserWorkspaceFromFirestore(
+  uid: string,
+  options?: { loadAllAnimes?: boolean }
+): Promise<{
   workspace: UserPersonalWorkspace | null;
   status: FirestoreSyncStatus;
+  manifest?: AnimeStorageManifest | null;
 }> {
   const cleanUid = uid.trim();
   if (!cleanUid) {
@@ -734,15 +833,25 @@ export async function loadUserWorkspaceFromFirestore(uid: string): Promise<{
     return { workspace: null, status: 'unconfigured' };
   }
 
+  const shouldLoadAllChunks = options?.loadAllAnimes ?? true;
+
   try {
     const personalRef = doc(db, 'users', cleanUid, 'workspace', 'personal');
     const profileRef = doc(db, 'users', cleanUid);
 
     metricsFirestoreGetDocCalls += 2;
-    const [personalSnap, profileSnap] = await Promise.all([
+    const [personalSnap, profileSnap, chunkedResult, manifestOnlyResult] = await Promise.all([
       getDoc(personalRef),
       getDoc(profileRef),
+      shouldLoadAllChunks
+        ? loadAllChunkedAnimesFromFirestore(cleanUid)
+        : Promise.resolve({ animes: null, manifest: null, status: 'synced' as FirestoreSyncStatus }),
+      !shouldLoadAllChunks
+        ? loadAnimeManifestFromFirestore(cleanUid)
+        : Promise.resolve({ manifest: null, status: 'synced' as FirestoreSyncStatus }),
     ]);
+
+    const activeManifest = shouldLoadAllChunks ? chunkedResult.manifest : manifestOnlyResult.manifest;
 
     remoteDocMetaByUid.set(cleanUid, {
       userDocExists: profileSnap.exists(),
@@ -760,16 +869,31 @@ export async function loadUserWorkspaceFromFirestore(uid: string): Promise<{
           ? updatedAtTimestamp.toMillis()
           : Date.now();
 
+      // Prioridade escalável da Etapa 3:
+      // Se houver animes nos blocos particionados (chunked storage), usa a lista completa
+      // Se não houver blocos particionados, mantém compatibilidade com data.animes do documento legado
+      const resolvedAnimes =
+        shouldLoadAllChunks && chunkedResult.status === 'synced' && chunkedResult.animes !== null
+          ? chunkedResult.animes
+          : Array.isArray(data.animes)
+          ? (data.animes as AnimeItem[])
+          : [];
+
       const sanitized = sanitizeWorkspaceForUid(
         {
           ...data,
+          animes: resolvedAnimes,
           updatedAtMs: remoteUpdatedAtMs,
         },
         cleanUid
       );
 
       if (sanitized) {
-        return { workspace: sanitized, status: 'synced' };
+        // Grava no IndexedDB de forma assíncrona para cache local resiliente
+        void saveAnimesToIndexedDb(cleanUid, sanitized.animes);
+        void saveActivitiesToIndexedDb(cleanUid, sanitized.activities);
+        void saveCommentsToIndexedDb(cleanUid, sanitized.comments);
+        return { workspace: sanitized, status: 'synced', manifest: activeManifest };
       }
     }
 
@@ -783,11 +907,15 @@ export async function loadUserWorkspaceFromFirestore(uid: string): Promise<{
           updatedAtTs && typeof updatedAtTs.toMillis === 'function'
             ? updatedAtTs.toMillis()
             : Date.now();
-        return { workspace: base, status: 'synced' };
+        if (shouldLoadAllChunks && chunkedResult.status === 'synced' && chunkedResult.animes) {
+          base.animes = chunkedResult.animes;
+        }
+        void saveAnimesToIndexedDb(cleanUid, base.animes);
+        return { workspace: base, status: 'synced', manifest: activeManifest };
       }
     }
 
-    return { workspace: null, status: 'empty_remote' };
+    return { workspace: null, status: 'empty_remote', manifest: activeManifest };
   } catch (err) {
     const code = getFirestoreErrorCode(err);
     if (code === 'permission-denied') {
@@ -830,6 +958,18 @@ async function performFirestoreBatchCommit(
     const shouldWriteUserDoc =
       !docMeta.userDocExists || docMeta.lastUserProfileSig !== profilePrepared.signature;
 
+    // Particionamento escalável da Etapa 3:
+    // Se a lista possui mais de DEFAULT_CHUNK_SIZE (300) animes ou se o particionamento já estiver ativo,
+    // grava a coleção particionada em blocos
+    if (workspace.animes.length > DEFAULT_CHUNK_SIZE) {
+      void saveAllAnimesToChunkedFirestore(cleanUid, workspace.animes);
+    } else {
+      const { manifest: existingManifest } = await loadAnimeManifestFromFirestore(cleanUid);
+      if (existingManifest) {
+        void saveAllAnimesToChunkedFirestore(cleanUid, workspace.animes);
+      }
+    }
+
     // Cap inline data URLs inside Firestore personal workspace if larger than 400KB to respect 1MB doc limit
     const safeOverrides: UserProfileOverrides = stripUndefinedDeep({
       ...workspace.profileOverrides,
@@ -845,7 +985,9 @@ async function performFirestoreBatchCommit(
 
     const workspaceFields = stripUndefinedDeep({
       profileOverrides: safeOverrides,
-      animes: workspace.animes.slice(0, 2000),
+      // No documento legado workspace/personal, mantém até 300 itens para compatibilidade retroativa
+      // sem ultrapassar a cota de 1 MiB do Firestore
+      animes: workspace.animes.slice(0, 300),
       favoriteCharacters: workspace.favoriteCharacters.slice(0, 50),
       favoriteCompanies: workspace.favoriteCompanies.slice(0, 50),
       favoritePeople: workspace.favoritePeople.slice(0, 50),

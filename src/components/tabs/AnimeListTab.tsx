@@ -24,6 +24,9 @@ interface AnimeListTabProps {
   animes: AnimeItem[];
   isOwnProfile: boolean;
   selectedStatusFilter?: AnimeStatus;
+  statusCounts?: Record<AnimeStatus, number>;
+  onSelectCategory?: (category: AnimeStatus) => void;
+  isLoadingCategory?: boolean;
   filterSyncKey?: number;
   selectedAnimeId?: string | null;
   onClearSelectedAnime?: () => void;
@@ -75,47 +78,8 @@ export function getNormalizedAnimeSearchText(anime: AnimeItem): string {
   return normalized;
 }
 
-/**
- * Calcula a contagem de todas as 6 categorias de filtro em uma única passagem O(N).
- */
-export function computeAnimeStatusCounts(
-  animes: readonly AnimeItem[]
-): Record<AnimeStatus, number> {
-  let watching = 0;
-  let completed = 0;
-  let planned = 0;
-  let onHold = 0;
-  let dropped = 0;
-
-  for (let i = 0; i < animes.length; i++) {
-    switch (animes[i].status) {
-      case 'watching':
-        watching++;
-        break;
-      case 'completed':
-        completed++;
-        break;
-      case 'planned':
-        planned++;
-        break;
-      case 'on_hold':
-        onHold++;
-        break;
-      case 'dropped':
-        dropped++;
-        break;
-    }
-  }
-
-  return {
-    all: animes.length,
-    watching,
-    completed,
-    planned,
-    on_hold: onHold,
-    dropped,
-  };
-}
+import { computeAnimeStatusCounts } from '../../utils/animeStats';
+export { computeAnimeStatusCounts };
 
 // Persistent cache across tab switches isolated per profileId
 interface PersistentAnimeTabState {
@@ -342,6 +306,9 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = React.memo(({
   animes,
   isOwnProfile,
   selectedStatusFilter,
+  statusCounts: statusCountsProp,
+  onSelectCategory,
+  isLoadingCategory = false,
   filterSyncKey,
   selectedAnimeId,
   onClearSelectedAnime,
@@ -445,8 +412,8 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = React.memo(({
   );
 
   const statusCounts = useMemo(
-    () => computeAnimeStatusCounts(uniqueAnimes),
-    [uniqueAnimes]
+    () => statusCountsProp ?? computeAnimeStatusCounts(uniqueAnimes),
+    [statusCountsProp, uniqueAnimes]
   );
 
   const filteredAnimes = useMemo(() => {
@@ -778,6 +745,9 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = React.memo(({
                     onClick={() => {
                       setActiveFilter(cat.id);
                       persistentTabState.scrollY = 0;
+                      if (onSelectCategory) {
+                        onSelectCategory(cat.id);
+                      }
                     }}
                     className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-xl px-3 py-1.5 text-xs font-medium transition-all cursor-pointer ${
                       isActive
@@ -818,7 +788,12 @@ export const AnimeListTab: React.FC<AnimeListTabProps> = React.memo(({
           </div>
 
           {/* Animes Grid - Strictly 3 columns per row on all screens including mobile, full vertical scroll */}
-          {filteredAnimes.length === 0 ? (
+          {isLoadingCategory && filteredAnimes.length === 0 ? (
+            <div data-testid="category-loading-indicator" className="flex flex-col items-center justify-center py-16 space-y-3">
+              <div className="h-6 w-6 animate-spin rounded-full border-2 border-purple-400 border-t-transparent" />
+              <span className="text-xs text-purple-300/70">Carregando animes desta categoria...</span>
+            </div>
+          ) : filteredAnimes.length === 0 ? (
             uniqueAnimes.length === 0 && activeFilter === 'all' && !searchQuery.trim() ? (
               <div className="rounded-2xl border border-purple-900/30 bg-[#130E24]/60 p-12 text-center">
                 <Tv className="mx-auto h-10 w-10 text-purple-400/40" />

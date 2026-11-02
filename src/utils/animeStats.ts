@@ -1,4 +1,46 @@
-import { AnimeItem } from '../types';
+import { AnimeItem, AnimeStatus } from '../types';
+
+/**
+ * Calcula a contagem de todas as 6 categorias de status em uma única passagem O(N).
+ */
+export function computeAnimeStatusCounts(
+  animes: readonly AnimeItem[]
+): Record<AnimeStatus, number> {
+  let watching = 0;
+  let completed = 0;
+  let planned = 0;
+  let onHold = 0;
+  let dropped = 0;
+
+  for (let i = 0; i < animes.length; i++) {
+    switch (animes[i].status) {
+      case 'watching':
+        watching++;
+        break;
+      case 'completed':
+        completed++;
+        break;
+      case 'planned':
+        planned++;
+        break;
+      case 'on_hold':
+        onHold++;
+        break;
+      case 'dropped':
+        dropped++;
+        break;
+    }
+  }
+
+  return {
+    all: animes.length,
+    watching,
+    completed,
+    planned,
+    on_hold: onHold,
+    dropped,
+  };
+}
 
 export interface AnimeStatsSummary {
   watchingCount: number;
