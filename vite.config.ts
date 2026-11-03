@@ -3,8 +3,28 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import { defineConfig } from 'vite';
 
+// Apenas as seis variáveis de ambiente públicas do Firebase autorizadas para o bundle do navegador
+const CLIENT_FIREBASE_ENV_KEYS = [
+  'VITE_FIREBASE_API_KEY',
+  'VITE_FIREBASE_AUTH_DOMAIN',
+  'VITE_FIREBASE_PROJECT_ID',
+  'VITE_FIREBASE_APP_ID',
+  'VITE_FIREBASE_STORAGE_BUCKET',
+  'VITE_FIREBASE_MESSAGING_SENDER_ID',
+] as const;
+
 export default defineConfig(() => {
+  // Constrói mapeamento restrito sem expor process.env inteiro ou outras variáveis
+  const firebaseDefines: Record<string, string> = {};
+  for (const key of CLIENT_FIREBASE_ENV_KEYS) {
+    const val = process.env[key];
+    if (typeof val === 'string' && val.trim().length > 0) {
+      firebaseDefines[`import.meta.env.${key}`] = JSON.stringify(val.trim());
+    }
+  }
+
   return {
+    define: firebaseDefines,
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {

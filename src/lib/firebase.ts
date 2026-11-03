@@ -2,7 +2,43 @@ import { initializeApp, getApps, getApp, type FirebaseApp, type FirebaseOptions 
 import { getAuth, GoogleAuthProvider, type Auth } from 'firebase/auth';
 import { getFirestore, type Firestore } from 'firebase/firestore';
 
-export const EXPECTED_FIREBASE_PROJECT_ID = 'hikari-user-profiles';
+/**
+ * Project ID padrão de Produção do ecossistema Hikari
+ */
+export const DEFAULT_PRODUCTION_PROJECT_ID = 'hikari-user-profiles';
+
+/**
+ * Projetos autorizados para os ecossistemas do Hikari.
+ * Em produção o padrão é 'hikari-user-profiles'; em testes/Preview aceita-se 'hikari-perfil-testes'.
+ */
+export const ALLOWED_FIREBASE_PROJECT_IDS = [
+  'hikari-user-profiles',
+  'hikari-perfil-testes',
+] as const;
+
+export function isAuthorizedHikariProjectId(projectId: string | null | undefined): boolean {
+  if (!projectId || typeof projectId !== 'string') return false;
+  const clean = projectId.trim();
+  if (ALLOWED_FIREBASE_PROJECT_IDS.includes(clean as (typeof ALLOWED_FIREBASE_PROJECT_IDS)[number])) {
+    return true;
+  }
+  // Proteção contra conexão acidental a projetos alheios: exige o padrão de namespace 'hikari-*'
+  return clean.startsWith('hikari-') && clean.length > 7;
+}
+
+function resolveExpectedProjectId(): string {
+  const envVal = (
+    (typeof import.meta !== 'undefined' && import.meta.env?.VITE_FIREBASE_PROJECT_ID) ||
+    (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_PROJECT_ID : undefined)
+  )?.trim();
+
+  if (envVal && isAuthorizedHikariProjectId(envVal)) {
+    return envVal;
+  }
+  return DEFAULT_PRODUCTION_PROJECT_ID;
+}
+
+export const EXPECTED_FIREBASE_PROJECT_ID = resolveExpectedProjectId();
 
 export const REQUIRED_FIREBASE_WEB_ENV_KEYS = [
   'VITE_FIREBASE_API_KEY',
@@ -76,8 +112,32 @@ export function evaluateFirebaseEnv(
   };
 }
 
-const metaEnv: Record<string, string | undefined> =
-  typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env : {};
+const metaEnv: Record<string, string | undefined> = {
+  VITE_FIREBASE_API_KEY:
+    import.meta.env.VITE_FIREBASE_API_KEY ||
+    (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_API_KEY : undefined),
+  VITE_FIREBASE_AUTH_DOMAIN:
+    import.meta.env.VITE_FIREBASE_AUTH_DOMAIN ||
+    (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_AUTH_DOMAIN : undefined),
+  VITE_FIREBASE_PROJECT_ID:
+    import.meta.env.VITE_FIREBASE_PROJECT_ID ||
+    (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_PROJECT_ID : undefined),
+  VITE_FIREBASE_APP_ID:
+    import.meta.env.VITE_FIREBASE_APP_ID ||
+    (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_APP_ID : undefined),
+  VITE_FIREBASE_STORAGE_BUCKET:
+    import.meta.env.VITE_FIREBASE_STORAGE_BUCKET ||
+    (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_STORAGE_BUCKET : undefined),
+  VITE_FIREBASE_MESSAGING_SENDER_ID:
+    import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID ||
+    (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_MESSAGING_SENDER_ID : undefined),
+  VITE_FIREBASE_MEASUREMENT_ID:
+    import.meta.env.VITE_FIREBASE_MEASUREMENT_ID ||
+    (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_MEASUREMENT_ID : undefined),
+  VITE_FIREBASE_FIRESTORE_DATABASE_ID:
+    import.meta.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID ||
+    (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_FIRESTORE_DATABASE_ID : undefined),
+};
 
 const evaluated = evaluateFirebaseEnv({
   VITE_FIREBASE_API_KEY: metaEnv.VITE_FIREBASE_API_KEY,
@@ -120,12 +180,19 @@ export function createGoogleAuthProvider(): GoogleAuthProvider {
   return provider;
 }
 
+const isProjectAuthorized = isAuthorizedHikariProjectId(evaluated.projectId);
+const projectIdMatchesExpected = Boolean(
+  evaluated.projectId &&
+  isProjectAuthorized &&
+  evaluated.projectId === EXPECTED_FIREBASE_PROJECT_ID
+);
+
 export const firebaseConfigStatus: FirebaseConfigStatus = {
   isConfigured,
   isInitialized: Boolean(firebaseApp && auth && db && !initializationError),
   expectedProjectId: EXPECTED_FIREBASE_PROJECT_ID,
   projectId: evaluated.projectId,
-  projectIdMatchesExpected: evaluated.projectId === EXPECTED_FIREBASE_PROJECT_ID,
+  projectIdMatchesExpected,
   missingEnvVars: evaluated.missingEnvVars,
   initializationError,
 };
