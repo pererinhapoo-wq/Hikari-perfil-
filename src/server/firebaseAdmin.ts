@@ -35,29 +35,60 @@ export interface FirebaseAdminStatus {
  */
 export function getFirebaseAdminApp(): App {
   if (adminApp) {
-    return adminApp;
+    const currentApps = getApps();
+    if (currentApps.some((a) => a.name === adminApp?.name)) {
+      return adminApp;
+    }
+    adminApp = null;
   }
 
   const existingApps = getApps();
   if (existingApps.length > 0 && existingApps[0]) {
     adminApp = existingApps[0];
+    initializationError = null;
     return adminApp;
   }
 
-  const rawServiceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_KEY?.trim();
+  let rawServiceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_KEY?.trim();
   const envProjectId =
     process.env.FIREBASE_PROJECT_ID?.trim() ||
     process.env.VITE_FIREBASE_PROJECT_ID?.trim();
 
   try {
     if (rawServiceAccount) {
-      let parsedServiceAccount: ServiceAccount & { project_id?: string };
+      // 1. Tratar aspas externas seguras ('...' ou "...") que podem envolver a variável no ambiente
+      if (
+        (rawServiceAccount.startsWith("'") && rawServiceAccount.endsWith("'") && rawServiceAccount.length >= 2) ||
+        (rawServiceAccount.startsWith('"') && rawServiceAccount.endsWith('"') && rawServiceAccount.length >= 2)
+      ) {
+        rawServiceAccount = rawServiceAccount.slice(1, -1).trim();
+      }
+
+      let parsedServiceAccount: any;
 
       if (rawServiceAccount.startsWith('{')) {
         parsedServiceAccount = JSON.parse(rawServiceAccount);
       } else {
-        const decoded = Buffer.from(rawServiceAccount, 'base64').toString('utf-8');
-        parsedServiceAccount = JSON.parse(decoded);
+        const decoded = Buffer.from(rawServiceAccount, 'base64').toString('utf-8').trim();
+        const cleanDecoded =
+          (decoded.startsWith("'") && decoded.endsWith("'") && decoded.length >= 2) ||
+          (decoded.startsWith('"') && decoded.endsWith('"') && decoded.length >= 2)
+            ? decoded.slice(1, -1).trim()
+            : decoded;
+        parsedServiceAccount = JSON.parse(cleanDecoded);
+      }
+
+      if (!parsedServiceAccount || typeof parsedServiceAccount !== 'object') {
+        throw new Error('A estrutura da Conta de Serviço do Firebase fornecida é inválida.');
+      }
+
+      // 2. Normalizar quebras de linha escapadas ("\\n") para quebras reais ("\n")
+      // Necessário porque provedores de hospedagem serverless (como Vercel) escapam quebras de linha
+      if (typeof parsedServiceAccount.private_key === 'string') {
+        parsedServiceAccount.private_key = parsedServiceAccount.private_key.replace(/\\n/g, '\n');
+      }
+      if (typeof parsedServiceAccount.privateKey === 'string') {
+        parsedServiceAccount.privateKey = parsedServiceAccount.privateKey.replace(/\\n/g, '\n');
       }
 
       const saProjectId =
@@ -72,6 +103,7 @@ export function getFirebaseAdminApp(): App {
         projectId: resolvedProjectId,
       });
 
+      initializationError = null;
       return adminApp;
     }
 
@@ -80,6 +112,7 @@ export function getFirebaseAdminApp(): App {
         credential: applicationDefault(),
         projectId: envProjectId || 'hikari-user-profiles',
       });
+      initializationError = null;
       return adminApp;
     }
 

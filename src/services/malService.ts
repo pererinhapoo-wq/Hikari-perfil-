@@ -108,6 +108,8 @@ export function mapMALStatus(rawStatus?: string): AnimeItem['status'] {
 export interface MALServerStatus {
   configured: boolean;
   clientIdConfigured: boolean;
+  storageConfigured?: boolean;
+  storageError?: string;
   redirectUri: string;
 }
 
@@ -132,6 +134,8 @@ export async function fetchMALServerStatus(forceRefresh = false): Promise<MALSer
         return {
           configured: false,
           clientIdConfigured: false,
+          storageConfigured: false,
+          storageError: `Erro ao consultar status do servidor (HTTP ${res.status})`,
           redirectUri: `${window.location.origin}/api/mal/callback`,
         };
       }
@@ -139,14 +143,18 @@ export async function fetchMALServerStatus(forceRefresh = false): Promise<MALSer
       const resolved: MALServerStatus = {
         configured: Boolean(data.configured),
         clientIdConfigured: Boolean(data.clientIdConfigured),
+        storageConfigured: typeof data.storageConfigured === 'boolean' ? data.storageConfigured : Boolean(data.configured),
+        storageError: typeof data.storageError === 'string' ? data.storageError : undefined,
         redirectUri: data.redirectUri || `${window.location.origin}/api/mal/callback`,
       };
       cachedMALServerStatus = resolved;
       return resolved;
-    } catch {
+    } catch (err) {
       return {
         configured: false,
         clientIdConfigured: false,
+        storageConfigured: false,
+        storageError: err instanceof Error ? err.message : 'Falha na comunicação de rede com o servidor.',
         redirectUri: typeof window !== 'undefined' ? `${window.location.origin}/api/mal/callback` : '',
       };
     } finally {

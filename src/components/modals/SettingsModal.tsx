@@ -479,9 +479,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       const status = await fetchMALServerStatus();
       setMalStatus(status);
       if (!status.configured) {
-        setMalAuthError(
-          'O Client ID do MyAnimeList ainda não foi configurado no servidor. Defina a variável de ambiente MAL_CLIENT_ID.'
-        );
+        if (!status.clientIdConfigured) {
+          setMalAuthError(
+            'O Client ID do MyAnimeList ainda não foi configurado no servidor. Defina a variável de ambiente MAL_CLIENT_ID.'
+          );
+        } else if (status.storageConfigured === false) {
+          setMalAuthError(
+            status.storageError ||
+              'Armazenamento seguro do MyAnimeList indisponível no servidor. Verifique a inicialização do Firebase Admin.'
+          );
+        } else {
+          setMalAuthError(
+            'A integração com o MyAnimeList não está totalmente configurada no servidor.'
+          );
+        }
         setIsStartingMALAuth(false);
         return;
       }
@@ -2429,18 +2440,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   {/* Disconnected State: Connect via OAuth PKCE or show missing config guidance */}
                   {!malConnected && (
                     <div className="space-y-3 pt-1">
-                      {/* Configuration notice if server has no MAL_CLIENT_ID */}
+                      {/* Configuration notice if server configuration is incomplete */}
                       {malStatus && !malStatus.configured && (
                         <div className="rounded-xl border border-amber-500/40 bg-amber-950/30 p-3.5 space-y-2">
                           <div className="flex items-start gap-2 text-xs text-amber-200">
                             <AlertCircle className="h-4 w-4 shrink-0 text-amber-400 mt-0.5" />
                             <div>
                               <p className="font-semibold text-white">
-                                Configuração necessária para MyAnimeList OAuth 2.0 PKCE
+                                {!malStatus.clientIdConfigured
+                                  ? 'Configuração necessária para MyAnimeList OAuth 2.0 PKCE'
+                                  : 'Armazenamento seguro do MyAnimeList indisponível'}
                               </p>
-                              <p className="text-[11px] text-amber-200/80 mt-1 leading-relaxed">
-                                Para autenticar contas reais via MyAnimeList API v2 oficial, defina a credencial <code className="bg-black/50 px-1 py-0.5 rounded text-amber-300 font-mono">MAL_CLIENT_ID</code> no arquivo de ambiente do servidor.
-                              </p>
+                              {!malStatus.clientIdConfigured ? (
+                                <p className="text-[11px] text-amber-200/80 mt-1 leading-relaxed">
+                                  Para autenticar contas reais via MyAnimeList API v2 oficial, defina a credencial <code className="bg-black/50 px-1 py-0.5 rounded text-amber-300 font-mono">MAL_CLIENT_ID</code> no arquivo de ambiente do servidor.
+                                </p>
+                              ) : (
+                                <p className="text-[11px] text-amber-200/80 mt-1 leading-relaxed">
+                                  O Client ID está configurado, mas o armazenamento seguro no backend encontrou uma falha de inicialização: <span className="text-amber-100 font-mono block mt-1 bg-black/40 p-1.5 rounded text-[10px] break-all">{malStatus.storageError || 'Falha ao inicializar credenciais da Service Account do Firebase Admin.'}</span>
+                                </p>
+                              )}
                               <div className="mt-2 text-[11px] text-amber-200/90 space-y-1">
                                 <div><strong>URI de Redirecionamento oficial a cadastrar no MAL:</strong></div>
                                 <code className="block bg-black/60 border border-amber-500/30 px-2.5 py-1.5 rounded text-purple-200 break-all select-all font-mono text-[11px]">

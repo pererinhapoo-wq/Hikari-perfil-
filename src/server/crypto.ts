@@ -19,7 +19,15 @@ export function parseAndValidateKey(rawKey: string | undefined | null): Buffer {
     );
   }
 
-  const trimmed = rawKey.trim();
+  let trimmed = rawKey.trim();
+
+  // Desencapsular aspas externas se existirem de forma inequívoca ('...' ou "...")
+  if (
+    (trimmed.startsWith("'") && trimmed.endsWith("'") && trimmed.length >= 2) ||
+    (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2)
+  ) {
+    trimmed = trimmed.slice(1, -1).trim();
+  }
 
   // 1. Tentar decodificar como Hexadecimal (64 caracteres = 32 bytes)
   if (/^[0-9a-fA-F]{64}$/.test(trimmed)) {
