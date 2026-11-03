@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import { malRouter } from './src/server/malRoutes.js';
 import { chatRouter } from './src/server/chatRoutes.js';
 import { adminRouter } from './src/server/adminRoutes.js';
+import { blobRouter } from './src/server/blobRoutes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -26,6 +27,10 @@ app.use('/chat', chatRouter);
 // Montagem das rotas administrativas seguras do Hikari
 app.use('/api/admin', adminRouter);
 app.use('/admin', adminRouter);
+
+// Montagem das rotas seguras de mídia e Vercel Blob do Hikari Perfil
+app.use('/api/media', blobRouter);
+app.use('/media', blobRouter);
 
 // Integração do Frontend com Vite em Desenvolvimento Local ou Produção
 async function startServer() {
