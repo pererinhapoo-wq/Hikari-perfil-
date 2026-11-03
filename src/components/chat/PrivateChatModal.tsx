@@ -3,7 +3,6 @@ import {
   X,
   Send,
   Image as ImageIcon,
-  Film,
   Sparkles,
   Check,
   CheckCheck,
@@ -46,7 +45,6 @@ import {
 } from '../../services/chatService';
 import { HikariCardPreview } from './HikariCardPreview';
 import { GifPickerPopover } from './GifPickerPopover';
-import { ShareAnimePickerPopover } from './ShareAnimePickerPopover';
 
 interface PrivateChatModalProps {
   isOpen: boolean;
@@ -130,13 +128,11 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
   const [pendingMediaUrl, setPendingMediaUrl] = useState<string | null>(null);
   const [pendingMediaType, setPendingMediaType] = useState<'image' | 'gif' | null>(null);
   const [pendingMediaTitle, setPendingMediaTitle] = useState<string | null>(null);
-  const [pendingPreview, setPendingPreview] = useState<HikariLinkPreview | null>(null);
   const [isSending, setIsSending] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Popovers
-  const [isGifPickerOpen, setIsGifPickerOpen] = useState(false);
-  const [isAnimePickerOpen, setIsAnimePickerOpen] = useState(false);
+  // Popover State (Unificado para Imagens e GIFs)
+  const [isMediaPickerOpen, setIsMediaPickerOpen] = useState(false);
   const [enlargedImageUrl, setEnlargedImageUrl] = useState<string | null>(null);
 
   // Mobile View Navigation State: 'list' or 'chat'
@@ -508,7 +504,7 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
     if (!activePartner || isSending) return;
 
     const trimmedText = inputText.trim();
-    if (!trimmedText && !pendingMediaUrl && !pendingPreview) return;
+    if (!trimmedText && !pendingMediaUrl) return;
 
     if (!privacyCheck.allowed) {
       setErrorMessage(privacyCheck.reason || 'Envio não autorizado.');
@@ -530,7 +526,7 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
       avatarUrl: activePartner.avatarUrl,
     };
 
-    const type = pendingMediaType || (pendingPreview ? 'link' : pendingMediaUrl ? 'image' : 'text');
+    const type: 'text' | 'image' | 'gif' = pendingMediaType || (pendingMediaUrl ? 'image' : 'text');
 
     try {
       const sentMsg = await sendPrivateMessage({
@@ -540,7 +536,6 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
         text: trimmedText,
         type,
         mediaUrl: pendingMediaUrl || undefined,
-        linkPreview: pendingPreview || undefined,
       });
 
       // Atualização imediata
@@ -549,36 +544,11 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
       setPendingMediaUrl(null);
       setPendingMediaType(null);
       setPendingMediaTitle(null);
-      setPendingPreview(null);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : 'Falha ao enviar mensagem.');
     } finally {
       setIsSending(false);
     }
-  };
-
-  // Image / GIF Upload File Handler (validação de tamanho e MIME)
-  const handleImageFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (file.size > 8 * 1024 * 1024) {
-      setErrorMessage('O arquivo excede o tamanho máximo de 8MB.');
-      return;
-    }
-
-    const isGif = file.type === 'image/gif' || file.name.toLowerCase().endsWith('.gif');
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setPendingMediaUrl(reader.result);
-        setPendingMediaType(isGif ? 'gif' : 'image');
-        setPendingMediaTitle(file.name);
-      }
-    };
-    reader.readAsDataURL(file);
-    e.target.value = '';
   };
 
   // Keyboard shortcut: Enter to send, Shift+Enter for newline
@@ -598,10 +568,8 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
           setEnlargedImageUrl(null);
         } else if (activeReactionPickerMsgId) {
           setActiveReactionPickerMsgId(null);
-        } else if (isGifPickerOpen) {
-          setIsGifPickerOpen(false);
-        } else if (isAnimePickerOpen) {
-          setIsAnimePickerOpen(false);
+        } else if (isMediaPickerOpen) {
+          setIsMediaPickerOpen(false);
         } else {
           onClose();
         }
@@ -609,7 +577,7 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [isOpen, enlargedImageUrl, activeReactionPickerMsgId, isGifPickerOpen, isAnimePickerOpen, onClose]);
+  }, [isOpen, enlargedImageUrl, activeReactionPickerMsgId, isMediaPickerOpen, onClose]);
 
   if (!isOpen) return null;
 
@@ -628,14 +596,6 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
           setActiveReactionPickerMsgId(null);
         }}
       >
-        {/* Hidden Image Input */}
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/png,image/jpeg,image/webp,image/gif"
-          className="hidden"
-          onChange={handleImageFileChange}
-        />
 
         {/* Global Modal Header */}
         <div className="flex items-center justify-between border-b border-purple-900/30 px-4 sm:px-6 py-3 shrink-0 bg-[#0e091d]/90">
@@ -1184,30 +1144,26 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                   </div>
                 )}
 
-                {/* Staged Media / Link Preview Bar before sending */}
-                {(pendingMediaUrl || pendingPreview) && (
+                {/* Staged Media Bar before sending */}
+                {pendingMediaUrl && (
                   <div className="p-3 bg-[#130B24] border-t border-purple-900/40 flex items-center justify-between gap-3 animate-in fade-in">
                     <div className="flex items-center gap-3">
-                      {pendingMediaUrl && (
-                        <div className="relative h-14 w-14 rounded-lg overflow-hidden border border-purple-600/50 bg-black/50">
-                          <img
-                            src={pendingMediaUrl}
-                            alt="Prévia anexo"
-                            className="h-full w-full object-cover"
-                          />
-                          {pendingMediaType === 'gif' && (
-                            <span className="absolute bottom-1 right-1 rounded bg-black/80 px-1 text-[8px] font-bold text-white uppercase">
-                              GIF
-                            </span>
-                          )}
-                        </div>
-                      )}
+                      <div className="relative h-14 w-14 rounded-lg overflow-hidden border border-purple-600/50 bg-black/50">
+                        <img
+                          src={pendingMediaUrl}
+                          alt="Prévia anexo"
+                          className="h-full w-full object-cover"
+                        />
+                        {pendingMediaType === 'gif' && (
+                          <span className="absolute bottom-1 right-1 rounded bg-black/80 px-1 text-[8px] font-bold text-white uppercase">
+                            GIF
+                          </span>
+                        )}
+                      </div>
                       <div>
                         <span className="text-xs font-bold text-white block">
                           {pendingMediaType === 'gif'
                             ? `GIF Animado pronto: ${pendingMediaTitle || 'Galeria'}`
-                            : pendingPreview
-                            ? `Card Hikari: ${pendingPreview.title}`
                             : `Imagem pronta: ${pendingMediaTitle || 'Arquivo'}`}
                         </span>
                         <span className="text-[11px] text-purple-300/70">
@@ -1222,7 +1178,6 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                         setPendingMediaUrl(null);
                         setPendingMediaType(null);
                         setPendingMediaTitle(null);
-                        setPendingPreview(null);
                       }}
                       className="rounded-lg p-1 text-purple-400 hover:text-rose-300 cursor-pointer active:scale-90"
                       title="Remover anexo"
@@ -1248,77 +1203,35 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
 
                 {/* Typing / Composition Bar */}
                 <div className="p-3 bg-[#0e091d] border-t border-purple-900/30 relative">
-                  {/* Popovers */}
+                  {/* Popover Unificado de Mídia (Imagens e GIFs) */}
                   <GifPickerPopover
-                    isOpen={isGifPickerOpen}
-                    onClose={() => setIsGifPickerOpen(false)}
-                    onSelectGif={(url, title) => {
+                    isOpen={isMediaPickerOpen}
+                    onClose={() => setIsMediaPickerOpen(false)}
+                    onSelectMedia={(url, type, title) => {
                       setPendingMediaUrl(url);
-                      setPendingMediaType('gif');
+                      setPendingMediaType(type);
                       setPendingMediaTitle(title);
-                      if (!inputText) {
+                      if (!inputText && type === 'gif' && title) {
                         setInputText(title);
                       }
                     }}
                   />
 
-                  <ShareAnimePickerPopover
-                    isOpen={isAnimePickerOpen}
-                    userAnimes={userAnimes}
-                    onClose={() => setIsAnimePickerOpen(false)}
-                    onSelectAnime={(preview) => {
-                      setPendingPreview(preview);
-                    }}
-                  />
-
                   <form onSubmit={handleSendMessage} className="flex items-end gap-2">
-                    {/* Media Action Buttons */}
+                    {/* Media Action Button (Unificado para Imagem e GIF) */}
                     <div className="flex items-center gap-1 pb-1">
-                      {/* Image Upload */}
                       <button
                         type="button"
                         disabled={!privacyCheck.allowed || isSending}
-                        onClick={() => fileInputRef.current?.click()}
-                        className="rounded-xl p-2 text-purple-300 hover:bg-purple-900/40 hover:text-white transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed active:scale-95"
-                        title="Enviar imagem (PNG, JPEG, WebP, GIF)"
+                        onClick={() => setIsMediaPickerOpen(!isMediaPickerOpen)}
+                        className={`rounded-xl p-2 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed active:scale-95 ${
+                          isMediaPickerOpen
+                            ? 'bg-purple-600 text-white shadow-sm'
+                            : 'text-purple-300 hover:bg-purple-900/40 hover:text-white'
+                        }`}
+                        title="Anexar imagem ou GIF animado"
                       >
                         <ImageIcon className="h-4 w-4" />
-                      </button>
-
-                      {/* GIF Selector (Curated + Mobile Gallery + PC Upload) */}
-                      <button
-                        type="button"
-                        disabled={!privacyCheck.allowed || isSending}
-                        onClick={() => {
-                          setIsAnimePickerOpen(false);
-                          setIsGifPickerOpen(!isGifPickerOpen);
-                        }}
-                        className={`rounded-xl p-2 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed active:scale-95 ${
-                          isGifPickerOpen
-                            ? 'bg-purple-600 text-white'
-                            : 'text-purple-300 hover:bg-purple-900/40 hover:text-white'
-                        }`}
-                        title="Reações em GIF e galeria"
-                      >
-                        <Sparkles className="h-4 w-4" />
-                      </button>
-
-                      {/* Share Anime Card */}
-                      <button
-                        type="button"
-                        disabled={!privacyCheck.allowed || isSending}
-                        onClick={() => {
-                          setIsGifPickerOpen(false);
-                          setIsAnimePickerOpen(!isAnimePickerOpen);
-                        }}
-                        className={`rounded-xl p-2 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed active:scale-95 ${
-                          isAnimePickerOpen
-                            ? 'bg-purple-600 text-white'
-                            : 'text-purple-300 hover:bg-purple-900/40 hover:text-white'
-                        }`}
-                        title="Compartilhar Card de Anime Hikari"
-                      >
-                        <Film className="h-4 w-4" />
                       </button>
                     </div>
 
@@ -1345,7 +1258,7 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                       disabled={
                         !privacyCheck.allowed ||
                         isSending ||
-                        (!inputText.trim() && !pendingMediaUrl && !pendingPreview)
+                        (!inputText.trim() && !pendingMediaUrl)
                       }
                       className="rounded-xl bg-purple-600 hover:bg-purple-500 disabled:bg-neutral-800 disabled:text-neutral-500 text-white p-2.5 transition-all shadow-md shadow-purple-950 cursor-pointer disabled:cursor-not-allowed shrink-0 active:scale-95"
                       title="Enviar mensagem (Enter)"

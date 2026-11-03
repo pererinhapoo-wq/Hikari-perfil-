@@ -19,7 +19,8 @@ import {
   XCircle,
   MessageSquare,
   Camera,
-  Shield
+  Shield,
+  UserSearch
 } from 'lucide-react';
 import { UserProfile, NotificationItem, AnimeItem, AUTHORIZED_ADMIN_UID } from '../types';
 import { HikariEternalBadge } from './badge/HikariEternalBadge';
@@ -52,6 +53,7 @@ interface HeaderProps {
   onOpenMessages?: () => void;
   unreadMessagesCount?: number;
   onOpenAdminPanel?: () => void;
+  onOpenProfileSearch?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = React.memo(({
@@ -80,10 +82,27 @@ export const Header: React.FC<HeaderProps> = React.memo(({
   onOpenMessages,
   unreadMessagesCount = 0,
   onOpenAdminPanel,
+  onOpenProfileSearch,
 }) => {
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+
+  // Global shortcut (Cmd+K / Ctrl+K) to open exclusive profile search
+  useEffect(() => {
+    if (!onOpenProfileSearch) return;
+    function handleKeyDown(event: KeyboardEvent) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setIsUserMenuOpen(false);
+        setIsSearchOpen(false);
+        onToggleNotif(false);
+        onOpenProfileSearch?.();
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [onOpenProfileSearch, onToggleNotif]);
 
   const userMenuRef = useRef<HTMLDivElement>(null);
   const userMenuDropdownRef = useRef<HTMLDivElement>(null);
@@ -357,6 +376,32 @@ export const Header: React.FC<HeaderProps> = React.memo(({
           </button>
         </div>
 
+        {/* Exclusive Profile Search Trigger Button (Desktop) with Distinct Visual Identity */}
+        {onOpenProfileSearch && (
+          <button
+            type="button"
+            onClick={() => {
+              setIsUserMenuOpen(false);
+              setIsSearchOpen(false);
+              onToggleNotif(false);
+              onOpenProfileSearch();
+            }}
+            className="group relative hidden sm:flex items-center gap-2 rounded-xl border border-purple-500/50 bg-gradient-to-r from-[#170b30]/90 via-[#230f4a]/90 to-[#170b30]/90 hover:border-purple-400 hover:from-[#220f45] hover:to-[#220f45] px-3.5 py-2 text-xs font-medium text-purple-200 shadow-md shadow-purple-950/60 ring-1 ring-purple-500/20 hover:ring-purple-400/40 transition-all cursor-pointer whitespace-nowrap shrink-0"
+            title="Buscar perfis exclusivos da comunidade (⌘K)"
+            aria-label="Buscar Perfis de Usuários"
+          >
+            <div className="flex h-5 w-5 items-center justify-center rounded-lg bg-purple-600/30 border border-purple-400/30 text-purple-200 group-hover:bg-purple-600/50 group-hover:text-white transition-all shadow-[0_0_8px_rgba(168,85,247,0.3)]">
+              <UserSearch className="h-3.5 w-3.5" />
+            </div>
+            <span className="font-semibold text-purple-100 group-hover:text-white transition-colors">
+              Buscar Perfis
+            </span>
+            <kbd className="hidden lg:inline-flex items-center gap-0.5 rounded border border-purple-600/40 bg-purple-950/90 px-1.5 py-0.5 font-mono text-[10px] text-purple-300">
+              ⌘K
+            </kbd>
+          </button>
+        )}
+
         {/* Zone 2: Search */}
         <div ref={searchRef} className="relative hidden flex-1 max-w-md md:block">
           <div className="relative flex items-center">
@@ -440,6 +485,23 @@ export const Header: React.FC<HeaderProps> = React.memo(({
 
         {/* Zone 3: Actions & Connected User */}
         <div className="flex items-center gap-3">
+          {/* Mobile Profile Search Button (Distinct identity) */}
+          {onOpenProfileSearch && (
+            <button
+              type="button"
+              onClick={() => {
+                setIsUserMenuOpen(false);
+                setIsSearchOpen(false);
+                onToggleNotif(false);
+                onOpenProfileSearch();
+              }}
+              className="sm:hidden relative flex h-9 w-9 items-center justify-center rounded-xl border border-purple-500/50 bg-[#160b2d] text-purple-200 hover:border-purple-400 hover:bg-purple-900/30 hover:text-white shadow-[0_0_10px_rgba(168,85,247,0.2)] focus:outline-none cursor-pointer"
+              aria-label="Buscar Perfis de Usuários"
+              title="Buscar Perfis"
+            >
+              <UserSearch className="h-4 w-4 text-purple-300" />
+            </button>
+          )}
           {!isAuthenticated && onOpenAuth && (
             <button
               type="button"

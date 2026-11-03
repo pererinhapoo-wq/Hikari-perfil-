@@ -48,6 +48,7 @@ const LazyPrivateChatModal = lazy(() =>
 const LazyFollowersModal = lazy(() =>
   import('./components/modals/FollowersModal').then((m) => ({ default: m.FollowersModal }))
 );
+import { ProfileSearchModal } from './components/modals/ProfileSearchModal';
 import { 
   UserProfile, 
   ProfileTab, 
@@ -416,6 +417,7 @@ export default function App() {
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatRecipientId, setChatRecipientId] = useState<string | null>(null);
   const [unreadMessagesCount, setUnreadMessagesCount] = useState(0);
+  const [isProfileSearchOpen, setIsProfileSearchOpen] = useState(false);
 
   // Highlight state for direct notification navigation
   const [highlightedCommentId, setHighlightedCommentId] = useState<string | undefined>(undefined);
@@ -1160,18 +1162,30 @@ export default function App() {
       setSelectedAnimeStatusFilter(undefined);
       setSelectedAnimeDetailId(null);
       if (isAuthenticated && user) {
-        if (userId === user.uid || !authOtherProfilesMap[userId]) {
+        if (userId === user.uid) {
           setActiveProfileId(user.uid);
         } else {
           setActiveProfileId(userId);
         }
         setActiveTab('overview');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
         return;
       }
+
+      if (!isAuthenticated && userId !== CURRENT_USER.id && !demoOtherProfiles[userId]) {
+        if (OTHER_USERS[userId]) {
+          setDemoOtherProfiles((prev) => ({
+            ...prev,
+            [userId]: OTHER_USERS[userId],
+          }));
+        }
+      }
+
       setActiveProfileId(userId);
       setActiveTab('overview');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     },
-    [isAuthenticated, user, authOtherProfilesMap]
+    [isAuthenticated, user, demoOtherProfiles]
   );
 
   // Handler: Open filtered Anime List from clickable Anime Stats status rows
@@ -2191,6 +2205,7 @@ export default function App() {
     setHasOpenedSettings(false);
     setIsFollowersOpen(false);
     setIsNotifOpen(false);
+    setIsProfileSearchOpen(false);
     setIsDemoPreview(false);
     setAuthInitialMode('login');
     setSelectedAnimeStatusFilter(undefined);
@@ -2634,6 +2649,7 @@ export default function App() {
         unreadMessagesCount={unreadMessagesCount}
         onOpenAdminPanel={handleNavigateToAdmin}
         onOpenAuth={!isAuthenticated ? handleOpenAuthFromHeader : undefined}
+        onOpenProfileSearch={() => setIsProfileSearchOpen(true)}
       />
 
       {/* Main Container */}
@@ -2876,6 +2892,19 @@ export default function App() {
           />
         </Suspense>
       )}
+
+      {/* Exclusive Profile Search Modal */}
+      <ProfileSearchModal
+        isOpen={isProfileSearchOpen}
+        onClose={() => setIsProfileSearchOpen(false)}
+        onSelectProfile={(userId) => {
+          setIsProfileSearchOpen(false);
+          handleSelectProfile(userId);
+        }}
+        currentUser={currentUser}
+        otherProfiles={isAuthenticated ? authOtherProfilesMap : demoOtherProfiles}
+        searchableProfiles={searchableProfiles}
+      />
     </div>
   );
 }

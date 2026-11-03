@@ -172,6 +172,32 @@ export const OTHER_USERS: Record<string, UserProfile> = {
       anilist: { connected: false },
       mal: { connected: false }
     }
+  },
+  'usr_mateus': {
+    id: 'usr_mateus',
+    username: 'mateus_silva',
+    displayName: 'Mateus Silva',
+    avatarUrl: '',
+    bannerUrl: '/src/assets/images/hikari_profile_banner_1793518804213.jpg',
+    bio: 'Entusiasta de animes clássicos, animação moderna e trilhas sonoras orquestrais.',
+    createdAt: '14 de março de 2024',
+    createdAtTimestamp: 1710374400000,
+    followersCount: 342,
+    followingCount: 118,
+    isPrivate: false,
+    showCommentsOnProfile: true,
+    privacySettings: {
+      showAnimeList: true,
+      showFavorites: true,
+      showActivity: true,
+      showCommentsOnProfile: true,
+      allowDirectMessages: true,
+      directMessagesFrom: 'everyone'
+    },
+    externalAccounts: {
+      anilist: { connected: false },
+      mal: { connected: false }
+    }
   }
 };
 
