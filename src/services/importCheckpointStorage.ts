@@ -93,7 +93,7 @@ export function getRemoteCheckpointDocPath(
   const cleanAcc = account
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9_]/g, '_');
+    .replace(/[^a-z0-9_-]/g, '_');
   const docId = `${provider}_${cleanAcc}`;
   const collectionPath = `users/${cleanProfile}/import_checkpoints`;
   return {

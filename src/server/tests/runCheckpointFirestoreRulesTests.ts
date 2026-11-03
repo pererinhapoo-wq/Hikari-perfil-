@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { getRemoteCheckpointDocPath } from '../../services/importCheckpointStorage';
 
 interface TestReportItem {
   id: number;
@@ -62,6 +63,37 @@ class FirestoreRulesSimulator {
       if (!(k in data)) return false;
     }
 
+    // Whitelist estrita de campos permitidos (hasOnly)
+    const allowedKeys = new Set([
+      'provider',
+      'accountIdentifier',
+      'profileId',
+      'status',
+      'version',
+      'cursor',
+      'updatedAtMs',
+      'page',
+      'recordsReceived',
+      'recordsProcessed',
+      'recordsConfirmed',
+      'recordsPersisted',
+      'addedCount',
+      'updatedCount',
+      'unchangedCount',
+      'preservedFieldsCount',
+      'totalEstimated',
+      'lastConfirmedCheckpoint',
+      'lastConfirmedPoint',
+      'lastUpdated',
+      'errorMessage',
+      'lastError',
+      'storageSource',
+      'storageError',
+    ]);
+    for (const k of Object.keys(data)) {
+      if (!allowedKeys.has(k)) return false;
+    }
+
     if (data.provider !== 'mal' && data.provider !== 'anilist') return false;
 
     // Coerência com checkpointId
@@ -69,7 +101,11 @@ class FirestoreRulesSimulator {
     if (data.provider === 'anilist' && !/^anilist_[a-zA-Z0-9_\-]+$/.test(checkpointId)) return false;
 
     if (typeof data.profileId !== 'string' || data.profileId !== userId) return false;
-    if (typeof data.accountIdentifier !== 'string' || data.accountIdentifier.length < 1 || data.accountIdentifier.length > 128) return false;
+    if (typeof data.accountIdentifier !== 'string' || data.accountIdentifier.length < 1) return false;
+
+    // Limites exatos do identificador para nunca estourar os 128 caracteres do checkpointId
+    if (data.provider === 'mal' && data.accountIdentifier.length > 124) return false;
+    if (data.provider === 'anilist' && data.accountIdentifier.length > 120) return false;
 
     const validStatuses = ['idle', 'in_progress', 'paused', 'error', 'completed'];
     if (typeof data.status !== 'string' || !validStatuses.includes(data.status)) return false;
@@ -476,11 +512,157 @@ async function runTests() {
     recordTest(16, 'Regressões em regras existentes', false, String(err));
   }
 
+  // TEST 17: Whitelist estrita (hasOnly) bloqueia campos arbitrários e desconhecidos
+  try {
+    const unknownFieldPayload = { ...validMALPayload, arbitraryInjectedField: 'dangerous_data' };
+    const resUnknown = simulator.evaluate({
+      authUid: ownerUid,
+      docPath: `/users/${ownerUid}/import_checkpoints/${malDocId}`,
+      operation: 'create',
+      incomingData: unknownFieldPayload,
+    });
+    const codeVerifierPayload = { ...validMALPayload, codeVerifier: 'secret_oauth_verifier' };
+    const resVerifier = simulator.evaluate({
+      authUid: ownerUid,
+      docPath: `/users/${ownerUid}/import_checkpoints/${malDocId}`,
+      operation: 'create',
+      incomingData: codeVerifierPayload,
+    });
+    const hasOnlyInRules = rulesContent.includes('data.keys().hasOnly([');
+    const pass = !resUnknown.allowed && !resVerifier.allowed && hasOnlyInRules;
+    recordTest(17, 'Whitelist estrita (hasOnly) bloqueia campos desconhecidos', pass, `Campos arbitrários (arbitraryInjectedField, codeVerifier) bloqueados e hasOnly presente em firestore.rules`);
+  } catch (err) {
+    recordTest(17, 'Whitelist estrita bloqueia campos desconhecidos', false, String(err));
+  }
+
+  // TEST 18: Limites do accountIdentifier respeitam teto de 128 chars do checkpointId
+  try {
+    // Para MAL: prefixo 'mal_' (4 chars). Máximo accountIdentifier = 124 (total = 128)
+    const mal124 = 'a'.repeat(124);
+    const mal124DocId = `mal_${mal124}`;
+    const resMAL124 = simulator.evaluate({
+      authUid: ownerUid,
+      docPath: `/users/${ownerUid}/import_checkpoints/${mal124DocId}`,
+      operation: 'create',
+      incomingData: { ...validMALPayload, accountIdentifier: mal124 },
+    });
+
+    const mal125 = 'a'.repeat(125);
+    const mal125DocId = `mal_${mal125}`;
+    const resMAL125 = simulator.evaluate({
+      authUid: ownerUid,
+      docPath: `/users/${ownerUid}/import_checkpoints/${mal125DocId}`,
+      operation: 'create',
+      incomingData: { ...validMALPayload, accountIdentifier: mal125 },
+    });
+
+    // Para AniList: prefixo 'anilist_' (8 chars). Máximo accountIdentifier = 120 (total = 128)
+    const anilist120 = 'b'.repeat(120);
+    const anilist120DocId = `anilist_${anilist120}`;
+    const resAniList120 = simulator.evaluate({
+      authUid: ownerUid,
+      docPath: `/users/${ownerUid}/import_checkpoints/${anilist120DocId}`,
+      operation: 'create',
+      incomingData: { ...validMALPayload, provider: 'anilist', accountIdentifier: anilist120 },
+    });
+
+    const anilist121 = 'b'.repeat(121);
+    const anilist121DocId = `anilist_${anilist121}`;
+    const resAniList121 = simulator.evaluate({
+      authUid: ownerUid,
+      docPath: `/users/${ownerUid}/import_checkpoints/${anilist121DocId}`,
+      operation: 'create',
+      incomingData: { ...validMALPayload, provider: 'anilist', accountIdentifier: anilist121 },
+    });
+
+    const rulesBounds = rulesContent.includes('data.accountIdentifier.size() <= 124') &&
+                        rulesContent.includes('data.accountIdentifier.size() <= 120');
+
+    const pass = resMAL124.allowed && !resMAL125.allowed && resAniList120.allowed && !resAniList121.allowed && rulesBounds;
+    recordTest(18, 'Limites do accountIdentifier respeitam teto de 128 chars', pass, `MAL aceita até 124 chars (total 128) e AniList até 120 chars (total 128). Estouro rejeitado`);
+  } catch (err) {
+    recordTest(18, 'Limites do accountIdentifier', false, String(err));
+  }
+
+  // TEST 19: Payload real sanitizado produzido pelo serviço é aceito
+  try {
+    const realServicePayload: Record<string, unknown> = {
+      version: 2,
+      provider: 'mal',
+      accountIdentifier: 'otaku_pro',
+      profileId: ownerUid,
+      cursor: 1000,
+      page: 2,
+      totalEstimated: 2500,
+      recordsReceived: 1000,
+      recordsProcessed: 1000,
+      recordsConfirmed: 1000,
+      recordsPersisted: 1000,
+      addedCount: 800,
+      updatedCount: 200,
+      unchangedCount: 0,
+      preservedFieldsCount: 0,
+      status: 'in_progress',
+      lastConfirmedCheckpoint: 1700000000000,
+      lastConfirmedPoint: 'offset_1000',
+      lastUpdated: new Date().toISOString(),
+      updatedAtMs: 1700000000000,
+      errorMessage: null,
+      lastError: null,
+    };
+    const resReal = simulator.evaluate({
+      authUid: ownerUid,
+      docPath: `/users/${ownerUid}/import_checkpoints/${malDocId}`,
+      operation: 'create',
+      incomingData: realServicePayload,
+    });
+    recordTest(19, 'Payload real sanitizado do serviço é compatível', resReal.allowed, `Todos os 22 campos padrão gerados por sanitizeCheckpointForStorage são aceitos`);
+  } catch (err) {
+    recordTest(19, 'Payload real sanitizado do serviço é compatível', false, String(err));
+  }
+
+  // TEST 20: Prevenção de colisão de IDs entre contas com hífen e underscore (ex: foo-bar vs foo_bar)
+  try {
+    const p1 = getRemoteCheckpointDocPath(ownerUid, 'mal', 'foo-bar');
+    const p2 = getRemoteCheckpointDocPath(ownerUid, 'mal', 'foo_bar');
+    const p3 = getRemoteCheckpointDocPath(ownerUid, 'mal', 'foo.bar');
+    const p4 = getRemoteCheckpointDocPath(ownerUid, 'mal', 'user@name');
+
+    const t1 = p1.docId === 'mal_foo-bar';
+    const t2 = p2.docId === 'mal_foo_bar';
+    const t3 = p1.docId !== p2.docId;
+    const t4 = p3.docId === 'mal_foo_bar' && p4.docId === 'mal_user_name';
+
+    // Compatibilidade com as regras do Firestore
+    const resHyphen = simulator.evaluate({
+      authUid: ownerUid,
+      docPath: `/users/${ownerUid}/import_checkpoints/${p1.docId}`,
+      operation: 'create',
+      incomingData: { ...validMALPayload, accountIdentifier: 'foo-bar' },
+    });
+    const resUnderscore = simulator.evaluate({
+      authUid: ownerUid,
+      docPath: `/users/${ownerUid}/import_checkpoints/${p2.docId}`,
+      operation: 'create',
+      incomingData: { ...validMALPayload, accountIdentifier: 'foo_bar' },
+    });
+
+    const pass = t1 && t2 && t3 && t4 && resHyphen.allowed && resUnderscore.allowed;
+    recordTest(
+      20,
+      'Prevenção de colisão entre contas com hífen e underscore',
+      pass,
+      `"foo-bar" -> "${p1.docId}", "foo_bar" -> "${p2.docId}" (IDs distintos). Regras aceitam ambos e caracteres inválidos viram _`
+    );
+  } catch (err) {
+    recordTest(20, 'Prevenção de colisão entre contas com hífen e underscore', false, String(err));
+  }
+
   console.log('\n========================================================================');
   const allPassed = testResults.every((t) => t.passed);
   const passedCount = testResults.filter((t) => t.passed).length;
   console.log(`RESULTADO DA ETAPA 4.1: ${passedCount}/${testResults.length} TESTES PASSARAM`);
-  console.log(`STATUS GERAL: ${allPassed ? '✅ ETAPA 4.1 VALIDADA COM SUCESSO (TODOS OS 16 TESTES APROVADOS)' : '❌ FALHAS DETECTADAS'}`);
+  console.log(`STATUS GERAL: ${allPassed ? `✅ ETAPA 4.1 VALIDADA COM SUCESSO (TODOS OS ${testResults.length} TESTES APROVADOS)` : '❌ FALHAS DETECTADAS'}`);
   console.log('========================================================================');
 
   if (!allPassed) {

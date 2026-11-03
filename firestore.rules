@@ -228,13 +228,39 @@ service cloud.firestore {
           'cursor',
           'updatedAtMs'
         ])
+        && data.keys().hasOnly([
+          'provider',
+          'accountIdentifier',
+          'profileId',
+          'status',
+          'version',
+          'cursor',
+          'updatedAtMs',
+          'page',
+          'recordsReceived',
+          'recordsProcessed',
+          'recordsConfirmed',
+          'recordsPersisted',
+          'addedCount',
+          'updatedCount',
+          'unchangedCount',
+          'preservedFieldsCount',
+          'totalEstimated',
+          'lastConfirmedCheckpoint',
+          'lastConfirmedPoint',
+          'lastUpdated',
+          'errorMessage',
+          'lastError',
+          'storageSource',
+          'storageError'
+        ])
         && data.provider in ['mal', 'anilist']
         && ((data.provider == 'mal' && checkpointId.matches('^mal_[a-zA-Z0-9_\\-]+$')) || (data.provider == 'anilist' && checkpointId.matches('^anilist_[a-zA-Z0-9_\\-]+$')))
         && data.profileId is string
         && data.profileId == userId
         && data.accountIdentifier is string
         && data.accountIdentifier.size() >= 1
-        && data.accountIdentifier.size() <= 128
+        && ((data.provider == 'mal' && data.accountIdentifier.size() <= 124) || (data.provider == 'anilist' && data.accountIdentifier.size() <= 120))
         && data.status in ['idle', 'in_progress', 'paused', 'error', 'completed']
         && data.version is int
         && data.version >= 1
@@ -259,7 +285,6 @@ service cloud.firestore {
         && (!('lastError' in data) || data.lastError == null || (data.lastError is string && data.lastError.size() <= 2000))
         && (!('storageSource' in data) || data.storageSource in ['local', 'remote', 'reconciled', 'memory'])
         && (!('storageError' in data) || data.storageError == null || (data.storageError is string && data.storageError.size() <= 2000))
-        && (!('deviceId' in data) || (data.deviceId is string && data.deviceId.size() <= 128))
         && !('idToken' in data)
         && !('accessToken' in data)
         && !('refreshToken' in data)
