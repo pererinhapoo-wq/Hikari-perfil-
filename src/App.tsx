@@ -116,6 +116,15 @@ import {
   migrateAnimeListProvenance,
   markAnimeLocallyModified,
 } from './utils/animeProvenance';
+import {
+  pruneAnimesOnDisconnect,
+  type DisconnectPruneResult,
+} from './utils/animeDisconnection';
+import {
+  saveAllAnimesToChunkedFirestore,
+  clearChunkedStorageMemoryCache,
+} from './lib/chunkedAnimeStorage';
+import { saveAnimesToIndexedDb } from './lib/indexedDbStorage';
 
 const DEMO_PROFILE_STORAGE_KEY = 'hikari_profile_user_data_v1';
 
@@ -2196,6 +2205,134 @@ export default function App() {
     [isAuthenticated, currentUser.id, demoProfile, updateAuthWorkspace]
   );
 
+  // Handler: Desconectar AniList e remover animes importados exclusivamente da conta
+  const handleDisconnectAniList = useCallback(
+    (prunedAnimes: AnimeItem[], audit: DisconnectPruneResult) => {
+      const actionNow = Date.now();
+      const disconnectActivity: UserActivity = {
+        id: `act_${actionNow}_anilist_disconnect`,
+        type: 'status_changed',
+        title: 'Desconectou a conta do AniList',
+        description: `${audit.removedCount} animes importados foram removidos da coleção`,
+        timestamp: 'Agora',
+        createdAtTimestamp: actionNow,
+      };
+
+      if (isAuthenticated && user?.uid) {
+        const uid = user.uid;
+        updateAuthWorkspace((prev) => {
+          const prevAccounts = prev.profileOverrides.externalAccounts ?? {
+            anilist: { connected: false },
+            mal: { connected: false },
+          };
+          const nextExternalAccounts: UserProfile['externalAccounts'] = {
+            ...prevAccounts,
+            anilist: { connected: false },
+          };
+          return {
+            ...prev,
+            animes: prunedAnimes,
+            profileOverrides: {
+              ...prev.profileOverrides,
+              externalAccounts: nextExternalAccounts,
+            },
+            activities: [disconnectActivity, ...prev.activities],
+          };
+        });
+        void saveAllAnimesToChunkedFirestore(uid, prunedAnimes);
+        void saveAnimesToIndexedDb(uid, prunedAnimes);
+        clearChunkedStorageMemoryCache(uid);
+        invalidateAllAnimeCategories(uid);
+        invalidateActivitiesCache(uid);
+        return;
+      }
+
+      // Modo demonstração
+      const prevDemoAccounts = demoProfile.externalAccounts ?? {
+        anilist: { connected: false },
+        mal: { connected: false },
+      };
+      const nextDemoProfile: UserProfile = {
+        ...demoProfile,
+        externalAccounts: {
+          ...prevDemoAccounts,
+          anilist: { connected: false },
+        },
+      };
+      invalidateAllAnimeCategories(currentUser.id);
+      invalidateActivitiesCache(currentUser.id);
+      setDemoProfile(nextDemoProfile);
+      setDemoAnimes(prunedAnimes);
+      void saveAnimesToIndexedDb(CURRENT_USER.id, prunedAnimes);
+      setDemoActivities((prev) => [disconnectActivity, ...prev]);
+    },
+    [isAuthenticated, user?.uid, demoProfile, currentUser.id, updateAuthWorkspace]
+  );
+
+  // Handler: Desconectar MyAnimeList e remover animes importados exclusivamente da conta
+  const handleDisconnectMAL = useCallback(
+    (prunedAnimes: AnimeItem[], audit: DisconnectPruneResult) => {
+      const actionNow = Date.now();
+      const disconnectActivity: UserActivity = {
+        id: `act_${actionNow}_mal_disconnect`,
+        type: 'status_changed',
+        title: 'Desconectou a conta do MyAnimeList',
+        description: `${audit.removedCount} animes importados foram removidos da coleção`,
+        timestamp: 'Agora',
+        createdAtTimestamp: actionNow,
+      };
+
+      if (isAuthenticated && user?.uid) {
+        const uid = user.uid;
+        updateAuthWorkspace((prev) => {
+          const prevAccounts = prev.profileOverrides.externalAccounts ?? {
+            anilist: { connected: false },
+            mal: { connected: false },
+          };
+          const nextExternalAccounts: UserProfile['externalAccounts'] = {
+            ...prevAccounts,
+            mal: { connected: false },
+          };
+          return {
+            ...prev,
+            animes: prunedAnimes,
+            profileOverrides: {
+              ...prev.profileOverrides,
+              externalAccounts: nextExternalAccounts,
+            },
+            activities: [disconnectActivity, ...prev.activities],
+          };
+        });
+        void saveAllAnimesToChunkedFirestore(uid, prunedAnimes);
+        void saveAnimesToIndexedDb(uid, prunedAnimes);
+        clearChunkedStorageMemoryCache(uid);
+        invalidateAllAnimeCategories(uid);
+        invalidateActivitiesCache(uid);
+        return;
+      }
+
+      // Modo demonstração
+      const prevDemoAccounts = demoProfile.externalAccounts ?? {
+        anilist: { connected: false },
+        mal: { connected: false },
+      };
+      const nextDemoProfile: UserProfile = {
+        ...demoProfile,
+        externalAccounts: {
+          ...prevDemoAccounts,
+          mal: { connected: false },
+        },
+      };
+      invalidateAllAnimeCategories(currentUser.id);
+      invalidateActivitiesCache(currentUser.id);
+      setDemoProfile(nextDemoProfile);
+      setDemoAnimes(prunedAnimes);
+      void saveAnimesToIndexedDb(CURRENT_USER.id, prunedAnimes);
+      setDemoActivities((prev) => [disconnectActivity, ...prev]);
+    },
+    [isAuthenticated, user?.uid, demoProfile, currentUser.id, updateAuthWorkspace]
+  );
+
   // Real Logout handler: wipes personal memory immediately, terminates Firebase Auth session and returns to login screen
   const handleLogout = useCallback(async () => {
     pendingAdminReturnRef.current = false;
@@ -2862,6 +2999,8 @@ export default function App() {
             onUnblockUser={handleBlockToggle}
             onSyncAniList={handleSyncAniList}
             onSyncMAL={handleSyncMAL}
+            onDisconnectAniList={handleDisconnectAniList}
+            onDisconnectMAL={handleDisconnectMAL}
             onClose={handleCloseSettings}
             onSaveProfile={handleSaveProfile}
             onUpdateAvatar={handleUpdateAvatar}

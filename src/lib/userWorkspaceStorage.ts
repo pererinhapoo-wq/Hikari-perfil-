@@ -240,7 +240,13 @@ export function flushPendingWorkspaceStorageWrites(): void {
 }
 
 function ensureLifecycleListeners(): void {
-  if (lifecycleListenersAttached || typeof window === 'undefined') return;
+  if (
+    lifecycleListenersAttached ||
+    typeof window === 'undefined' ||
+    typeof window.addEventListener !== 'function'
+  ) {
+    return;
+  }
   lifecycleListenersAttached = true;
 
   const handleFlush = () => {
@@ -692,10 +698,8 @@ export function writeLocalUserWorkspace(
     dirty: true,
   });
 
-  // Gravação assíncrona no IndexedDB para contingência offline de grandes volumes sem limites de 5 MiB
-  if (normalized.animes.length > 0) {
-    void saveAnimesToIndexedDb(cleanUid, normalized.animes);
-  }
+  // Gravação assíncrona no IndexedDB para contingência offline (sempre atualiza para que remoções reflitam em cache)
+  void saveAnimesToIndexedDb(cleanUid, normalized.animes);
   if (normalized.activities.length > 0) {
     void saveActivitiesToIndexedDb(cleanUid, normalized.activities);
   }
@@ -723,7 +727,7 @@ export function writeLocalUserWorkspace(
   return normalized;
 }
 
-function stripUndefinedDeep<T>(value: T): T {
+export function stripUndefinedDeep<T>(value: T): T {
   if (Array.isArray(value)) {
     return value.map((item) => stripUndefinedDeep(item)) as unknown as T;
   }
@@ -1057,6 +1061,8 @@ async function performFirestoreBatchCommit(
 
     metricsFirestoreBatchCommits++;
     await batch.commit();
+
+    void saveAllAnimesToChunkedFirestore(cleanUid, workspace.animes);
 
     remoteDocMetaByUid.set(cleanUid, {
       userDocExists: true,

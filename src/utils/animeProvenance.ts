@@ -238,3 +238,10 @@ export function mergeAnimeProvenanceOnImport(
 
   return updated;
 }
+
+export {
+  identifyAnimeProviderAffinity,
+  pruneAnimesOnDisconnect,
+  type DisconnectPruneResult,
+  type AnimeProviderAffinity,
+} from './animeDisconnection';

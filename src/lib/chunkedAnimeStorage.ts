@@ -7,7 +7,7 @@ import {
 } from 'firebase/firestore';
 import { db, firebaseConfigStatus } from './firebase';
 import type { AnimeItem, AnimeStatus } from '../types';
-import type { FirestoreSyncStatus } from './userWorkspaceStorage';
+import { stripUndefinedDeep, type FirestoreSyncStatus } from './userWorkspaceStorage';
 import { computeAnimeStatusCounts } from '../utils/animeStats';
 
 /**
@@ -287,20 +287,50 @@ export async function saveAllAnimesToChunkedFirestore(
     let currentBatch = writeBatch(db);
     let opCount = 0;
 
+    // Identifica chunks anteriores para remover blocos que ficaram obsoletos nesta gravação
+    let prevChunkIds: string[] = [];
+    const cachedManifest = manifestMemoryCache.get(cleanUid)?.manifest;
+    if (cachedManifest && Array.isArray(cachedManifest.chunkIds)) {
+      prevChunkIds = cachedManifest.chunkIds;
+    } else {
+      try {
+        const manifestRef = doc(db, 'users', cleanUid, 'anime_storage', 'manifest');
+        const snap = await getDoc(manifestRef);
+        if (snap.exists()) {
+          const mData = snap.data();
+          if (Array.isArray(mData?.chunkIds)) {
+            prevChunkIds = mData.chunkIds as string[];
+          }
+        }
+      } catch {
+        // fallback seguro
+      }
+    }
+
+    const newChunkIdsSet = new Set(chunkIds);
+    for (const oldChunkId of prevChunkIds) {
+      if (!newChunkIdsSet.has(oldChunkId)) {
+        const obsoleteChunkRef = doc(db, 'users', cleanUid, 'anime_chunks', oldChunkId);
+        currentBatch.delete(obsoleteChunkRef);
+        opCount++;
+      }
+    }
+
     for (let idx = 0; idx < chunks.length; idx++) {
       const chunkId = chunkIds[idx];
       const chunkRef = doc(db, 'users', cleanUid, 'anime_chunks', chunkId);
+      const sanitizedAnimes = stripUndefinedDeep(chunks[idx]);
       const chunkDoc: AnimeChunkDocument = {
         ownerUid: cleanUid,
         chunkId,
         chunkIndex: idx,
-        animes: chunks[idx],
-        count: chunks[idx].length,
+        animes: sanitizedAnimes,
+        count: sanitizedAnimes.length,
         updatedAtMs: nowMs,
       };
 
       currentBatch.set(chunkRef, {
-        ...chunkDoc,
+        ...stripUndefinedDeep(chunkDoc),
         updatedAt: serverTimestamp(),
       });
       storageMetrics.chunkWrites++;
@@ -338,7 +368,7 @@ export async function saveAllAnimesToChunkedFirestore(
     };
 
     currentBatch.set(manifestRef, {
-      ...manifestDoc,
+      ...stripUndefinedDeep(manifestDoc),
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -353,6 +383,15 @@ export async function saveAllAnimesToChunkedFirestore(
     if (code === 'permission-denied') return 'permission_denied';
     return 'error';
   }
+}
+
+/**
+ * Remove todos os blocos de animes e zera o manifesto no Firestore particionado.
+ */
+export async function clearAllChunkedAnimesFromFirestore(
+  userId: string
+): Promise<FirestoreSyncStatus> {
+  return saveAllAnimesToChunkedFirestore(userId, []);
 }
 
 /**
@@ -435,7 +474,7 @@ export async function updateSingleAnimeInChunkedFirestore(
   const targetChunkRef = doc(db, 'users', cleanUid, 'anime_chunks', targetChunkId);
 
   batch.update(targetChunkRef, {
-    animes: updatedChunkList,
+    animes: stripUndefinedDeep(updatedChunkList),
     updatedAtMs: nowMs,
     updatedAt: serverTimestamp(),
   });

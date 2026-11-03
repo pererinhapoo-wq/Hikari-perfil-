@@ -1018,7 +1018,9 @@ export function calculateAniListImportPreview(
       matchedExistingIds.add(matched.id);
       const changes: AniListDiffChange[] = [];
 
-      if (matched.status !== incoming.status) {
+      const hasUserModifications = Boolean(matched.provenance?.hasUserModifications);
+
+      if (!hasUserModifications && matched.status !== incoming.status) {
         changes.push({
           field: 'status',
           label: 'Status',
@@ -1027,7 +1029,7 @@ export function calculateAniListImportPreview(
         });
       }
 
-      if (matched.currentEpisode !== incoming.currentEpisode) {
+      if (!hasUserModifications && matched.currentEpisode !== incoming.currentEpisode) {
         changes.push({
           field: 'currentEpisode',
           label: 'Episódios',
@@ -1039,7 +1041,7 @@ export function calculateAniListImportPreview(
       const incomingRating = normalizeAniListScore(incoming.rating);
       const existingRating = normalizeAniListScore(matched.rating);
 
-      if (existingRating !== incomingRating) {
+      if (!hasUserModifications && existingRating !== incomingRating) {
         changes.push({
           field: 'rating',
           label: 'Nota',
@@ -1185,7 +1187,9 @@ export function mergeAniListImport(
         preservedFieldsCount++;
       }
 
-      if (updateExistingProgress) {
+      const hasUserModifications = Boolean(currentEntry.provenance?.hasUserModifications);
+
+      if (updateExistingProgress && !hasUserModifications) {
         if (currentEntry.status !== incoming.status) {
           updatedItem.status = incoming.status;
           changed = true;
@@ -1206,6 +1210,17 @@ export function mergeAniListImport(
         }
         if (incoming.rewatchCount && currentEntry.rewatchCount !== incoming.rewatchCount) {
           updatedItem.rewatchCount = incoming.rewatchCount;
+          changed = true;
+        }
+        if (incoming.episodeDurationMinutes && !currentEntry.episodeDurationMinutes) {
+          updatedItem.episodeDurationMinutes = incoming.episodeDurationMinutes;
+        }
+      } else if (hasUserModifications) {
+        // Preserva status, episódio atual e nota modificados manualmente pelo usuário
+        preservedFieldsCount += 3;
+        // Permite enriquecer metadados técnicos ausentes se vierem da plataforma externa
+        if (incoming.totalEpisodes > 0 && (!currentEntry.totalEpisodes || currentEntry.totalEpisodes === 0)) {
+          updatedItem.totalEpisodes = incoming.totalEpisodes;
           changed = true;
         }
         if (incoming.episodeDurationMinutes && !currentEntry.episodeDurationMinutes) {

@@ -112,30 +112,32 @@ export function evaluateFirebaseEnv(
   };
 }
 
+const clientMetaEnv = typeof import.meta !== 'undefined' && import.meta && import.meta.env ? import.meta.env : undefined;
+
 const metaEnv: Record<string, string | undefined> = {
   VITE_FIREBASE_API_KEY:
-    import.meta.env.VITE_FIREBASE_API_KEY ||
+    clientMetaEnv?.VITE_FIREBASE_API_KEY ||
     (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_API_KEY : undefined),
   VITE_FIREBASE_AUTH_DOMAIN:
-    import.meta.env.VITE_FIREBASE_AUTH_DOMAIN ||
+    clientMetaEnv?.VITE_FIREBASE_AUTH_DOMAIN ||
     (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_AUTH_DOMAIN : undefined),
   VITE_FIREBASE_PROJECT_ID:
-    import.meta.env.VITE_FIREBASE_PROJECT_ID ||
+    clientMetaEnv?.VITE_FIREBASE_PROJECT_ID ||
     (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_PROJECT_ID : undefined),
   VITE_FIREBASE_APP_ID:
-    import.meta.env.VITE_FIREBASE_APP_ID ||
+    clientMetaEnv?.VITE_FIREBASE_APP_ID ||
     (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_APP_ID : undefined),
   VITE_FIREBASE_STORAGE_BUCKET:
-    import.meta.env.VITE_FIREBASE_STORAGE_BUCKET ||
+    clientMetaEnv?.VITE_FIREBASE_STORAGE_BUCKET ||
     (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_STORAGE_BUCKET : undefined),
   VITE_FIREBASE_MESSAGING_SENDER_ID:
-    import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID ||
+    clientMetaEnv?.VITE_FIREBASE_MESSAGING_SENDER_ID ||
     (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_MESSAGING_SENDER_ID : undefined),
   VITE_FIREBASE_MEASUREMENT_ID:
-    import.meta.env.VITE_FIREBASE_MEASUREMENT_ID ||
+    clientMetaEnv?.VITE_FIREBASE_MEASUREMENT_ID ||
     (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_MEASUREMENT_ID : undefined),
   VITE_FIREBASE_FIRESTORE_DATABASE_ID:
-    import.meta.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID ||
+    clientMetaEnv?.VITE_FIREBASE_FIRESTORE_DATABASE_ID ||
     (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_FIRESTORE_DATABASE_ID : undefined),
 };
 

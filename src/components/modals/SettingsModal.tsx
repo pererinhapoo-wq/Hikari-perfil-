@@ -59,9 +59,15 @@ import {
   startOrResumeImport,
   pauseImport,
   cancelImport,
+  clearImportCheckpoint,
+  clearImportCheckpointAsync,
   subscribeImportEvents,
   type ImportCheckpoint,
 } from '../../services/importSyncManager';
+import {
+  pruneAnimesOnDisconnect,
+  type DisconnectPruneResult,
+} from '../../utils/animeDisconnection';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -82,6 +88,14 @@ interface SettingsModalProps {
   onSyncMAL?: (
     mergedAnimes: AnimeItem[],
     malAccount: UserProfile['externalAccounts']['mal']
+  ) => void;
+  onDisconnectAniList?: (
+    prunedAnimes: AnimeItem[],
+    audit: DisconnectPruneResult
+  ) => void;
+  onDisconnectMAL?: (
+    prunedAnimes: AnimeItem[],
+    audit: DisconnectPruneResult
   ) => void;
   blockedIds?: string[];
   otherProfiles?: Record<string, UserProfile>;
@@ -117,6 +131,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onRemoveBanner,
   onSyncAniList,
   onSyncMAL,
+  onDisconnectAniList,
+  onDisconnectMAL,
   blockedIds = [],
   otherProfiles = {},
   onUnblockUser
@@ -542,6 +558,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const handleDisconnectMAL = async () => {
     const previousMalAccount = malUsername || profile.id;
+    const audit = pruneAnimesOnDisconnect(currentAnimes, 'mal', previousMalAccount);
+
     if (user) {
       try {
         const idToken = await user.getIdToken();
@@ -555,6 +573,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       provider: 'mal',
       accountIdentifier: previousMalAccount,
     });
+    cancelImport(profile.id, 'mal', previousMalAccount);
+    clearImportCheckpoint(profile.id, 'mal', previousMalAccount);
+    void clearImportCheckpointAsync(profile.id, 'mal', previousMalAccount);
+
     setMalConnected(false);
     setMalUsername('');
     setMalAvatarUrl('');
@@ -562,14 +584,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setMalAccountCreatedAt('');
     setMalPreview(null);
     setRawMALEntries(null);
+    setMalCheckpoint(null);
     setIsConfirmingDisconnectMAL(false);
-    onSaveProfile({
-      externalAccounts: {
-        ...profile.externalAccounts,
-        mal: { connected: false },
-      },
-    });
-    setMalSuccessMsg('Conta MyAnimeList desconectada. Sua lista de animes e animes manuais foram preservados.');
+
+    if (onDisconnectMAL) {
+      onDisconnectMAL(audit.nextAnimes, audit);
+    } else {
+      onSaveProfile({
+        externalAccounts: {
+          ...profile.externalAccounts,
+          mal: { connected: false },
+        },
+      });
+    }
+
+    setMalSuccessMsg(
+      `Conta MyAnimeList desconectada. ${audit.removedCount} ${
+        audit.removedCount === 1 ? 'anime importado foi removido' : 'animes importados foram removidos'
+      } da sua lista. Seus animes manuais e vínculos ativos foram preservados.`
+    );
   };
 
   const handleFetchMALList = async () => {
@@ -1632,7 +1665,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             Desconectar @{anilistUsername}?
                           </p>
                           <p className="text-[11px] text-amber-200/80 mt-0.5">
-                            Sua lista de animes já importada permanecerá 100% intacta no Hikari. Somente o vínculo do nome de usuário será desfeito.
+                            Os animes importados exclusivamente do AniList serão removidos da sua lista. Animes manuais e animes também vinculados ao MyAnimeList serão preservados.
                           </p>
                         </div>
                       </div>
@@ -1648,11 +1681,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           type="button"
                           onClick={() => {
                             const previousAniListAccount = anilistUsername || profile.id;
+                            const audit = pruneAnimesOnDisconnect(currentAnimes, 'anilist', previousAniListAccount);
+
                             clearExternalSyncCooldown({
                               profileId: profile.id,
                               provider: 'anilist',
                               accountIdentifier: previousAniListAccount,
                             });
+                            cancelImport(profile.id, 'anilist', previousAniListAccount);
+                            clearImportCheckpoint(profile.id, 'anilist', previousAniListAccount);
+                            void clearImportCheckpointAsync(profile.id, 'anilist', previousAniListAccount);
+
                             setAnilistConnected(false);
                             setAnilistUsername('');
                             setAnilistAvatarUrl('');
@@ -1660,14 +1699,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             setAnilistAccountCreatedAt('');
                             setAniListPreview(null);
                             setRawIncomingEntries(null);
+                            setAniListCheckpoint(null);
                             setIsConfirmingDisconnect(false);
-                            onSaveProfile({
-                              externalAccounts: {
-                                ...profile.externalAccounts,
-                                anilist: { connected: false },
-                              },
-                            });
-                            setImportSuccessMsg('Conta AniList desconectada. Sua lista de animes foi preservada.');
+
+                            if (onDisconnectAniList) {
+                              onDisconnectAniList(audit.nextAnimes, audit);
+                            } else {
+                              onSaveProfile({
+                                externalAccounts: {
+                                  ...profile.externalAccounts,
+                                  anilist: { connected: false },
+                                },
+                              });
+                            }
+
+                            setImportSuccessMsg(
+                              `Conta AniList desconectada. ${audit.removedCount} ${
+                                audit.removedCount === 1 ? 'anime importado foi removido' : 'animes importados foram removidos'
+                              } da sua lista. Seus animes manuais e vínculos ativos foram preservados.`
+                            );
                           }}
                           className="rounded-lg bg-rose-700 hover:bg-rose-600 px-3.5 py-1.5 text-xs font-semibold text-white transition-colors cursor-pointer"
                         >
@@ -2284,7 +2334,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             Desconectar @{malUsername} do MyAnimeList?
                           </p>
                           <p className="text-[11px] text-amber-200/80 mt-0.5">
-                            Sua lista de animes já importada permanecerá 100% intacta no Hikari. Somente o vínculo do token com a sessão será desfeito.
+                            Os animes importados exclusivamente do MyAnimeList serão removidos da sua lista. Animes manuais e animes também vinculados ao AniList serão preservados.
                           </p>
                         </div>
                       </div>
