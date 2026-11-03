@@ -1,5 +1,9 @@
 import { AnimeItem } from '../types';
 import {
+  createAnimeProvenance,
+  mergeAnimeProvenanceOnImport,
+} from '../utils/animeProvenance';
+import {
   normalizeTitle,
   ExistingAnimeIndex,
   createExistingAnimeIndex,
@@ -466,7 +470,8 @@ export interface MALMergeReport {
 export function mergeMALImport(
   incomingEntries: MALAnimeEntry[],
   currentList: AnimeItem[],
-  updateExistingProgress: boolean = true
+  updateExistingProgress: boolean = true,
+  accountIdentifier?: string
 ): MALMergeReport {
   const resultMap = new Map<string, AnimeItem>();
   for (const item of currentList) {
@@ -488,10 +493,17 @@ export function mergeMALImport(
       const currentEntry = resultMap.get(matched.id) || matched;
 
       let changed = false;
+      const updatedProvenance = mergeAnimeProvenanceOnImport(
+        currentEntry,
+        'mal',
+        accountIdentifier,
+        { anilistId: incoming.anilistId, malId: incoming.malId }
+      );
       const updatedItem: AnimeItem = {
         ...currentEntry,
         malId: incoming.malId,
         anilistId: currentEntry.anilistId || incoming.anilistId,
+        provenance: updatedProvenance,
         // Limitação técnica da API v2 oficial do MyAnimeList:
         // A API REST v2 do MAL (/v2/users/@me/animelist) não disponibiliza favoritos do usuário (animes ou personagens).
         // Preserva estritamente os favoritos manuais já marcados no Hikari Perfil sem alteração ou remoção.
@@ -570,6 +582,14 @@ export function mergeMALImport(
         .toString(36)
         .substring(2, 6)}`;
 
+      const provenance = createAnimeProvenance('mal', {
+        accountIdentifier: accountIdentifier || undefined,
+        malUsername: accountIdentifier || undefined,
+        linkedProviders: incoming.anilistId ? ['mal', 'anilist'] : ['mal'],
+        hasUserModifications: false,
+        importedAtMs: Date.now(),
+      });
+
       // Importante: Nunca considerar nota 10 como favorito. A API oficial do MAL não
       // expõe favoritos do usuário; portanto novos animes importados sempre iniciam
       // com isFavorite = false, aguardando destaque manual no Hikari.
@@ -589,6 +609,7 @@ export function mergeMALImport(
         rewatchCount: incoming.rewatchCount,
         malId: incoming.malId,
         anilistId: incoming.anilistId,
+        provenance,
       };
 
       resultMap.set(generatedId, newItem);

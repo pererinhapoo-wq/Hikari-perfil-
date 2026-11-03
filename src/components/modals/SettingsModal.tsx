@@ -622,7 +622,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     const { mergedList, addedCount, updatedCount } = mergeMALImport(
       rawMALEntries,
       currentAnimes,
-      updateExistingProgressMAL
+      updateExistingProgressMAL,
+      malUsername || profile.id
     );
 
     const now = new Date();
@@ -2174,7 +2175,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                               const { mergedList, addedCount, updatedCount } = mergeAniListImport(
                                 rawIncomingEntries,
                                 currentAnimes,
-                                updateExistingProgress
+                                updateExistingProgress,
+                                anilistUsername || profile.id
                               );
 
                               const now = new Date();

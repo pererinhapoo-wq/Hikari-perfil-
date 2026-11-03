@@ -42,6 +42,7 @@ import {
   saveCommentsToIndexedDb,
   getCommentsFromIndexedDb,
 } from './indexedDbStorage';
+import { migrateAnimeListProvenance } from '../utils/animeProvenance';
 
 export const USER_WORKSPACE_STORAGE_PREFIX = 'hikari_user_workspace_v1:';
 export const PUBLIC_PROFILES_STORAGE_KEY = 'hikari_public_profiles_v1';
@@ -521,11 +522,14 @@ export function sanitizeWorkspaceForUid(
     return null;
   }
 
+  const rawAnimes = Array.isArray(candidate.animes) ? (candidate.animes as AnimeItem[]) : [];
+  const { list: migratedAnimes } = migrateAnimeListProvenance(rawAnimes);
+
   return {
     version: 1,
     uid: cleanUid,
     profileOverrides: sanitizeOverrides(candidate.profileOverrides),
-    animes: Array.isArray(candidate.animes) ? (candidate.animes as AnimeItem[]) : [],
+    animes: migratedAnimes,
     favoriteCharacters: Array.isArray(candidate.favoriteCharacters)
       ? (candidate.favoriteCharacters as FavoriteCharacter[])
       : [],
@@ -630,7 +634,7 @@ export async function hydrateWorkspaceFromIndexedDb(
     let nextComments = base.comments;
 
     if (indexedAnimes && indexedAnimes.length >= base.animes.length) {
-      nextAnimes = indexedAnimes;
+      nextAnimes = migrateAnimeListProvenance(indexedAnimes).list;
       changed = true;
     }
     if (indexedActivities && indexedActivities.length > base.activities.length) {

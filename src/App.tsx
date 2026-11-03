@@ -112,6 +112,10 @@ import {
   invalidateActivitiesCache,
   updateCachedAnimeLocally,
 } from './lib/profileCacheManager';
+import {
+  migrateAnimeListProvenance,
+  markAnimeLocallyModified,
+} from './utils/animeProvenance';
 
 const DEMO_PROFILE_STORAGE_KEY = 'hikari_profile_user_data_v1';
 
@@ -283,7 +287,7 @@ function loadInitialDemoProfileData(): PersistedDemoProfileData {
             parsed.profileOverrides && typeof parsed.profileOverrides === 'object'
               ? parsed.profileOverrides
               : undefined,
-          animes: sanitizedAnimes,
+          animes: migrateAnimeListProvenance(sanitizedAnimes).list,
           favoriteCharacters: sanitizedCharacters,
           comments: parsed.comments,
           activities: parsed.activities,
@@ -319,7 +323,7 @@ function loadInitialDemoProfileData(): PersistedDemoProfileData {
   }));
 
   return {
-    animes: INITIAL_ANIMES,
+    animes: migrateAnimeListProvenance(INITIAL_ANIMES).list,
     favoriteCharacters: FAVORITE_CHARACTERS,
     comments: seededComments,
     activities: seededActivities,
@@ -1750,7 +1754,7 @@ export default function App() {
         if (newEp === prevAnime.currentEpisode && newStatus === prevAnime.status) {
           return null;
         }
-        return { ...prevAnime, currentEpisode: newEp, status: newStatus };
+        return markAnimeLocallyModified({ ...prevAnime, currentEpisode: newEp, status: newStatus });
       });
 
       if (!result) return;
@@ -1803,7 +1807,7 @@ export default function App() {
         if (prevAnime.status === newStatus) return null;
         const nextEp =
           newStatus === 'completed' ? prevAnime.totalEpisodes : prevAnime.currentEpisode;
-        return { ...prevAnime, status: newStatus, currentEpisode: nextEp };
+        return markAnimeLocallyModified({ ...prevAnime, status: newStatus, currentEpisode: nextEp });
       });
 
       if (!result) return;
@@ -1864,12 +1868,12 @@ export default function App() {
         ) {
           return null;
         }
-        return {
+        return markAnimeLocallyModified({
           ...prevAnime,
           currentEpisode: nextEp,
           status: nextStatus,
           rating: nextRating,
-        };
+        });
       });
 
       if (!result) return;
@@ -1965,10 +1969,12 @@ export default function App() {
   const handleToggleFavorite = useCallback(
     (animeId: string) => {
       const currentAnimes = latestAnimeMutationStateRef.current.animes;
-      const result = updateSingleAnimeById(currentAnimes, animeId, (prevAnime) => ({
-        ...prevAnime,
-        isFavorite: !prevAnime.isFavorite,
-      }));
+      const result = updateSingleAnimeById(currentAnimes, animeId, (prevAnime) =>
+        markAnimeLocallyModified({
+          ...prevAnime,
+          isFavorite: !prevAnime.isFavorite,
+        })
+      );
       if (!result) return;
 
       const { nextAnimes, previousAnime: prevAnime, updatedAnime } = result;

@@ -676,13 +676,15 @@ export async function startOrResumeImport(
         mergeResult = mergeAniListImport(
           incomingBatch as AniListAnimeEntry[],
           workingAnimes,
-          updateExistingProgress
+          updateExistingProgress,
+          accountIdentifier
         );
       } else {
         mergeResult = mergeMALImport(
           incomingBatch as MALAnimeEntry[],
           workingAnimes,
-          updateExistingProgress
+          updateExistingProgress,
+          accountIdentifier
         );
       }
 

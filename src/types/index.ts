@@ -57,6 +57,19 @@ export interface FavoritePerson {
 
 export type AnimeStatus = 'all' | 'watching' | 'completed' | 'planned' | 'on_hold' | 'dropped';
 
+export type AnimeOriginProvider = 'anilist' | 'mal' | 'manual' | 'legacy_unknown';
+
+export interface AnimeProvenance {
+  originProvider: AnimeOriginProvider;
+  accountIdentifier?: string; // Nome de usuário ou ID da conta externa responsável pela importação
+  importedAtMs?: number;      // Timestamp da importação original
+  linkedProviders: ('anilist' | 'mal')[]; // Provedores vinculados (pode conter ambos simultaneamente)
+  anilistUsername?: string;   // Conta AniList associada se houver vínculo
+  malUsername?: string;       // Conta MAL associada se houver vínculo
+  hasUserModifications: boolean; // Se o usuário realizou alterações manuais no Hikari Perfil
+  lastModifiedLocallyAtMs?: number; // Timestamp da última edição manual realizada no Hikari Perfil
+}
+
 export interface AnimeItem {
   id: string;
   title: string;
@@ -73,6 +86,7 @@ export interface AnimeItem {
   rewatchCount?: number;
   anilistId?: number;
   malId?: number;
+  provenance?: AnimeProvenance;
 }
 
 export interface HikariComment {

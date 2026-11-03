@@ -1,5 +1,9 @@
 import { AnimeItem, FavoriteCharacter } from '../types';
 import {
+  createAnimeProvenance,
+  mergeAnimeProvenanceOnImport,
+} from '../utils/animeProvenance';
+import {
   normalizeTitle,
   isGenericOrMissingPoster,
   isGenericOrMissingImage,
@@ -1120,7 +1124,8 @@ export interface AniListMergeReport {
 export function mergeAniListImport(
   incomingEntries: AniListAnimeEntry[],
   currentList: AnimeItem[],
-  updateExistingProgress: boolean = true
+  updateExistingProgress: boolean = true,
+  accountIdentifier?: string
 ): AniListMergeReport {
   // Mapa de trabalho iniciando com os animes já existentes para preservar a ordem e dados manuais
   const resultMap = new Map<string, AnimeItem>();
@@ -1144,10 +1149,17 @@ export function mergeAniListImport(
       const currentEntry = resultMap.get(matched.id) || matched;
 
       let changed = false;
+      const updatedProvenance = mergeAnimeProvenanceOnImport(
+        currentEntry,
+        'anilist',
+        accountIdentifier,
+        { anilistId: incoming.anilistId, malId: incoming.malId }
+      );
       const updatedItem: AnimeItem = {
         ...currentEntry,
         anilistId: incoming.anilistId,
         malId: incoming.malId || currentEntry.malId,
+        provenance: updatedProvenance,
       };
 
       // Preserva favoritos manuais locais se já marcados no Hikari Perfil OU sincroniza favorito do AniList
@@ -1232,6 +1244,14 @@ export function mergeAniListImport(
         .toString(36)
         .substring(2, 6)}`;
 
+      const provenance = createAnimeProvenance('anilist', {
+        accountIdentifier: accountIdentifier || undefined,
+        anilistUsername: accountIdentifier || undefined,
+        linkedProviders: incoming.malId ? ['anilist', 'mal'] : ['anilist'],
+        hasUserModifications: false,
+        importedAtMs: Date.now(),
+      });
+
       const newItem: AnimeItem = {
         id: generatedId,
         title: incoming.title,
@@ -1248,6 +1268,7 @@ export function mergeAniListImport(
         rewatchCount: incoming.rewatchCount,
         anilistId: incoming.anilistId,
         malId: incoming.malId,
+        provenance,
       };
 
       resultMap.set(generatedId, newItem);
