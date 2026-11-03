@@ -408,22 +408,6 @@ export const ProfileSearchModal: React.FC<ProfileSearchModalProps> = ({
               <p className="mt-1 text-xs text-purple-300/60 max-w-sm mx-auto">
                 Digite um nome de exibição ou @usuário para visualizar sugestões em tempo real.
               </p>
-              <div className="mt-4 flex flex-wrap items-center justify-center gap-1.5 text-[11px] text-purple-300/50">
-                <span>Sugestões rápidas:</span>
-                {['mat', 'shinji', 'kuroha', 'aether'].map((sample) => (
-                  <button
-                    key={sample}
-                    type="button"
-                    onClick={() => {
-                      setQuery(sample);
-                      inputRef.current?.focus();
-                    }}
-                    className="rounded-lg border border-purple-800/40 bg-purple-950/40 hover:bg-purple-800/40 hover:border-purple-600/60 hover:text-white px-2 py-0.5 text-purple-300 transition-colors cursor-pointer"
-                  >
-                    @{sample}
-                  </button>
-                ))}
-              </div>
             </div>
           )}
 

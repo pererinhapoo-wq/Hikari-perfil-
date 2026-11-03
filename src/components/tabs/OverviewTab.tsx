@@ -550,18 +550,6 @@ export const OverviewTab: React.FC<OverviewTabProps> = React.memo(({
                 })
               )}
 
-              {activities.length > 0 && (
-                <div className="pt-2">
-                  <button
-                    type="button"
-                    onClick={() => onNavigateTab('activity')}
-                    className="w-full flex items-center justify-center gap-1.5 rounded-xl border border-purple-800/40 bg-purple-950/40 hover:bg-purple-900/50 px-3 py-2 text-xs font-semibold text-purple-200 hover:text-white transition-all cursor-pointer shadow-sm"
-                  >
-                    <span>Ver tudo na Linha do Tempo ({activities.length})</span>
-                    <ArrowRight className="h-3.5 w-3.5 text-purple-400" />
-                  </button>
-                </div>
-              )}
             </div>
           </div>
 

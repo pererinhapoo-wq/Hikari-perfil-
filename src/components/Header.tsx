@@ -18,7 +18,6 @@ import {
   CheckCircle2,
   XCircle,
   MessageSquare,
-  Camera,
   Shield,
   UserSearch
 } from 'lucide-react';
@@ -892,18 +891,6 @@ export const Header: React.FC<HeaderProps> = React.memo(({
                     </button>
                   )}
 
-                  {/* 1.2 Editar perfil e foto */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsUserMenuOpen(false);
-                      onOpenSettings('profile');
-                    }}
-                    className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-purple-200 hover:bg-purple-900/30 hover:text-white transition-colors cursor-pointer"
-                  >
-                    <Camera className="h-4 w-4 text-purple-400" />
-                    <span>Editar perfil e foto</span>
-                  </button>
 
                   {/* 2. Configurações */}
                   <button
@@ -931,47 +918,6 @@ export const Header: React.FC<HeaderProps> = React.memo(({
                     <span>Seguidores e seguindo</span>
                   </button>
 
-                  {/* 4. Notificações */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsUserMenuOpen(false);
-                      onToggleNotif(true);
-                    }}
-                    className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-purple-200 hover:bg-purple-900/30 hover:text-white transition-colors cursor-pointer"
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <Bell className="h-4 w-4 text-purple-400" />
-                      <span>Notificações</span>
-                    </div>
-                    {unreadCount > 0 && (
-                      <span className="rounded-full bg-purple-600 px-1.5 py-0.2 text-[10px] font-bold text-white">
-                        {unreadCount}
-                      </span>
-                    )}
-                  </button>
-
-                  {/* 4.1 Mensagens privadas */}
-                  {onOpenMessages && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsUserMenuOpen(false);
-                        onOpenMessages();
-                      }}
-                      className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-purple-200 hover:bg-purple-900/30 hover:text-white transition-colors cursor-pointer"
-                    >
-                      <div className="flex items-center gap-2.5">
-                        <MessageSquare className="h-4 w-4 text-purple-400" />
-                        <span>Mensagens privadas</span>
-                      </div>
-                      {unreadMessagesCount > 0 && (
-                        <span className="rounded-full bg-purple-600 px-1.5 py-0.2 text-[10px] font-bold text-white">
-                          {unreadMessagesCount}
-                        </span>
-                      )}
-                    </button>
-                  )}
 
                   {/* 5. Contas conectadas */}
                   <button
