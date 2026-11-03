@@ -239,6 +239,25 @@ export function flushPendingWorkspaceStorageWrites(): void {
   flushPublicProfilesToLocalStorage();
 }
 
+/**
+ * Limpa integralmente os caches de sessão em memória do workspace ao alternar contas ou fazer logout.
+ * Garante que dados de uma conta nunca vazem para outro usuário durante troca de sessão sem perder dados legítimos.
+ */
+export function clearSessionWorkspaceCaches(keepUid?: string): void {
+  for (const uid of Array.from(workspaceMemoryCache.keys())) {
+    if (!keepUid || uid !== keepUid) {
+      flushSingleWorkspaceToLocalStorage(uid);
+      workspaceMemoryCache.delete(uid);
+    }
+  }
+  remoteDocMetaByUid.clear();
+  remotePublicProfileCache.clear();
+  inFlightPublicProfileLoads.clear();
+  publicProfilesSanitizedCache = null;
+  publicProfilesRawMapCache = null;
+  publicProfilesLastRaw = null;
+}
+
 function ensureLifecycleListeners(): void {
   if (
     lifecycleListenersAttached ||

@@ -45,6 +45,7 @@ export interface FavoriteCompany {
   type: string;
   notableWorks: string;
   logoUrl: string;
+  anilistId?: number;
 }
 
 export interface FavoritePerson {
@@ -53,6 +54,7 @@ export interface FavoritePerson {
   role: string;
   notableWork: string;
   imageUrl: string;
+  anilistId?: number;
 }
 
 export type AnimeStatus = 'all' | 'watching' | 'completed' | 'planned' | 'on_hold' | 'dropped';

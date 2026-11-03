@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import {
   X,
   Send,
@@ -579,18 +580,63 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
     return () => window.removeEventListener('keydown', onKey);
   }, [isOpen, enlargedImageUrl, activeReactionPickerMsgId, isMediaPickerOpen, onClose]);
 
-  if (!isOpen) return null;
+  // Independent background scroll lock protocol:
+  // Freezes document.body cleanly with top/left offset and restores exact scroll position on close
+  useEffect(() => {
+    if (!isOpen || typeof window === 'undefined' || typeof document === 'undefined') return;
 
-  return (
+    const savedScrollY =
+      window.scrollY || window.pageYOffset || document.documentElement.scrollTop || 0;
+    const savedScrollX =
+      window.scrollX || window.pageXOffset || document.documentElement.scrollLeft || 0;
+    const scrollBarWidth = Math.max(0, window.innerWidth - document.documentElement.clientWidth);
+
+    const prevPosition = document.body.style.position;
+    const prevTop = document.body.style.top;
+    const prevLeft = document.body.style.left;
+    const prevRight = document.body.style.right;
+    const prevWidth = document.body.style.width;
+    const prevOverflow = document.body.style.overflow;
+    const prevPaddingRight = document.body.style.paddingRight;
+
+    document.body.style.position = 'fixed';
+    document.body.style.top = `-${savedScrollY}px`;
+    document.body.style.left = '0';
+    document.body.style.right = '0';
+    document.body.style.width = '100%';
+    document.body.style.overflow = 'hidden';
+    if (scrollBarWidth > 0) {
+      document.body.style.paddingRight = `${scrollBarWidth}px`;
+    }
+
+    return () => {
+      document.body.style.position = prevPosition;
+      document.body.style.top = prevTop;
+      document.body.style.left = prevLeft;
+      document.body.style.right = prevRight;
+      document.body.style.width = prevWidth;
+      document.body.style.overflow = prevOverflow;
+      document.body.style.paddingRight = prevPaddingRight;
+      window.scrollTo({
+        top: savedScrollY,
+        left: savedScrollX,
+        behavior: 'instant' as ScrollBehavior,
+      });
+    };
+  }, [isOpen]);
+
+  if (!isOpen || typeof document === 'undefined') return null;
+
+  return createPortal(
     <div
       role="dialog"
       aria-modal="true"
       aria-label="Mensagens Privadas"
-      className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-150"
+      className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-150 overscroll-contain select-none sm:select-auto touch-none"
       onClick={onClose}
     >
       <div
-        className="relative w-full sm:max-w-4xl md:max-w-5xl h-full sm:h-[min(88dvh,760px)] rounded-none sm:rounded-2xl border-0 sm:border border-purple-900/40 bg-[#0A0713] shadow-2xl flex flex-col overflow-hidden"
+        className="relative w-full sm:max-w-4xl md:max-w-5xl h-full sm:h-[min(88dvh,760px)] rounded-none sm:rounded-2xl border-0 sm:border border-purple-900/40 bg-[#0A0713] shadow-2xl flex flex-col overflow-hidden overscroll-contain touch-auto select-auto"
         onClick={(e) => {
           e.stopPropagation();
           setActiveReactionPickerMsgId(null);
@@ -648,7 +694,7 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
             </div>
 
             {/* Conversation Items List */}
-            <div className="flex-1 overflow-y-auto divide-y divide-purple-950/40">
+            <div className="flex-1 overflow-y-auto overscroll-contain divide-y divide-purple-950/40">
               {filteredConversations.map((conv) => {
                 const partnerId = conv.participants.find((id) => id !== currentUser.id) || '';
                 const partnerProfile = otherProfiles[partnerId];
@@ -909,7 +955,7 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                 <div
                   ref={messagesContainerRef}
                   onScroll={handleContainerScroll}
-                  className="flex-1 overflow-y-auto p-4 space-y-3.5 bg-gradient-to-b from-[#0A0713] via-[#0c0817] to-[#0A0713] relative"
+                  className="flex-1 overflow-y-auto overscroll-contain p-4 space-y-3.5 bg-gradient-to-b from-[#0A0713] via-[#0c0817] to-[#0A0713] relative"
                 >
                   {/* Load more button */}
                   {hasMoreMessages && (
@@ -1309,6 +1355,7 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };

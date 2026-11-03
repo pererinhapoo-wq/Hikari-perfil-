@@ -55,6 +55,8 @@ import {
   AnimeItem, 
   AnimeStatus,
   FavoriteCharacter,
+  FavoriteCompany,
+  FavoritePerson,
   HikariComment, 
   UserActivity, 
   FollowUser, 
@@ -81,7 +83,12 @@ import { inferOffsetMsFromLabel } from './utils/relativeTime';
 import { computeAnimeStats, EMPTY_ANIME_STATS, updateSingleAnimeById } from './utils/animeStats';
 import {
   getLastFetchedAniListCharacters,
+  getLastFetchedAniListCompanies,
+  getLastFetchedAniListPeople,
+  clearLastFetchedAniListFavorites,
   mergeFavoriteCharacters,
+  mergeFavoriteCompanies,
+  mergeFavoritePeople,
   isGenericOrMissingPoster,
   normalizeTitle,
 } from './utils/animeSyncHelpers';
@@ -100,6 +107,7 @@ import {
   syncPublicProfileProjection,
   writeLocalUserWorkspace,
   hydrateWorkspaceFromIndexedDb,
+  clearSessionWorkspaceCaches,
   type FirestoreSyncStatus,
   type UserPersonalWorkspace,
   type UserProfileOverrides,
@@ -132,6 +140,8 @@ interface PersistedDemoProfileData {
   profileOverrides?: UserProfileOverrides;
   animes: AnimeItem[];
   favoriteCharacters?: FavoriteCharacter[];
+  favoriteCompanies?: FavoriteCompany[];
+  favoritePeople?: FavoritePerson[];
   comments: HikariComment[];
   activities: UserActivity[];
   notifications: NotificationItem[];
@@ -291,6 +301,14 @@ function loadInitialDemoProfileData(): PersistedDemoProfileData {
             })
           : undefined;
 
+        const sanitizedCompanies = Array.isArray(parsed.favoriteCompanies)
+          ? parsed.favoriteCompanies
+          : undefined;
+
+        const sanitizedPeople = Array.isArray(parsed.favoritePeople)
+          ? parsed.favoritePeople
+          : undefined;
+
         return {
           profileOverrides:
             parsed.profileOverrides && typeof parsed.profileOverrides === 'object'
@@ -298,6 +316,8 @@ function loadInitialDemoProfileData(): PersistedDemoProfileData {
               : undefined,
           animes: migrateAnimeListProvenance(sanitizedAnimes).list,
           favoriteCharacters: sanitizedCharacters,
+          favoriteCompanies: sanitizedCompanies,
+          favoritePeople: sanitizedPeople,
           comments: parsed.comments,
           activities: parsed.activities,
           notifications: mergedNotifications,
@@ -334,6 +354,8 @@ function loadInitialDemoProfileData(): PersistedDemoProfileData {
   return {
     animes: migrateAnimeListProvenance(INITIAL_ANIMES).list,
     favoriteCharacters: FAVORITE_CHARACTERS,
+    favoriteCompanies: FAVORITE_COMPANIES,
+    favoritePeople: FAVORITE_PEOPLE,
     comments: seededComments,
     activities: seededActivities,
     notifications: INITIAL_NOTIFICATIONS
@@ -377,6 +399,12 @@ export default function App() {
   const [demoAnimes, setDemoAnimes] = useState<AnimeItem[]>(initialDemoData.animes);
   const [demoFavoriteCharacters, setDemoFavoriteCharacters] = useState<FavoriteCharacter[]>(
     () => initialDemoData.favoriteCharacters ?? FAVORITE_CHARACTERS
+  );
+  const [demoFavoriteCompanies, setDemoFavoriteCompanies] = useState<FavoriteCompany[]>(
+    () => initialDemoData.favoriteCompanies ?? FAVORITE_COMPANIES
+  );
+  const [demoFavoritePeople, setDemoFavoritePeople] = useState<FavoritePerson[]>(
+    () => initialDemoData.favoritePeople ?? FAVORITE_PEOPLE
   );
   const [demoComments, setDemoComments] = useState<HikariComment[]>(initialDemoData.comments);
   const [demoActivities, setDemoActivities] = useState<UserActivity[]>(initialDemoData.activities);
@@ -601,6 +629,10 @@ export default function App() {
     let cancelled = false;
 
     if (!user?.uid) {
+      hasLoadedFullAnimesRef.current = false;
+      clearAllMemoryCache();
+      clearLastFetchedAniListFavorites();
+      clearSessionWorkspaceCaches();
       setAuthSession(null);
       setRemoteVisitedProfiles({});
       setHasOpenedSettings(false);
@@ -614,6 +646,11 @@ export default function App() {
     }
 
     const targetUid = user.uid;
+    hasLoadedFullAnimesRef.current = false;
+    clearAllMemoryCache();
+    clearLastFetchedAniListFavorites();
+    clearSessionWorkspaceCaches(targetUid);
+
     const localWorkspace =
       readLocalUserWorkspace(targetUid) ?? createEmptyUserWorkspace(targetUid);
 
@@ -774,6 +811,8 @@ export default function App() {
       },
       animes: demoAnimes,
       favoriteCharacters: demoFavoriteCharacters,
+      favoriteCompanies: demoFavoriteCompanies,
+      favoritePeople: demoFavoritePeople,
       comments: demoComments,
       activities: demoActivities,
       notifications: demoNotifications,
@@ -799,6 +838,8 @@ export default function App() {
     demoProfile,
     demoAnimes,
     demoFavoriteCharacters,
+    demoFavoriteCompanies,
+    demoFavoritePeople,
     demoComments,
     demoActivities,
     demoNotifications,
@@ -1097,11 +1138,11 @@ export default function App() {
     if (isOwnProfile) {
       return computeAnimeStats(animes);
     }
-    if (activeProfile.id === AUTHORIZED_ADMIN_UID) {
-      return computeAnimeStats(AETHER_ANIMES);
-    }
     if (isAuthenticated) {
       return authPublicProfilesMap[activeProfile.id]?.animeStats ?? EMPTY_ANIME_STATS;
+    }
+    if (activeProfile.id === AUTHORIZED_ADMIN_UID) {
+      return computeAnimeStats(AETHER_ANIMES);
     }
     return computeAnimeStats(demoAnimes);
   }, [isOwnProfile, isAuthenticated, animes, authPublicProfilesMap, activeProfile.id, demoAnimes]);
@@ -1123,11 +1164,11 @@ export default function App() {
     if (isOwnProfile) {
       return animes;
     }
-    if (activeProfile.id === AUTHORIZED_ADMIN_UID) {
-      return AETHER_ANIMES;
-    }
     if (isAuthenticated) {
       return authPublicProfilesMap[activeProfile.id]?.publicAnimes ?? [];
+    }
+    if (activeProfile.id === AUTHORIZED_ADMIN_UID) {
+      return AETHER_ANIMES;
     }
     return demoAnimes;
   }, [
@@ -1160,12 +1201,16 @@ export default function App() {
     ? isOwnProfile
       ? activeAuthWorkspace?.favoriteCompanies ?? []
       : []
-    : FAVORITE_COMPANIES;
+    : isOwnProfile
+    ? demoFavoriteCompanies
+    : [];
   const displayedFavoritePeople = isAuthenticated
     ? isOwnProfile
       ? activeAuthWorkspace?.favoritePeople ?? []
       : []
-    : FAVORITE_PEOPLE;
+    : isOwnProfile
+    ? demoFavoritePeople
+    : [];
   const displayedComments = isAuthenticated && !isOwnProfile ? [] : comments;
   const displayedActivities = isAuthenticated && !isOwnProfile ? [] : activities;
 
@@ -2076,6 +2121,8 @@ export default function App() {
       };
 
       const fetchedCharacters = getLastFetchedAniListCharacters();
+      const fetchedCompanies = getLastFetchedAniListCompanies();
+      const fetchedPeople = getLastFetchedAniListPeople();
 
       if (isAuthenticated) {
         updateAuthWorkspace((prev) => {
@@ -2095,11 +2142,21 @@ export default function App() {
             fetchedCharacters.length > 0
               ? mergeFavoriteCharacters(prev.favoriteCharacters, fetchedCharacters)
               : prev.favoriteCharacters;
+          const nextFavoriteCompanies =
+            fetchedCompanies.length > 0
+              ? mergeFavoriteCompanies(prev.favoriteCompanies, fetchedCompanies)
+              : prev.favoriteCompanies;
+          const nextFavoritePeople =
+            fetchedPeople.length > 0
+              ? mergeFavoritePeople(prev.favoritePeople, fetchedPeople)
+              : prev.favoritePeople;
 
           return {
             ...prev,
             animes: mergedAnimes,
             favoriteCharacters: nextFavoriteCharacters,
+            favoriteCompanies: nextFavoriteCompanies,
+            favoritePeople: nextFavoritePeople,
             profileOverrides: nextProfileOverrides,
             activities: [syncActivity, ...prev.activities],
           };
@@ -2126,15 +2183,33 @@ export default function App() {
         fetchedCharacters.length > 0
           ? mergeFavoriteCharacters(demoFavoriteCharacters, fetchedCharacters)
           : demoFavoriteCharacters;
+      const nextDemoCompanies =
+        fetchedCompanies.length > 0
+          ? mergeFavoriteCompanies(demoFavoriteCompanies, fetchedCompanies)
+          : demoFavoriteCompanies;
+      const nextDemoPeople =
+        fetchedPeople.length > 0
+          ? mergeFavoritePeople(demoFavoritePeople, fetchedPeople)
+          : demoFavoritePeople;
 
       invalidateAllAnimeCategories(currentUser.id);
       invalidateActivitiesCache(currentUser.id);
       setDemoProfile(nextDemoProfile);
       setDemoAnimes(mergedAnimes);
       setDemoFavoriteCharacters(nextDemoCharacters);
+      setDemoFavoriteCompanies(nextDemoCompanies);
+      setDemoFavoritePeople(nextDemoPeople);
       setDemoActivities((prev) => [syncActivity, ...prev]);
     },
-    [isAuthenticated, currentUser.id, demoProfile, demoFavoriteCharacters, updateAuthWorkspace]
+    [
+      isAuthenticated,
+      currentUser.id,
+      demoProfile,
+      demoFavoriteCharacters,
+      demoFavoriteCompanies,
+      demoFavoritePeople,
+      updateAuthWorkspace,
+    ]
   );
 
   // Handler: Sync imported anime list from MyAnimeList

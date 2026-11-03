@@ -1,4 +1,4 @@
-import { AnimeItem, FavoriteCharacter } from '../types';
+import { AnimeItem, FavoriteCharacter, FavoriteCompany, FavoritePerson } from '../types';
 import {
   createAnimeProvenance,
   mergeAnimeProvenanceOnImport,
@@ -11,7 +11,14 @@ import {
   isValidImageUrl,
   getLastFetchedAniListCharacters,
   setLastFetchedAniListCharacters,
+  getLastFetchedAniListCompanies,
+  setLastFetchedAniListCompanies,
+  getLastFetchedAniListPeople,
+  setLastFetchedAniListPeople,
+  clearLastFetchedAniListFavorites,
   mergeFavoriteCharacters,
+  mergeFavoriteCompanies,
+  mergeFavoritePeople,
 } from '../utils/animeSyncHelpers';
 
 export {
@@ -22,7 +29,14 @@ export {
   isValidImageUrl,
   getLastFetchedAniListCharacters,
   setLastFetchedAniListCharacters,
+  getLastFetchedAniListCompanies,
+  setLastFetchedAniListCompanies,
+  getLastFetchedAniListPeople,
+  setLastFetchedAniListPeople,
+  clearLastFetchedAniListFavorites,
   mergeFavoriteCharacters,
+  mergeFavoriteCompanies,
+  mergeFavoritePeople,
 };
 
 export interface AniListUser {
@@ -55,6 +69,8 @@ export interface AniListFavoritesResult {
   animeAnilistIds: number[];
   animeMalIds: number[];
   characters: FavoriteCharacter[];
+  companies: FavoriteCompany[];
+  people: FavoritePerson[];
 }
 
 export interface AniListDiffChange {
@@ -332,6 +348,77 @@ const FAVORITES_CHARACTERS_PAGE_QUERY = `
   }
 `;
 
+const FAVORITES_STUDIOS_PAGE_QUERY = `
+  query ($name: String, $page: Int) {
+    User(name: $name) {
+      id
+      favourites {
+        studios(page: $page, perPage: 25) {
+          pageInfo {
+            hasNextPage
+            total
+          }
+          nodes {
+            id
+            name
+            isAnimationStudio
+            siteUrl
+            media(sort: FAVOURITES_DESC, page: 1, perPage: 3) {
+              nodes {
+                id
+                title {
+                  userPreferred
+                  romaji
+                  english
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+const FAVORITES_STAFF_PAGE_QUERY = `
+  query ($name: String, $page: Int) {
+    User(name: $name) {
+      id
+      favourites {
+        staff(page: $page, perPage: 25) {
+          pageInfo {
+            hasNextPage
+            total
+          }
+          nodes {
+            id
+            name {
+              userPreferred
+              full
+              native
+            }
+            image {
+              large
+              medium
+            }
+            primaryOccupations
+            staffMedia(sort: FAVOURITES_DESC, page: 1, perPage: 3) {
+              nodes {
+                id
+                title {
+                  userPreferred
+                  romaji
+                  english
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
 // Helper: Requisição com retry e backoff exponencial com jitter para a API GraphQL do AniList
 async function fetchAniListWithRetry(
   query: string,
@@ -415,8 +502,108 @@ export function mapAniListCharacter(raw: any): FavoriteCharacter {
   };
 }
 
+export function mapAniListStudio(raw: any): FavoriteCompany {
+  const name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : 'Estúdio';
+  const type = raw.isAnimationStudio ? 'Estúdio de Animação' : 'Produtora & Distribuidora';
+
+  let notableWorks = '';
+  if (raw.media && Array.isArray(raw.media.nodes)) {
+    const titles: string[] = [];
+    const seenTitles = new Set<string>();
+    for (const m of raw.media.nodes) {
+      const t = m?.title?.userPreferred || m?.title?.romaji || m?.title?.english;
+      if (typeof t === 'string' && t.trim() && !seenTitles.has(t.trim().toLowerCase())) {
+        seenTitles.add(t.trim().toLowerCase());
+        titles.push(t.trim());
+      }
+    }
+    notableWorks = titles.slice(0, 3).join(', ');
+  }
+  if (!notableWorks) {
+    notableWorks = 'Produções notáveis no AniList';
+  }
+
+  return {
+    id: `comp_al_${raw.id}`,
+    name,
+    type,
+    notableWorks,
+    logoUrl: '',
+    anilistId: typeof raw.id === 'number' ? raw.id : undefined,
+  };
+}
+
+export function mapAniListStaffRole(occupations?: string[] | null): string {
+  if (!Array.isArray(occupations) || occupations.length === 0) {
+    return 'Criador / Profissional de Animação';
+  }
+
+  const joined = occupations.join(' ').toLowerCase();
+  if (joined.includes('voice actor') || joined.includes('seiyuu') || joined.includes('dublador')) {
+    return 'Dublador / Seiyuu';
+  }
+  if (joined.includes('creator') || joined.includes('manga') || joined.includes('author')) {
+    return 'Mangaká / Criador(a) Original';
+  }
+  if (joined.includes('composer') || joined.includes('music') || joined.includes('soundtrack')) {
+    return 'Compositor(a) Musical';
+  }
+  if (
+    joined.includes('animator') ||
+    joined.includes('animation director') ||
+    joined.includes('character design')
+  ) {
+    return 'Animador(a) & Designer';
+  }
+  if (joined.includes('screenplay') || joined.includes('script') || joined.includes('writer')) {
+    return 'Roteirista';
+  }
+  if (joined.includes('director')) {
+    return 'Diretor(a) de Animação';
+  }
+
+  return occupations[0] || 'Criador / Profissional de Animação';
+}
+
+export function mapAniListStaff(raw: any): FavoritePerson {
+  const name =
+    raw.name?.userPreferred ||
+    raw.name?.full ||
+    'Criador / Profissional';
+
+  const role = mapAniListStaffRole(raw.primaryOccupations);
+
+  let notableWork = '';
+  if (raw.staffMedia && Array.isArray(raw.staffMedia.nodes)) {
+    const titles: string[] = [];
+    const seen = new Set<string>();
+    for (const m of raw.staffMedia.nodes) {
+      const t = m?.title?.userPreferred || m?.title?.romaji || m?.title?.english;
+      if (typeof t === 'string' && t.trim() && !seen.has(t.trim().toLowerCase())) {
+        seen.add(t.trim().toLowerCase());
+        titles.push(t.trim());
+      }
+    }
+    notableWork = titles.slice(0, 3).join(', ');
+  }
+  if (!notableWork) {
+    notableWork = 'Trabalhos notáveis no AniList';
+  }
+
+  const imageUrl = raw.image?.large || raw.image?.medium || '';
+
+  return {
+    id: `person_al_${raw.id}`,
+    name,
+    role,
+    notableWork,
+    imageUrl,
+    anilistId: typeof raw.id === 'number' ? raw.id : undefined,
+  };
+}
+
 /**
- * Consulta os favoritos reais de animes e personagens da conta AniList,
+ * Consulta os favoritos reais de animes, personagens, estúdios e pessoas da conta AniList,
  * paginando através de TODAS as páginas de favoritos sem limitação artificial da página 1.
  */
 export async function fetchAniListFavorites(
@@ -425,12 +612,20 @@ export async function fetchAniListFavorites(
 ): Promise<AniListFavoritesResult> {
   const cleanUsername = username.trim();
   if (!cleanUsername) {
-    return { animeAnilistIds: [], animeMalIds: [], characters: [] };
+    return {
+      animeAnilistIds: [],
+      animeMalIds: [],
+      characters: [],
+      companies: [],
+      people: [],
+    };
   }
 
   const animeAnilistIds: number[] = [];
   const animeMalIds: number[] = [];
   const characters: FavoriteCharacter[] = [];
+  const companies: FavoriteCompany[] = [];
+  const people: FavoritePerson[] = [];
 
   // 1. Paginação completa de animes favoritos
   let animePage = 1;
@@ -487,12 +682,74 @@ export async function fetchAniListFavorites(
     }
   }
 
+  // 3. Paginação completa de estúdios & produtoras favoritos
+  let studioPage = 1;
+  let hasMoreStudios = true;
+  while (hasMoreStudios) {
+    try {
+      const res = await fetchAniListWithRetry(
+        FAVORITES_STUDIOS_PAGE_QUERY,
+        { name: cleanUsername, page: studioPage },
+        options?.signal
+      );
+      if (!res.ok) break;
+
+      const json = await res.json();
+      const studioFav = json?.data?.User?.favourites?.studios;
+      const nodes = Array.isArray(studioFav?.nodes) ? studioFav.nodes : [];
+
+      for (const node of nodes) {
+        if (node && node.id) {
+          companies.push(mapAniListStudio(node));
+        }
+      }
+
+      hasMoreStudios = Boolean(studioFav?.pageInfo?.hasNextPage);
+      studioPage++;
+    } catch {
+      break;
+    }
+  }
+
+  // 4. Paginação completa de pessoas (criadores & voz) favoritos
+  let staffPage = 1;
+  let hasMoreStaff = true;
+  while (hasMoreStaff) {
+    try {
+      const res = await fetchAniListWithRetry(
+        FAVORITES_STAFF_PAGE_QUERY,
+        { name: cleanUsername, page: staffPage },
+        options?.signal
+      );
+      if (!res.ok) break;
+
+      const json = await res.json();
+      const staffFav = json?.data?.User?.favourites?.staff;
+      const nodes = Array.isArray(staffFav?.nodes) ? staffFav.nodes : [];
+
+      for (const node of nodes) {
+        if (node && node.id) {
+          people.push(mapAniListStaff(node));
+        }
+      }
+
+      hasMoreStaff = Boolean(staffFav?.pageInfo?.hasNextPage);
+      staffPage++;
+    } catch {
+      break;
+    }
+  }
+
   setLastFetchedAniListCharacters(characters);
+  setLastFetchedAniListCompanies(companies);
+  setLastFetchedAniListPeople(people);
 
   return {
     animeAnilistIds,
     animeMalIds,
     characters,
+    companies,
+    people,
   };
 }
 

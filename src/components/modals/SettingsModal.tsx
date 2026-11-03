@@ -28,6 +28,7 @@ import { UserProfile, AnimeItem } from '../../types';
 import {
   fetchAniListUser,
   fetchAniListAnimeList,
+  fetchAniListFavorites,
   calculateAniListImportPreview,
   mergeAniListImport,
   STATUS_LABELS_PT,
@@ -697,6 +698,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   // AniList Connection form state
   const [inputAniListUsername, setInputAniListUsername] = useState('');
   const [isCheckingAniListUser, setIsCheckingAniListUser] = useState(false);
+  const [isConnectingAniList, setIsConnectingAniList] = useState(false);
   const [aniListUserError, setAniListUserError] = useState<string | null>(null);
   const [verifiedAniListUser, setVerifiedAniListUser] = useState<AniListUser | null>(null);
   const [isConfirmingDisconnect, setIsConfirmingDisconnect] = useState(false);
@@ -2020,10 +2022,31 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                             <button
                               type="button"
-                              onClick={() => {
+                              disabled={isConnectingAniList}
+                              onClick={async () => {
+                                setIsConnectingAniList(true);
+                                try {
+                                  // Consulta favoritos completos do AniList (animes, personagens, estúdios e pessoas)
+                                  await fetchAniListFavorites(verifiedAniListUser.name);
+                                } catch (err) {
+                                  console.warn('Não foi possível buscar favoritos no momento da conexão:', err);
+                                }
+
+                                const now = new Date();
+                                const formattedDate = `${now.toLocaleDateString('pt-BR', {
+                                  day: '2-digit',
+                                  month: '2-digit',
+                                  year: 'numeric',
+                                })} às ${now.toLocaleTimeString('pt-BR', {
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                })}`;
+
                                 setAnilistConnected(true);
                                 setAnilistUsername(verifiedAniListUser.name);
                                 setAnilistAvatarUrl(verifiedAniListUser.avatarUrl);
+                                setAnilistLastSync(formattedDate);
+
                                 onSaveProfile({
                                   externalAccounts: {
                                     ...profile.externalAccounts,
@@ -2031,19 +2054,40 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                                       connected: true,
                                       username: verifiedAniListUser.name,
                                       avatarUrl: verifiedAniListUser.avatarUrl,
+                                      lastSync: formattedDate,
                                     },
                                   },
                                 });
+
+                                if (onSyncAniList) {
+                                  onSyncAniList(currentAnimes, {
+                                    connected: true,
+                                    username: verifiedAniListUser.name,
+                                    avatarUrl: verifiedAniListUser.avatarUrl,
+                                    lastSync: formattedDate,
+                                  });
+                                }
+
                                 setImportSuccessMsg(
-                                  `Conta @${verifiedAniListUser.name} conectada com sucesso! Você já pode consultar e importar sua lista de animes.`
+                                  `Conta @${verifiedAniListUser.name} conectada com sucesso! Seus estúdios, criadores e personagens favoritos foram importados.`
                                 );
                                 setVerifiedAniListUser(null);
                                 setInputAniListUsername('');
+                                setIsConnectingAniList(false);
                               }}
-                              className="flex items-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors cursor-pointer shrink-0"
+                              className="flex items-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors cursor-pointer shrink-0 disabled:cursor-not-allowed"
                             >
-                              <Check className="h-3.5 w-3.5" />
-                              <span>Conectar Esta Conta</span>
+                              {isConnectingAniList ? (
+                                <>
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  <span>Conectando...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Check className="h-3.5 w-3.5" />
+                                  <span>Conectar Esta Conta</span>
+                                </>
+                              )}
                             </button>
                           </div>
                         </div>
