@@ -218,6 +218,57 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidImportCheckpoint(data, userId, checkpointId) {
+      return data.keys().hasAll([
+          'provider',
+          'accountIdentifier',
+          'profileId',
+          'status',
+          'version',
+          'cursor',
+          'updatedAtMs'
+        ])
+        && data.provider in ['mal', 'anilist']
+        && ((data.provider == 'mal' && checkpointId.matches('^mal_[a-zA-Z0-9_\\-]+$')) || (data.provider == 'anilist' && checkpointId.matches('^anilist_[a-zA-Z0-9_\\-]+$')))
+        && data.profileId is string
+        && data.profileId == userId
+        && data.accountIdentifier is string
+        && data.accountIdentifier.size() >= 1
+        && data.accountIdentifier.size() <= 128
+        && data.status in ['idle', 'in_progress', 'paused', 'error', 'completed']
+        && data.version is int
+        && data.version >= 1
+        && data.cursor is int
+        && data.cursor >= 0
+        && data.updatedAtMs is int
+        && data.updatedAtMs >= 0
+        && (!('page' in data) || (data.page is int && data.page >= 0))
+        && (!('recordsReceived' in data) || (data.recordsReceived is int && data.recordsReceived >= 0))
+        && (!('recordsProcessed' in data) || (data.recordsProcessed is int && data.recordsProcessed >= 0))
+        && (!('recordsConfirmed' in data) || (data.recordsConfirmed is int && data.recordsConfirmed >= 0))
+        && (!('recordsPersisted' in data) || (data.recordsPersisted is int && data.recordsPersisted >= 0))
+        && (!('addedCount' in data) || (data.addedCount is int && data.addedCount >= 0))
+        && (!('updatedCount' in data) || (data.updatedCount is int && data.updatedCount >= 0))
+        && (!('unchangedCount' in data) || (data.unchangedCount is int && data.unchangedCount >= 0))
+        && (!('preservedFieldsCount' in data) || (data.preservedFieldsCount is int && data.preservedFieldsCount >= 0))
+        && (!('totalEstimated' in data) || data.totalEstimated == null || (data.totalEstimated is int && data.totalEstimated >= 0))
+        && (!('lastConfirmedCheckpoint' in data) || data.lastConfirmedCheckpoint == null || (data.lastConfirmedCheckpoint is int && data.lastConfirmedCheckpoint >= 0))
+        && (!('lastConfirmedPoint' in data) || (data.lastConfirmedPoint is string && data.lastConfirmedPoint.size() <= 128))
+        && (!('lastUpdated' in data) || (data.lastUpdated is string && data.lastUpdated.size() <= 128))
+        && (!('errorMessage' in data) || data.errorMessage == null || (data.errorMessage is string && data.errorMessage.size() <= 2000))
+        && (!('lastError' in data) || data.lastError == null || (data.lastError is string && data.lastError.size() <= 2000))
+        && (!('storageSource' in data) || data.storageSource in ['local', 'remote', 'reconciled', 'memory'])
+        && (!('storageError' in data) || data.storageError == null || (data.storageError is string && data.storageError.size() <= 2000))
+        && (!('deviceId' in data) || (data.deviceId is string && data.deviceId.size() <= 128))
+        && !('idToken' in data)
+        && !('accessToken' in data)
+        && !('refreshToken' in data)
+        && !('token' in data)
+        && !('animes' in data)
+        && !('workingAnimes' in data)
+        && !('mergedAnimes' in data);
+    }
+
     // 2. Documento principal do perfil público/controlado do usuário (sem PII como e-mail)
     match /users/{userId} {
       // Apenas o próprio dono lê perfis privados; perfis marcados como públicos exigem sessão autenticada
@@ -588,6 +639,26 @@ service cloud.firestore {
           && incoming().updatedAtMs >= 0
           && incoming().updatedAt == request.time;
         allow delete: if false;
+      }
+
+      // 10. Subcoleção privada de checkpoints de importação MAL e AniList (Etapa 4.1)
+      match /import_checkpoints/{checkpointId} {
+        allow get, list: if isOwner(userId) && isValidId(userId);
+
+        allow create: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(checkpointId)
+          && isValidImportCheckpoint(incoming(), userId, checkpointId);
+
+        allow update: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(checkpointId)
+          && isValidImportCheckpoint(incoming(), userId, checkpointId)
+          && incoming().profileId == existing().profileId
+          && incoming().provider == existing().provider
+          && incoming().accountIdentifier == existing().accountIdentifier;
+
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(checkpointId);
       }
     }
 

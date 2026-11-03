@@ -16,6 +16,24 @@ import {
   clearExternalSyncCooldown,
   recordExternalSyncSuccess,
 } from '../utils/syncCooldown';
+import {
+  readLocalCheckpointSafe,
+  saveLocalCheckpointSafe,
+  removeLocalCheckpointSafe,
+  reconcileCheckpoints,
+  getActiveRemoteCheckpointStore,
+  sanitizeCheckpointForStorage,
+  getLocalCheckpointKey,
+  CheckpointStorageError,
+  type CheckpointReconciliationResult,
+} from './importCheckpointStorage';
+
+export {
+  CheckpointStorageError,
+  type CheckpointStorageErrorType,
+  setRemoteCheckpointStoreForTesting,
+  setLocalStorageAdapterForTesting,
+} from './importCheckpointStorage';
 
 export type ImportProvider = 'mal' | 'anilist';
 
@@ -49,6 +67,8 @@ export interface ImportCheckpoint {
   updatedAtMs?: number;
   errorMessage?: string | null;
   lastError?: string | null;
+  storageSource?: 'local' | 'remote' | 'reconciled' | 'memory';
+  storageError?: string | null;
 }
 
 export interface ImportProgressUpdate {
@@ -113,13 +133,11 @@ interface ActiveImportController {
 
 const activeControllers = new Map<string, ActiveImportController>();
 
-// In-memory memory checkpoints for headless tests or fast retrieval
+// In-memory memory checkpoints for fast retrieval and headless test consistency
 const inMemoryCheckpoints = new Map<string, ImportCheckpoint>();
 
-function getCheckpointStorageKey(profileId: string, provider: ImportProvider, account: string): string {
-  const cleanProfile = profileId.trim().toLowerCase();
-  const cleanAcc = account.trim().toLowerCase();
-  return `hikari_import_chk_${cleanProfile}_${provider}_${cleanAcc}`;
+export function clearInMemoryCheckpointsForTesting(): void {
+  inMemoryCheckpoints.clear();
 }
 
 function getControllerKey(profileId: string, provider: ImportProvider, account: string): string {
@@ -127,86 +145,235 @@ function getControllerKey(profileId: string, provider: ImportProvider, account: 
 }
 
 /**
- * Lê o checkpoint persistente de uma importação a partir do localStorage ou memória.
+ * Lê o checkpoint persistente de uma importação de forma síncrona a partir da memória ou localStorage.
+ * Mantém 100% de compatibilidade com componentes React e suítes existentes.
  */
 export function getImportCheckpoint(
   profileId: string,
   provider: ImportProvider,
   accountIdentifier: string
 ): ImportCheckpoint | null {
-  const key = getCheckpointStorageKey(profileId, provider, accountIdentifier);
-  const mem = inMemoryCheckpoints.get(key);
+  const memKey = getLocalCheckpointKey(profileId, provider, accountIdentifier);
+  const mem = inMemoryCheckpoints.get(memKey);
   if (mem) {
     return { ...mem };
   }
 
-  if (typeof window === 'undefined' || !window.localStorage) {
-    return null;
+  const { checkpoint } = readLocalCheckpointSafe(profileId, provider, accountIdentifier);
+  if (checkpoint) {
+    inMemoryCheckpoints.set(memKey, checkpoint);
+    return { ...checkpoint };
   }
 
-  try {
-    const raw = window.localStorage.getItem(key);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as ImportCheckpoint;
-    if (
-      parsed &&
-      parsed.provider === provider &&
-      parsed.profileId === profileId
-    ) {
-      inMemoryCheckpoints.set(key, parsed);
-      return parsed;
-    }
-  } catch {
-    // Falha silenciosa de leitura de localStorage
-  }
   return null;
 }
 
 /**
- * Persiste o checkpoint de importação imediatamente no localStorage e em memória, e notifica ouvintes.
+ * Consulta e reconcilia assincronamente os checkpoints local e remoto entre múltiplos dispositivos.
  */
-export function saveImportCheckpoint(checkpoint: ImportCheckpoint): void {
-  const key = getCheckpointStorageKey(checkpoint.profileId, checkpoint.provider, checkpoint.accountIdentifier);
-  inMemoryCheckpoints.set(key, { ...checkpoint });
+export async function getOrReconcileImportCheckpoint(
+  profileId: string,
+  provider: ImportProvider,
+  accountIdentifier: string
+): Promise<CheckpointReconciliationResult> {
+  const memKey = getLocalCheckpointKey(profileId, provider, accountIdentifier);
 
-  if (typeof window !== 'undefined' && window.localStorage) {
-    try {
-      window.localStorage.setItem(key, JSON.stringify(checkpoint));
-    } catch {
-      // Ignora erro de cota
+  // 1. Leitura Local (memória ou localStorage)
+  let localCheckpoint = inMemoryCheckpoints.get(memKey) || null;
+  if (!localCheckpoint) {
+    const localRes = readLocalCheckpointSafe(profileId, provider, accountIdentifier);
+    localCheckpoint = localRes.checkpoint;
+  }
+
+  // 2. Leitura Remota (Firestore / remote store)
+  let remoteCheckpoint: ImportCheckpoint | null = null;
+  let remoteReadError: CheckpointStorageError | undefined;
+
+  try {
+    const remoteStore = getActiveRemoteCheckpointStore();
+    remoteCheckpoint = await remoteStore.get(profileId, provider, accountIdentifier);
+  } catch (err: unknown) {
+    if (err instanceof CheckpointStorageError) {
+      remoteReadError = err;
+    } else {
+      remoteReadError = new CheckpointStorageError('remote_network_error', String(err));
     }
   }
 
-  const eventType: ImportEvent['type'] =
-    checkpoint.status === 'completed'
-      ? 'completed'
-      : checkpoint.status === 'paused'
-      ? 'paused'
-      : checkpoint.status === 'error'
-      ? 'error'
-      : 'progress';
+  // 3. Reconciliação segura
+  const reconciledResult = reconcileCheckpoints(localCheckpoint, remoteCheckpoint);
 
-  emitImportEvent({ type: eventType, checkpoint: { ...checkpoint } });
+  if (reconciledResult.checkpoint) {
+    const adopted = { ...reconciledResult.checkpoint };
+    inMemoryCheckpoints.set(memKey, adopted);
+    saveLocalCheckpointSafe(adopted);
+  }
+
+  if (remoteReadError && !reconciledResult.conflict) {
+    reconciledResult.diagnostic += ` [Aviso remoto: ${remoteReadError.message}]`;
+  }
+
+  return reconciledResult;
 }
 
 /**
- * Remove o checkpoint persistente (usado após conclusão com sucesso ou cancelamento explícito pelo usuário).
+ * Grava assincronamente o checkpoint em ambas as camadas (local e remota) com auditoria de erros.
+ */
+export async function saveImportCheckpointAsync(
+  checkpoint: ImportCheckpoint,
+  expectedRemoteVersion?: number
+): Promise<{
+  localSuccess: boolean;
+  remoteSuccess: boolean;
+  checkpoint: ImportCheckpoint;
+  localError?: CheckpointStorageError;
+  remoteError?: CheckpointStorageError;
+}> {
+  const sanitized = sanitizeCheckpointForStorage(checkpoint);
+  const memKey = getLocalCheckpointKey(
+    sanitized.profileId,
+    sanitized.provider,
+    sanitized.accountIdentifier
+  );
+
+  inMemoryCheckpoints.set(memKey, { ...sanitized });
+
+  // 1. Gravação local segura
+  const localRes = saveLocalCheckpointSafe(sanitized);
+
+  // 2. Gravação remota segura
+  let remoteSuccess = false;
+  let remoteError: CheckpointStorageError | undefined;
+  let updatedRemoteVersion = sanitized.version ?? 1;
+
+  try {
+    const remoteStore = getActiveRemoteCheckpointStore();
+    const remRes = await remoteStore.set(sanitized, expectedRemoteVersion);
+    remoteSuccess = remRes.success;
+    remoteError = remRes.error;
+    if (remRes.success) {
+      updatedRemoteVersion = remRes.version;
+    }
+  } catch (err: unknown) {
+    remoteSuccess = false;
+    remoteError =
+      err instanceof CheckpointStorageError
+        ? err
+        : new CheckpointStorageError('remote_write_error', String(err));
+  }
+
+  const finalCheckpoint: ImportCheckpoint = {
+    ...sanitized,
+    version: remoteSuccess ? updatedRemoteVersion : sanitized.version,
+    storageSource: remoteSuccess ? (localRes.success ? 'reconciled' : 'remote') : 'local',
+    storageError: remoteError?.message || localRes.error?.message || null,
+  };
+
+  inMemoryCheckpoints.set(memKey, finalCheckpoint);
+
+  const eventType: ImportEvent['type'] =
+    finalCheckpoint.status === 'completed'
+      ? 'completed'
+      : finalCheckpoint.status === 'paused'
+      ? 'paused'
+      : finalCheckpoint.status === 'error'
+      ? 'error'
+      : 'progress';
+
+  emitImportEvent({ type: eventType, checkpoint: { ...finalCheckpoint } });
+
+  return {
+    localSuccess: localRes.success,
+    remoteSuccess,
+    checkpoint: finalCheckpoint,
+    localError: localRes.error,
+    remoteError,
+  };
+}
+
+/**
+ * Persiste o checkpoint de importação imediatamente no armazenamento local e em memória,
+ * disparando a gravação remota em segundo plano para compatibilidade com chamadas síncronas existentes.
+ */
+export function saveImportCheckpoint(checkpoint: ImportCheckpoint): void {
+  const sanitized = sanitizeCheckpointForStorage(checkpoint);
+  const memKey = getLocalCheckpointKey(
+    sanitized.profileId,
+    sanitized.provider,
+    sanitized.accountIdentifier
+  );
+
+  inMemoryCheckpoints.set(memKey, { ...sanitized });
+  saveLocalCheckpointSafe(sanitized);
+
+  const eventType: ImportEvent['type'] =
+    sanitized.status === 'completed'
+      ? 'completed'
+      : sanitized.status === 'paused'
+      ? 'paused'
+      : sanitized.status === 'error'
+      ? 'error'
+      : 'progress';
+
+  emitImportEvent({ type: eventType, checkpoint: { ...sanitized } });
+
+  // Sincronização remota assíncrona em segundo plano sem quebrar a assinatura síncrona
+  void (async () => {
+    try {
+      const remoteStore = getActiveRemoteCheckpointStore();
+      await remoteStore.set(sanitized);
+    } catch {
+      // Ignora falhas não fatais em chamadas fire-and-forget
+    }
+  })();
+}
+
+/**
+ * Remove o checkpoint persistente local e remotamente (conclusão ou cancelamento).
+ */
+export async function clearImportCheckpointAsync(
+  profileId: string,
+  provider: ImportProvider,
+  accountIdentifier: string
+): Promise<{ localSuccess: boolean; remoteSuccess: boolean }> {
+  const memKey = getLocalCheckpointKey(profileId, provider, accountIdentifier);
+  inMemoryCheckpoints.delete(memKey);
+
+  const localRes = removeLocalCheckpointSafe(profileId, provider, accountIdentifier);
+
+  let remoteSuccess = false;
+  try {
+    const remoteStore = getActiveRemoteCheckpointStore();
+    const remRes = await remoteStore.delete(profileId, provider, accountIdentifier);
+    remoteSuccess = remRes.success;
+  } catch {
+    remoteSuccess = false;
+  }
+
+  return { localSuccess: localRes.success, remoteSuccess };
+}
+
+/**
+ * Versão síncrona de limpeza de checkpoint (compatibilidade retroativa).
  */
 export function clearImportCheckpoint(
   profileId: string,
   provider: ImportProvider,
   accountIdentifier: string
 ): void {
-  const key = getCheckpointStorageKey(profileId, provider, accountIdentifier);
-  inMemoryCheckpoints.delete(key);
+  const memKey = getLocalCheckpointKey(profileId, provider, accountIdentifier);
+  inMemoryCheckpoints.delete(memKey);
+  removeLocalCheckpointSafe(profileId, provider, accountIdentifier);
 
-  if (typeof window !== 'undefined' && window.localStorage) {
+  // Limpeza remota disparada em segundo plano
+  void (async () => {
     try {
-      window.localStorage.removeItem(key);
+      const remoteStore = getActiveRemoteCheckpointStore();
+      await remoteStore.delete(profileId, provider, accountIdentifier);
     } catch {
       // ignore
     }
-  }
+  })();
 }
 
 /**
@@ -284,6 +451,7 @@ export function cancelImport(
 /**
  * Inicia ou retoma uma importação paginada incremental e resiliente para AniList ou MyAnimeList.
  * Garante que o cursor do checkpoint só avance definitivamente após confirmação de persistência (onBatchCommitted).
+ * Reconcilia checkpoints remotos entre dispositivos antes de iniciar ou retomar (Etapa 4).
  */
 export async function startOrResumeImport(
   options: StartImportOptions
@@ -310,7 +478,7 @@ export async function startOrResumeImport(
 
   const ctrlKey = getControllerKey(profileId, provider, accountIdentifier);
 
-  // 1. Trava contra execuções concorrentes simultâneas da mesma conta e provedor
+  // 1. Trava contra execuções concorrentes simultâneas da mesma conta e provedor no mesmo cliente
   if (isImportInProgress(profileId, provider, accountIdentifier)) {
     throw new Error(
       `Já existe uma importação em andamento para a conta ${accountIdentifier} (${provider.toUpperCase()}).`
@@ -325,8 +493,40 @@ export async function startOrResumeImport(
   };
   activeControllers.set(ctrlKey, activeCtrl);
 
-  // 2. Recuperação de Checkpoint existente ou inicialização de novo checkpoint
-  const existingCheckpoint = getImportCheckpoint(profileId, provider, accountIdentifier);
+  // 2. Reconciliação entre Dispositivos (Etapa 4): consulta local e remoto
+  const reconciliation = await getOrReconcileImportCheckpoint(
+    profileId,
+    provider,
+    accountIdentifier
+  );
+
+  // Se houve conflito não resolvido entre versões de dispositivos diferentes, interrompe sem avançar
+  if (reconciliation.diverged && reconciliation.conflict) {
+    activeControllers.delete(ctrlKey);
+    const conflictCheckpoint: ImportCheckpoint = {
+      profileId,
+      provider,
+      accountIdentifier,
+      status: 'error',
+      recordsReceived: reconciliation.localCheckpoint?.recordsReceived ?? 0,
+      recordsProcessed: reconciliation.localCheckpoint?.recordsProcessed ?? 0,
+      recordsConfirmed: reconciliation.localCheckpoint?.recordsConfirmed ?? 0,
+      recordsPersisted: reconciliation.localCheckpoint?.recordsPersisted ?? 0,
+      errorMessage: reconciliation.conflict.message,
+      lastError: reconciliation.conflict.message,
+      updatedAtMs: Date.now(),
+      lastUpdated: new Date().toISOString(),
+    };
+    if (onError) onError(reconciliation.conflict, conflictCheckpoint);
+    return {
+      success: false,
+      status: 'error',
+      mergedAnimes: currentAnimes ?? existingAnimes ?? [],
+      checkpoint: conflictCheckpoint,
+    };
+  }
+
+  const existingCheckpoint = reconciliation.checkpoint;
   const isNewCheckpoint = !existingCheckpoint || existingCheckpoint.status === 'completed';
 
   const initialCursor = provider === 'mal' ? 0 : 1;
@@ -374,7 +574,7 @@ export async function startOrResumeImport(
         preservedFieldsCount: existingCheckpoint.preservedFieldsCount ?? 0,
       };
 
-  saveImportCheckpoint(checkpoint);
+  await saveImportCheckpointAsync(checkpoint);
 
   const initialList = currentAnimes ?? existingAnimes ?? [];
   let workingAnimes = [...initialList];
@@ -406,7 +606,7 @@ export async function startOrResumeImport(
 
       if (activeCtrl.isPaused) {
         checkpoint.status = 'paused';
-        saveImportCheckpoint(checkpoint);
+        await saveImportCheckpointAsync(checkpoint);
         activeControllers.delete(ctrlKey);
         return { success: false, status: 'paused', mergedAnimes: workingAnimes, checkpoint };
       }
@@ -417,7 +617,9 @@ export async function startOrResumeImport(
       const currentBatchCursor = checkpoint.cursor ?? (provider === 'mal' ? 0 : 1);
       let candidateNextCursor = currentBatchCursor;
       let candidateNextPage = checkpoint.page ?? 1;
-      let candidateConfirmedPoint = checkpoint.lastConfirmedPoint || (provider === 'mal' ? `offset_${currentBatchCursor}` : `chunk_${currentBatchCursor}`);
+      let candidateConfirmedPoint =
+        checkpoint.lastConfirmedPoint ||
+        (provider === 'mal' ? `offset_${currentBatchCursor}` : `chunk_${currentBatchCursor}`);
 
       if (provider === 'anilist') {
         const chunkIndex = currentBatchCursor;
@@ -489,6 +691,7 @@ export async function startOrResumeImport(
       // PASSO 3: Preparar o próximo checkpoint como candidato NÃO confirmado
       const candidateCheckpoint: ImportCheckpoint = {
         ...checkpoint,
+        version: (checkpoint.version ?? 1) + 1,
         cursor: candidateNextCursor,
         page: candidateNextPage,
         recordsReceived: candidateRecordsReceived,
@@ -498,7 +701,8 @@ export async function startOrResumeImport(
         addedCount: (checkpoint.addedCount ?? 0) + mergeResult.addedCount,
         updatedCount: (checkpoint.updatedCount ?? 0) + mergeResult.updatedCount,
         unchangedCount: (checkpoint.unchangedCount ?? 0) + mergeResult.unchangedCount,
-        preservedFieldsCount: (checkpoint.preservedFieldsCount ?? 0) + mergeResult.preservedFieldsCount,
+        preservedFieldsCount:
+          (checkpoint.preservedFieldsCount ?? 0) + mergeResult.preservedFieldsCount,
         lastConfirmedPoint: candidateConfirmedPoint,
         lastConfirmedCheckpoint: Date.now(),
         updatedAtMs: Date.now(),
@@ -515,7 +719,7 @@ export async function startOrResumeImport(
 
       if (activeCtrl.isPaused) {
         checkpoint.status = 'paused';
-        saveImportCheckpoint(checkpoint);
+        await saveImportCheckpointAsync(checkpoint);
         activeControllers.delete(ctrlKey);
         return { success: false, status: 'paused', mergedAnimes: workingAnimes, checkpoint };
       }
@@ -531,6 +735,7 @@ export async function startOrResumeImport(
 
       // PASSO 6: Somente após a resolução com sucesso de onBatchCommitted o checkpoint avança
       workingAnimes = nextWorkingAnimes;
+      checkpoint.version = candidateCheckpoint.version;
       checkpoint.cursor = candidateCheckpoint.cursor;
       checkpoint.page = candidateCheckpoint.page;
       checkpoint.recordsReceived = candidateCheckpoint.recordsReceived;
@@ -546,12 +751,19 @@ export async function startOrResumeImport(
       checkpoint.updatedAtMs = candidateCheckpoint.updatedAtMs;
       checkpoint.lastUpdated = candidateCheckpoint.lastUpdated;
 
-      saveImportCheckpoint(checkpoint);
+      await saveImportCheckpointAsync(checkpoint);
 
       // PASSO 7: Atualizar o estado visual e comunicar o progresso confirmado
       const percentage =
         checkpoint.totalEstimated && checkpoint.totalEstimated > 0
-          ? Math.min(99, Math.round(((checkpoint.recordsConfirmed ?? checkpoint.recordsProcessed) / checkpoint.totalEstimated) * 100))
+          ? Math.min(
+              99,
+              Math.round(
+                ((checkpoint.recordsConfirmed ?? checkpoint.recordsProcessed) /
+                  checkpoint.totalEstimated) *
+                  100
+              )
+            )
           : null;
 
       const progressUpdate: ImportProgressUpdate = {
@@ -571,7 +783,7 @@ export async function startOrResumeImport(
         break;
       }
 
-      // Pequena pausa assíncrona entre lotes para manter a interface do usuário responsiva
+      // Pequena pausa assíncrona entre lotes para manter a interface responsiva
       await new Promise((r) => setTimeout(r, 60));
     }
 
@@ -582,7 +794,7 @@ export async function startOrResumeImport(
     checkpoint.recordsProcessed = workingAnimes.length;
     checkpoint.updatedAtMs = Date.now();
     checkpoint.lastUpdated = new Date().toISOString();
-    saveImportCheckpoint(checkpoint);
+    await saveImportCheckpointAsync(checkpoint);
 
     // Registra sucesso e atualiza cooldown da Etapa 2
     recordExternalSyncSuccess({
@@ -616,18 +828,19 @@ export async function startOrResumeImport(
 
     if (activeCtrl.isPaused) {
       checkpoint.status = 'paused';
-      saveImportCheckpoint(checkpoint);
+      await saveImportCheckpointAsync(checkpoint);
       return { success: false, status: 'paused', mergedAnimes: workingAnimes, checkpoint };
     }
 
     // Em caso de falha durante a persistência, o checkpoint preserva o último cursor confirmado
-    const errorMsg = err instanceof Error ? err.message : 'Falha na comunicação ou persistência da importação.';
+    const errorMsg =
+      err instanceof Error ? err.message : 'Falha na comunicação ou persistência da importação.';
     checkpoint.status = 'error';
     checkpoint.errorMessage = errorMsg;
     checkpoint.lastError = errorMsg;
     checkpoint.updatedAtMs = Date.now();
     checkpoint.lastUpdated = new Date().toISOString();
-    saveImportCheckpoint(checkpoint);
+    await saveImportCheckpointAsync(checkpoint);
 
     if (onError) {
       onError(err instanceof Error ? err : new Error(errorMsg), checkpoint);
