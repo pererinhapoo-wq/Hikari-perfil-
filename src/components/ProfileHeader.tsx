@@ -120,28 +120,7 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
         {/* Gradient overlay for text contrast */}
         <div className="absolute inset-0 bg-gradient-to-t from-[#130E24] via-[#130E24]/30 to-transparent" />
 
-        {/* Banner Controls for Profile Owner */}
-        {isOwnProfile && (
-          <div className="absolute top-4 right-4 flex items-center gap-2">
-            <button
-              onClick={() => bannerInputRef.current?.click()}
-              className="flex items-center gap-1.5 rounded-lg bg-black/60 px-3 py-1.5 text-xs font-medium text-white backdrop-blur-md hover:bg-purple-900/70 transition-all border border-purple-500/30"
-              title="Trocar banner do perfil"
-            >
-              <Camera className="h-3.5 w-3.5 text-purple-300" />
-              <span>{profile.bannerUrl ? 'Trocar Banner' : 'Adicionar Banner'}</span>
-            </button>
-            {profile.bannerUrl && (
-              <button
-                onClick={onRemoveBanner}
-                className="flex items-center justify-center rounded-lg bg-black/60 p-1.5 text-xs text-rose-300 backdrop-blur-md hover:bg-rose-950/80 transition-all border border-rose-500/30"
-                title="Remover banner"
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
-            )}
-          </div>
-        )}
+
       </div>
 
       {/* Profile Details Bar */}
@@ -200,18 +179,7 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
                 </div>
               )}
 
-              {/* Mobile Quick Camera Badge */}
-              {isOwnProfile && (
-                <button
-                  type="button"
-                  onClick={() => onOpenSettings('profile')}
-                  className="sm:hidden absolute bottom-1 right-1 rounded-full bg-purple-600 p-1.5 text-white shadow-lg border-2 border-[#130E24] hover:bg-purple-500 transition-colors cursor-pointer"
-                  title="Editar foto de perfil"
-                  aria-label="Editar foto de perfil"
-                >
-                  <Camera className="h-3.5 w-3.5" />
-                </button>
-              )}
+
             </div>
 
             {/* Display Name, Username & Privacy Status */}

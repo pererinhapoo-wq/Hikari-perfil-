@@ -115,6 +115,7 @@ export interface UserActivity {
   animeId?: string;
   animeTitle?: string;
   posterUrl?: string;
+  isPrivate?: boolean;
 }
 
 export interface FollowUser {

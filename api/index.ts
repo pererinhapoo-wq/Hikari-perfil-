@@ -3,6 +3,7 @@ import { malRouter } from '../src/server/malRoutes.js';
 import { chatRouter } from '../src/server/chatRoutes.js';
 import { adminRouter } from '../src/server/adminRoutes.js';
 import { blobRouter } from '../src/server/blobRoutes.js';
+import { activityRouter } from '../src/server/activityRoutes.js';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -41,6 +42,11 @@ app.use('/admin', adminRouter);
 // Rotas de mídia e Vercel Blob (/api/media e /media)
 app.use('/api/media', blobRouter);
 app.use('/media', blobRouter);
+
+// Rotas de atividades do Hikari (/api/activities, /activities e /api/users/:userId/activities)
+app.use('/api/activities', activityRouter);
+app.use('/activities', activityRouter);
+app.use('/api/users', activityRouter);
 
 // Endpoint de diagnóstico e integridade
 app.get(['/api', '/api/health'], (_req, res) => {
