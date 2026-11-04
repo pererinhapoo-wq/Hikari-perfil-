@@ -144,3 +144,24 @@ button:active:not(:disabled), a:active:not([disabled]), [role="button"]:active {
   }
 }
 
+
+
+/* Identidade Hikari Perfil: brilho aurora próprio, diferente do efeito Aether. */
+@keyframes hikariProfileAurora {
+  0%, 12% { background-position: 180% 50%; }
+  62%, 100% { background-position: -180% 50%; }
+}
+.hikari-profile-aurora {
+  display: inline-block;
+  color: transparent;
+  background-image: linear-gradient(105deg, #c4b5fd 0%, #e9d5ff 22%, #ffffff 34%, #a78bfa 48%, #ddd6fe 62%, #c4b5fd 78%);
+  background-size: 240% 100%;
+  background-position: 180% 50%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  animation: hikariProfileAurora 6.5s ease-in-out infinite;
+  filter: drop-shadow(0 0 8px rgba(139, 92, 246, 0.22));
+}
+@media (prefers-reduced-motion: reduce) {
+  .hikari-profile-aurora { animation: none; background-position: 50% 50%; }
+}

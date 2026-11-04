@@ -7,6 +7,7 @@ import {
 import {
   mergeFavoriteCompanies,
   mergeFavoritePeople,
+  pruneAniListFavoritesOnDisconnect,
 } from '../../utils/animeSyncHelpers';
 import type { FavoriteCompany, FavoritePerson } from '../../types';
 
@@ -298,4 +299,37 @@ assert.strictEqual(userA_SyncedPeople[0].name, 'Naoko Yamada');
 assert.strictEqual(userA_SyncedPeople[1].name, 'Rie Takahashi');
 console.log('✓ Isolamento de workspaces entre usuários validado.');
 
-console.log('\n=== TODOS OS 8 TESTES PASSARAM COM SUCESSO! ===');
+// 12. Desconexão do AniList remove favoritos importados e preserva itens manuais.
+const charsAfterDisconnect = pruneAniListFavoritesOnDisconnect(
+  [
+    { id: 'char_al_12345', name: 'Frieren', animeName: 'Sousou no Frieren', role: 'Protagonista', imageUrl: 'https://example.com/frieren.jpg' },
+    { id: 'manual_char_1', name: 'Personagem manual', animeName: 'Anime', role: 'Apoio', imageUrl: '' },
+  ],
+  'char_al_'
+);
+assert.deepStrictEqual(charsAfterDisconnect.map((item) => item.id), ['manual_char_1']);
+
+const companiesAfterDisconnect = pruneAniListFavoritesOnDisconnect(
+  [
+    { id: 'comp_al_43', name: 'ufotable', type: 'Estúdio de Animação', notableWorks: '', logoUrl: '', anilistId: 43 },
+    { id: 'manual_company_1', name: 'Wit Studio', type: 'Estúdio', notableWorks: 'Obras manuais', logoUrl: '', anilistId: 858 },
+    { id: 'manual_company_2', name: 'Studio Manual', type: 'Estúdio', notableWorks: '', logoUrl: '' },
+  ],
+  'comp_al_'
+);
+assert.deepStrictEqual(companiesAfterDisconnect.map((item) => item.id), ['manual_company_1', 'manual_company_2']);
+assert.strictEqual(companiesAfterDisconnect[0].anilistId, undefined);
+assert.strictEqual(companiesAfterDisconnect[0].name, 'Wit Studio');
+
+const peopleAfterDisconnect = pruneAniListFavoritesOnDisconnect(
+  [
+    { id: 'person_al_95087', name: 'Staff AniList', role: 'Seiyuu', notableWork: '', imageUrl: '', anilistId: 95087 },
+    { id: 'manual_person_1', name: 'Pessoa manual', role: 'Diretor', notableWork: '', imageUrl: '', anilistId: 42 },
+  ],
+  'person_al_'
+);
+assert.deepStrictEqual(peopleAfterDisconnect.map((item) => item.id), ['manual_person_1']);
+assert.strictEqual(peopleAfterDisconnect[0].anilistId, undefined);
+console.log('✔ Teste 12 passou: desconexão remove favoritos AniList e preserva favoritos manuais');
+
+console.log('\n=== TODOS OS TESTES PASSARAM COM SUCESSO! ===');

@@ -25,6 +25,7 @@ import {
   fetchAuthorizedUserProfileComplete,
   followRemoteUser,
   unfollowRemoteUser,
+  removeRemoteFollower,
   submitRemoteProfileReport,
   respondRemoteFollowRequest,
   fetchOwnerNotifications,
@@ -312,11 +313,13 @@ function mergeServerSocialIntoWorkspace(
     if (!incoming || !incoming.id || seenIds.has(incoming.id)) continue;
     seenIds.add(incoming.id);
     const localExisting = prevNotifById.get(incoming.id);
-    mergedNotifs.push(
-      localExisting && localExisting.isRead && !incoming.isRead
-        ? { ...incoming, isRead: true }
-        : incoming
-    );
+    mergedNotifs.push({
+      ...incoming,
+      isRead: Boolean(localExisting?.isRead || incoming.isRead),
+      ...(localExisting?.handled || incoming.handled
+        ? { handled: localExisting?.handled || incoming.handled }
+        : {}),
+    });
   }
   for (const localOnly of prev.notifications) {
     if (localOnly && localOnly.id && !seenIds.has(localOnly.id)) {
@@ -1152,6 +1155,7 @@ export default function App() {
         activities: activeAuthWorkspace.activities,
         comments: activeAuthWorkspace.comments,
         blockedIds: activeAuthWorkspace.blockedIds,
+        notifications: activeAuthWorkspace.notifications,
         updatedAtMs: activeAuthWorkspace.updatedAtMs || Date.now(),
       }).then((serverSocial) => {
         if (!serverSocial || authEpochRef.current !== epoch) return;
@@ -1372,10 +1376,17 @@ export default function App() {
       }
     }
 
+    const visitedConnections: FollowUser[] = [];
+    for (const detail of Object.values(remoteVisitedDetails)) {
+      if (Array.isArray(detail.followers)) visitedConnections.push(...detail.followers);
+      if (Array.isArray(detail.following)) visitedConnections.push(...detail.following);
+    }
+
     const ownConnections: FollowUser[] = [
       ...activeAuthWorkspace.followers,
       ...activeAuthWorkspace.following,
       ...activeAuthWorkspace.followRequests.map((req) => req.user),
+      ...visitedConnections,
     ];
     for (const connUser of ownConnections) {
       if (connUser.id && connUser.id !== currentUser.id && !map[connUser.id]) {
@@ -1388,6 +1399,7 @@ export default function App() {
     activeAuthWorkspace,
     authPublicProfilesMap,
     remoteVisitedProfiles,
+    remoteVisitedDetails,
     currentUser.id,
   ]);
 
@@ -1833,6 +1845,18 @@ export default function App() {
             ...prev,
             [userId]: OTHER_USERS[userId],
           }));
+        } else {
+          const matchedConn = [
+            ...demoFollowers,
+            ...demoFollowing,
+            ...demoFollowRequests.map((r) => r.user),
+          ].find((u) => u.id === userId);
+          if (matchedConn) {
+            setDemoOtherProfiles((prev) => ({
+              ...prev,
+              [matchedConn.id]: buildProfileFromFollowUser(matchedConn),
+            }));
+          }
         }
       }
 
@@ -1840,7 +1864,15 @@ export default function App() {
       setActiveTab('overview');
       window.scrollTo({ top: 0, behavior: 'smooth' });
     },
-    [isAuthenticated, user, authOtherProfilesMap, demoOtherProfiles]
+    [
+      isAuthenticated,
+      user,
+      authOtherProfilesMap,
+      demoOtherProfiles,
+      demoFollowers,
+      demoFollowing,
+      demoFollowRequests,
+    ]
   );
 
   // Handler: Open filtered Anime List from clickable Anime Stats status rows
@@ -2378,12 +2410,13 @@ export default function App() {
   // Handler: Remove follower
   const handleRemoveFollower = (userId: string) => {
     if (isAuthenticated) {
+      void removeRemoteFollower(userId);
       updateAuthWorkspace((prev) => ({
         ...prev,
         followers: prev.followers.filter((u) => u.id !== userId),
         profileOverrides: {
           ...prev.profileOverrides,
-          followersCount: Math.max(0, (prev.profileOverrides.followersCount ?? 0) - 1),
+          followersCount: Math.max(0, (prev.profileOverrides.followersCount ?? prev.followers.length) - 1),
         },
       }));
       return;
@@ -3056,7 +3089,7 @@ export default function App() {
 
   const handleMarkAllNotificationsAsRead = useCallback(() => {
     if (isAuthenticated && user?.uid) {
-      void markOwnerNotificationsRead(user.uid, { markAll: true });
+      void markOwnerNotificationsRead(user.uid, { markAll: true, notificationIds: notifications.map((notification) => notification.id) });
       updateAuthWorkspace((prev) => {
         const hasUnread = prev.notifications.some((n) => !n.isRead);
         if (!hasUnread) return prev;
@@ -3075,7 +3108,7 @@ export default function App() {
       if (!hasUnread) return prev;
       return prev.map((n) => (n.isRead ? n : { ...n, isRead: true }));
     });
-  }, [isAuthenticated, user?.uid, updateAuthWorkspace]);
+  }, [isAuthenticated, user?.uid, updateAuthWorkspace, notifications]);
 
   // Resolve the real profile ID of a notification's actor without fabricating nonexistent users
   const resolveNotificationActorProfileId = useCallback(
@@ -3389,7 +3422,7 @@ export default function App() {
         className="min-h-screen bg-[#0A0713] text-[#EDE8F5] flex flex-col items-center justify-center gap-4 px-4"
       >
         <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-tr from-purple-700 via-purple-600 to-indigo-500 shadow-lg shadow-purple-950/60 ring-1 ring-purple-400/30">
-          <span className="text-xl font-black tracking-tighter text-white">光</span>
+          <span className="text-xl font-black tracking-tighter text-white">H</span>
         </div>
         <div className="flex items-center gap-2.5 text-sm font-medium text-purple-200">
           <Loader2 className="h-4 w-4 animate-spin text-purple-400" />
@@ -3611,19 +3644,34 @@ export default function App() {
             onRemoveFollower={handleRemoveFollower}
             onAcceptRequest={handleAcceptRequest}
             onRejectRequest={handleRejectRequest}
+            onSelectProfile={handleSelectProfile}
             onBlockUser={(userId) => {
               if (isAuthenticated) {
+                void removeRemoteFollower(userId);
+                void unfollowRemoteUser(userId);
                 updateAuthWorkspace((prev) => {
                   const nextBlocked = prev.blockedIds.includes(userId)
                     ? prev.blockedIds
                     : [...prev.blockedIds, userId];
+                  const wasFollower = prev.followers.some((u) => u.id === userId);
+                  const wasFollowing = prev.followingIds.includes(userId);
                   return {
                     ...prev,
                     blockedIds: nextBlocked,
                     followers: prev.followers.filter((u) => u.id !== userId),
+                    following: prev.following.filter((u) => u.id !== userId),
+                    followingIds: prev.followingIds.filter((id) => id !== userId),
+                    requestedIds: prev.requestedIds.filter((id) => id !== userId),
                     profileOverrides: {
                       ...prev.profileOverrides,
-                      followersCount: Math.max(0, (prev.profileOverrides.followersCount ?? 0) - 1),
+                      followersCount: Math.max(
+                        0,
+                        (prev.profileOverrides.followersCount ?? prev.followers.length) - (wasFollower ? 1 : 0)
+                      ),
+                      followingCount: Math.max(
+                        0,
+                        (prev.profileOverrides.followingCount ?? prev.followingIds.length) - (wasFollowing ? 1 : 0)
+                      ),
                     },
                   };
                 });

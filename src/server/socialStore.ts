@@ -48,6 +48,7 @@ export interface SyncUserPayload {
   activities?: UserActivity[];
   comments?: HikariComment[];
   blockedIds?: string[];
+  notifications?: NotificationItem[];
   updatedAtMs?: number;
 }
 
@@ -386,6 +387,27 @@ export class SocialStore {
       followingCount: authoritativeFollowingCount,
     };
 
+    let nextNotifications = existing.notifications;
+    if (Array.isArray(payload.notifications) && payload.notifications.length > 0) {
+      const clientById = new Map<string, NotificationItem>();
+      for (const n of payload.notifications) {
+        if (n && typeof n.id === 'string' && n.id) {
+          clientById.set(n.id, n);
+        }
+      }
+      nextNotifications = existing.notifications.map((serverNotif) => {
+        const clientNotif = clientById.get(serverNotif.id);
+        if (!clientNotif) return serverNotif;
+        return {
+          ...serverNotif,
+          isRead: Boolean(serverNotif.isRead || clientNotif.isRead),
+          ...(serverNotif.handled || clientNotif.handled
+            ? { handled: serverNotif.handled || clientNotif.handled }
+            : {}),
+        };
+      });
+    }
+
     const nextRecord: StoredUserRecord = {
       ...existing,
       uid,
@@ -403,6 +425,7 @@ export class SocialStore {
       activities: Array.isArray(payload.activities) ? payload.activities : existing.activities,
       comments: Array.isArray(payload.comments) ? payload.comments : existing.comments,
       blockedIds: Array.isArray(payload.blockedIds) ? payload.blockedIds : existing.blockedIds,
+      notifications: nextNotifications,
       updatedAtMs: Math.max(existing.updatedAtMs, Number(payload.updatedAtMs) || Date.now()),
     };
 
@@ -658,7 +681,7 @@ export class SocialStore {
       const notifId = `notif_req_${followerUid}_${targetUid}`;
       const existingNotifIdx = target.notifications.findIndex((n) => n.id === notifId);
       let delivered: NotificationItem | null = null;
-      if (existingNotifIdx === -1) {
+      if (existingNotifIdx === -1 || Boolean(target.notifications[existingNotifIdx]?.handled)) {
         const createdNotif: NotificationItem = {
           id: notifId,
           type: 'follow_request',
@@ -674,7 +697,10 @@ export class SocialStore {
           contextData: { requestId },
         };
         delivered = createdNotif;
-        target.notifications = [createdNotif, ...target.notifications];
+        target.notifications = [
+          createdNotif,
+          ...target.notifications.filter((n) => n.id !== notifId),
+        ];
       }
 
       follower.updatedAtMs = nowMs;
@@ -822,6 +848,22 @@ export class SocialStore {
     return {
       followerRecord: follower,
       targetFollowersCount,
+    };
+  }
+
+  public removeFollower(
+    ownerUid: string,
+    followerIdOrUsername: string
+  ): {
+    ownerRecord: StoredUserRecord | null;
+    ownerFollowersCount: number;
+  } {
+    const followerRec = this.getUserRecord(followerIdOrUsername);
+    const followerUid = followerRec ? followerRec.uid : followerIdOrUsername.trim();
+    const res = this.unfollowUser(followerUid, ownerUid);
+    return {
+      ownerRecord: this.users.get(ownerUid) ?? null,
+      ownerFollowersCount: res.targetFollowersCount,
     };
   }
 
@@ -987,6 +1029,40 @@ export class SocialStore {
       if (!n.isRead) unreadCount++;
     }
     return { notifications: rec.notifications, unreadCount };
+  }
+
+  public mergeExternalNotifications(
+    ownerUid: string,
+    external: NotificationItem[]
+  ): NotificationItem[] {
+    const rec = this.users.get(ownerUid);
+    if (!Array.isArray(external) || external.length === 0) {
+      return rec ? rec.notifications : [];
+    }
+    const byId = new Map<string, NotificationItem>();
+    const currentList = rec ? rec.notifications : [];
+    for (const item of [...currentList, ...external]) {
+      if (!item || !item.id) continue;
+      const existing = byId.get(item.id);
+      if (!existing) {
+        byId.set(item.id, item);
+      } else {
+        byId.set(item.id, {
+          ...existing,
+          ...item,
+          isRead: Boolean(existing.isRead || item.isRead),
+          ...(existing.handled || item.handled
+            ? { handled: existing.handled || item.handled }
+            : {}),
+        });
+      }
+    }
+    const merged = [...byId.values()];
+    if (rec) {
+      rec.notifications = merged;
+      this.saveToDisk();
+    }
+    return merged;
   }
 }
 

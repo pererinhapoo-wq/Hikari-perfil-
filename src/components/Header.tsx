@@ -361,15 +361,12 @@ export const Header: React.FC<HeaderProps> = React.memo(({
             className="group flex items-center gap-2 text-left focus:outline-none cursor-pointer"
           >
             <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-tr from-purple-700 via-purple-600 to-indigo-500 shadow-md shadow-purple-900/40 ring-1 ring-purple-400/30 transition-transform group-hover:scale-105">
-              <span className="text-lg font-black tracking-tighter text-white">光</span>
+              <span className="text-lg font-black tracking-tighter text-white">H</span>
             </div>
             <div className="flex flex-col">
               <div className="flex items-center gap-1.5">
-                <span className="text-xl font-bold tracking-tight text-white group-hover:text-purple-200 transition-colors">
-                  Hikari
-                </span>
-                <span className="text-[10px] font-semibold uppercase tracking-wider text-purple-400 bg-purple-950/60 border border-purple-800/40 px-1.5 py-0.5 rounded">
-                  Perfis
+                <span className="hikari-profile-aurora text-xl font-extrabold tracking-tight">
+                  Hikari Perfil
                 </span>
               </div>
             </div>

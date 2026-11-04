@@ -165,12 +165,9 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       <header className="relative z-10 mx-auto flex w-full max-w-7xl items-center justify-between">
         <div className="flex items-center gap-2.5">
           <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-tr from-purple-700 via-purple-600 to-indigo-500 shadow-md shadow-purple-900/40 ring-1 ring-purple-400/30">
-            <span className="text-lg font-black tracking-tighter text-white">光</span>
+            <span className="text-lg font-black tracking-tighter text-white">H</span>
           </div>
-          <div className="flex items-baseline gap-2">
-            <span className="text-xl font-bold tracking-tight text-white">Hikari</span>
-            <span className="text-xs font-medium text-purple-300/70">Perfis</span>
-          </div>
+          <span className="hikari-profile-aurora text-xl font-extrabold tracking-tight">Hikari Perfil</span>
         </div>
 
         <button
@@ -458,7 +455,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
 
       {/* Quiet Footer */}
       <footer className="relative z-10 mx-auto w-full max-w-7xl text-center text-[11px] text-purple-400/45">
-        Hikari — Perfis de Usuários
+        Hikari Perfil
       </footer>
     </div>
   );

@@ -110,6 +110,7 @@ export async function syncOwnerSocialWorkspace(
     activities?: UserActivity[];
     comments?: HikariComment[];
     blockedIds?: string[];
+    notifications?: NotificationItem[];
     updatedAtMs?: number;
   }
 ): Promise<(OwnerSocialNotificationsState & { updatedAtMs: number }) | null> {
@@ -323,6 +324,31 @@ export async function unfollowRemoteUser(targetId: string): Promise<{
       method: 'POST',
       headers,
     });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function removeRemoteFollower(followerId: string): Promise<{
+  ok: boolean;
+  callerSocialState: OwnerSocialNotificationsState;
+} | null> {
+  const cleanFollower = followerId.trim();
+  if (!cleanFollower) return null;
+
+  try {
+    const headers = await buildAuthorizedHeaders(true);
+    if (!headers.Authorization) return null;
+
+    const res = await fetch(
+      buildApiUrl(`/api/users/${encodeURIComponent(cleanFollower)}/remove-follower`),
+      {
+        method: 'POST',
+        headers,
+      }
+    );
     if (!res.ok) return null;
     return await res.json();
   } catch {

@@ -1,9 +1,91 @@
 import { Router, type Request, type Response } from 'express';
 import { socialStore } from './socialStore.js';
 import { verifyRequestUser } from './userAuth.js';
-import { getAdminFirestore } from './firebaseAdmin.js';
+import { getAdminFirestore, getFirebaseAdminStatus } from './firebaseAdmin.js';
+import { createHash } from 'node:crypto';
+import type { NotificationItem } from '../types/index.js';
 
 export const socialRouter = Router();
+
+const NOTIFICATIONS_COLLECTION = 'hikari_user_notifications';
+
+function notificationDocumentId(ownerUid: string, notificationId: string): string {
+  return createHash('sha256').update(`${ownerUid}:${notificationId}`).digest('hex');
+}
+
+/** Persist notification events outside the serverless instance's local filesystem. */
+async function persistOwnerNotifications(ownerUid: string, notifications: NotificationItem[]): Promise<void> {
+  if (!notifications.length) return;
+  if (!getFirebaseAdminStatus().isConfigured) return;
+  const db = getAdminFirestore();
+  const batch = db.batch();
+  for (const notification of notifications) {
+    const ref = db.collection(NOTIFICATIONS_COLLECTION).doc(notificationDocumentId(ownerUid, notification.id));
+    batch.set(ref, {
+      ...notification,
+      ownerUid,
+      createdAtMs: Date.now(),
+    }, { merge: true });
+  }
+  await batch.commit();
+}
+
+async function readPersistedOwnerNotifications(ownerUid: string): Promise<NotificationItem[] | null> {
+  if (!getFirebaseAdminStatus().isConfigured) return null;
+  try {
+    const db = getAdminFirestore();
+    const snapshot = await db.collection(NOTIFICATIONS_COLLECTION)
+      .where('ownerUid', '==', ownerUid)
+      .limit(200)
+      .get();
+    return snapshot.docs
+      .map((doc) => doc.data() as NotificationItem & { createdAtMs?: number })
+      .sort((a, b) => (Number((b as any).createdAtMs) || 0) - (Number((a as any).createdAtMs) || 0))
+      .map(({ ownerUid: _ownerUid, createdAtMs: _createdAtMs, ...notification }) => notification as NotificationItem);
+  } catch (error) {
+    console.warn('[social] Firestore notifications unavailable; using current social store:', error);
+    return null;
+  }
+}
+
+async function markPersistedOwnerNotificationsRead(
+  ownerUid: string,
+  options: { notificationId?: string; notificationIds?: string[]; markAll?: boolean }
+): Promise<void> {
+  if (!getFirebaseAdminStatus().isConfigured) return;
+  const db = getAdminFirestore();
+  const query = db.collection(NOTIFICATIONS_COLLECTION).where('ownerUid', '==', ownerUid);
+  if (!options.markAll) {
+    const ids = options.notificationIds?.length
+      ? options.notificationIds
+      : options.notificationId ? [options.notificationId] : [];
+    if (!ids.length) return;
+    const batch = db.batch();
+    ids.forEach((id) => {
+      const ref = db.collection(NOTIFICATIONS_COLLECTION).doc(notificationDocumentId(ownerUid, id));
+      batch.set(ref, { ownerUid, id, isRead: true }, { merge: true });
+    });
+    await batch.commit();
+    return;
+  }
+  const snapshot = await query.limit(200).get();
+  const batch = db.batch();
+  snapshot.docs.forEach((doc) => batch.update(doc.ref, { isRead: true }));
+  for (const id of options.notificationIds ?? []) {
+    const ref = db.collection(NOTIFICATIONS_COLLECTION).doc(notificationDocumentId(ownerUid, id));
+    batch.set(ref, { ownerUid, id, isRead: true }, { merge: true });
+  }
+  if (!snapshot.empty || (options.notificationIds?.length ?? 0) > 0) await batch.commit();
+}
+
+async function getMergedOwnerNotificationsState(ownerUid: string) {
+  const persisted = await readPersistedOwnerNotifications(ownerUid);
+  if (persisted && persisted.length > 0) {
+    socialStore.mergeExternalNotifications(ownerUid, persisted);
+  }
+  return socialStore.getNotificationsState(ownerUid);
+}
+
 
 /**
  * POST /api/users/:targetId/report
@@ -113,10 +195,11 @@ socialRouter.put('/:userId/sync', async (req: Request, res: Response) => {
     activities: Array.isArray(body.activities) ? body.activities : undefined,
     comments: Array.isArray(body.comments) ? body.comments : undefined,
     blockedIds: Array.isArray(body.blockedIds) ? body.blockedIds : undefined,
+    notifications: Array.isArray(body.notifications) ? body.notifications : undefined,
     updatedAtMs: typeof body.updatedAtMs === 'number' ? body.updatedAtMs : Date.now(),
   });
 
-  const socialState = socialStore.getNotificationsState(caller.uid);
+  const socialState = await getMergedOwnerNotificationsState(caller.uid);
   return res.json({
     ok: true,
     uid: caller.uid,
@@ -257,6 +340,14 @@ socialRouter.post('/:targetId/follow', async (req: Request, res: Response) => {
       req.body?.targetSummary
     );
     const callerState = socialStore.getNotificationsState(caller.uid);
+    const targetRecord = socialStore.getUserRecord(targetId);
+    if (targetRecord && result.deliveredNotification) {
+      try {
+        await persistOwnerNotifications(targetRecord.uid, [result.deliveredNotification]);
+      } catch (persistError) {
+        console.error('[social] Falha ao persistir notificação de seguidor no Firestore:', persistError);
+      }
+    }
     return res.json({
       ok: true,
       status: result.status,
@@ -295,6 +386,27 @@ socialRouter.post('/:targetId/unfollow', async (req: Request, res: Response) => 
 });
 
 /**
+ * POST /api/users/:followerId/remove-follower
+ */
+socialRouter.post('/:followerId/remove-follower', async (req: Request, res: Response) => {
+  const followerId = String(req.params.followerId || '').trim();
+  const caller = await verifyRequestUser(req);
+  if (!caller.authenticated || !caller.uid) {
+    return res.status(401).json({
+      error: 'UNAUTHORIZED',
+      message: caller.reason || 'Autenticação obrigatória.',
+    });
+  }
+
+  socialStore.removeFollower(caller.uid, followerId);
+  const callerState = await getMergedOwnerNotificationsState(caller.uid);
+  return res.json({
+    ok: true,
+    callerSocialState: callerState,
+  });
+});
+
+/**
  * POST /api/users/follow-requests/:requestId/respond
  */
 socialRouter.post('/follow-requests/:requestId/respond', async (req: Request, res: Response) => {
@@ -310,11 +422,24 @@ socialRouter.post('/follow-requests/:requestId/respond', async (req: Request, re
   }
 
   try {
+    const ownerBefore = socialStore.getUserRecord(caller.uid);
+    const requesterUid = ownerBefore?.followRequests.find((item) => item.id === requestId)?.user.id;
     socialStore.respondToFollowRequest(caller.uid, requestId, action);
-    return res.json({
-      ok: true,
-      ...socialStore.getNotificationsState(caller.uid),
-    });
+    const ownerState = socialStore.getNotificationsState(caller.uid);
+    const ownerHandled = ownerState.notifications.filter((item) => item.contextData?.requestId === requestId);
+    if (ownerHandled.length) {
+      try { await persistOwnerNotifications(caller.uid, ownerHandled); }
+      catch (persistError) { console.error('[social] Falha ao persistir atualização de solicitação:', persistError); }
+    }
+    if (action === 'accept' && requesterUid) {
+      const requester = socialStore.getUserRecord(requesterUid);
+      const accepted = requester?.notifications.filter((item) => item.id === `notif_accepted_${caller.uid}_${requesterUid}`) ?? [];
+      if (accepted.length) {
+        try { await persistOwnerNotifications(requesterUid, accepted); }
+        catch (persistError) { console.error('[social] Falha ao persistir notificação de solicitação aceita:', persistError); }
+      }
+    }
+    return res.json({ ok: true, ...ownerState });
   } catch (err) {
     return res.status(400).json({
       error: err instanceof Error ? err.message : 'Erro ao processar solicitação.',
@@ -344,7 +469,8 @@ socialRouter.get('/:userId/notifications', async (req: Request, res: Response) =
     });
   }
 
-  return res.json(socialStore.getNotificationsState(caller.uid));
+  const state = await getMergedOwnerNotificationsState(caller.uid);
+  return res.json(state);
 });
 
 /**
@@ -376,8 +502,11 @@ socialRouter.post('/:userId/notifications/read', async (req: Request, res: Respo
     markAll,
   });
 
-  return res.json({
-    ok: true,
-    ...updated,
-  });
+  try {
+    await markPersistedOwnerNotificationsRead(caller.uid, { notificationId, notificationIds, markAll });
+  } catch (persistError) {
+    console.warn('[social] Falha ao persistir estado de leitura das notificações no Firestore; mantido em socialStore:', persistError);
+  }
+
+  return res.json({ ok: true, ...updated });
 });

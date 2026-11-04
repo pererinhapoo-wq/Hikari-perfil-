@@ -26,6 +26,7 @@ interface FollowersModalProps {
   onAcceptRequest: (requestId: string) => void;
   onRejectRequest: (requestId: string) => void;
   onBlockUser: (userId: string) => void;
+  onSelectProfile: (userId: string) => void;
 }
 
 export const FollowersModal: React.FC<FollowersModalProps> = ({
@@ -40,7 +41,8 @@ export const FollowersModal: React.FC<FollowersModalProps> = ({
   onRemoveFollower,
   onAcceptRequest,
   onRejectRequest,
-  onBlockUser
+  onBlockUser,
+  onSelectProfile
 }) => {
   const [prevInitialTab, setPrevInitialTab] = useState(initialTab);
   const [activeTab, setActiveTab] = useState<'followers' | 'following' | 'requests'>(initialTab);
@@ -208,7 +210,15 @@ export const FollowersModal: React.FC<FollowersModalProps> = ({
                     key={req.id}
                     className="flex items-center justify-between gap-3 rounded-xl border border-purple-900/30 bg-[#17112c] p-3 shadow-md"
                   >
-                    <div className="flex items-center gap-3 min-w-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClose();
+                        onSelectProfile(req.user.id);
+                      }}
+                      className="group flex items-center gap-3 min-w-0 flex-1 text-left rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-500 cursor-pointer"
+                      aria-label={`Abrir perfil de ${req.user.displayName}`}
+                    >
                       {req.user.avatarUrl ? (
                         <img
                           src={req.user.avatarUrl}
@@ -222,11 +232,13 @@ export const FollowersModal: React.FC<FollowersModalProps> = ({
                         </div>
                       )}
                       <div className="min-w-0">
-                        <div className="text-xs font-bold text-white truncate">{req.user.displayName}</div>
+                        <div className="text-xs font-bold text-white group-hover:text-purple-300 transition-colors truncate">
+                          {req.user.displayName}
+                        </div>
                         <div className="text-[11px] text-purple-400 truncate">@{req.user.username}</div>
                         <div className="text-[10px] text-purple-300/50">{req.requestedAt}</div>
                       </div>
-                    </div>
+                    </button>
 
                     <div className="flex items-center gap-1.5 shrink-0">
                       <button
@@ -258,7 +270,12 @@ export const FollowersModal: React.FC<FollowersModalProps> = ({
                   key={user.id}
                   className="flex items-center justify-between gap-3 rounded-xl border border-purple-900/30 bg-[#17112c]/60 p-3 hover:bg-[#1a1333] transition-colors"
                 >
-                  <div className="flex items-center gap-3 min-w-0">
+                  <button
+                    type="button"
+                    onClick={() => { onClose(); onSelectProfile(user.id); }}
+                    className="group flex items-center gap-3 min-w-0 flex-1 text-left rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-500 cursor-pointer"
+                    aria-label={`Abrir perfil de ${user.displayName}`}
+                  >
                     {user.avatarUrl ? (
                       <img
                         src={user.avatarUrl}
@@ -272,11 +289,11 @@ export const FollowersModal: React.FC<FollowersModalProps> = ({
                       </div>
                     )}
                     <div className="min-w-0">
-                      <div className="text-xs font-bold text-white truncate">{user.displayName}</div>
+                      <div className="text-xs font-bold text-white group-hover:text-purple-300 transition-colors truncate">{user.displayName}</div>
                       <div className="text-[11px] text-purple-400 truncate">@{user.username}</div>
                       <div className="text-[10px] text-purple-300/60 truncate max-w-xs">{user.bio}</div>
                     </div>
-                  </div>
+                  </button>
 
                   {/* Actions */}
                   <div className="flex items-center gap-1.5 shrink-0">

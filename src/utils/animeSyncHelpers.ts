@@ -82,6 +82,26 @@ export function clearLastFetchedAniListFavorites(): void {
   lastFetchedAniListPeople = [];
 }
 
+/** Remove apenas favoritos importados pelo AniList, preservando entradas manuais enriquecidas. */
+export function pruneAniListFavoritesOnDisconnect<
+  T extends { id: string; anilistId?: number } = FavoriteCharacter | FavoriteCompany | FavoritePerson
+>(
+  items: T[],
+  importedIdPrefix: 'char_al_' | 'comp_al_' | 'person_al_'
+): T[] {
+  if (!Array.isArray(items)) return [];
+  return items.flatMap((item) => {
+    const id = String(item?.id || '');
+    if (id.startsWith(importedIdPrefix)) return [];
+    if ('anilistId' in item && item.anilistId !== undefined) {
+      const preserved = { ...item } as T & { anilistId?: number };
+      delete preserved.anilistId;
+      return [preserved as T];
+    }
+    return [{ ...item }];
+  });
+}
+
 /**
  * Mescla personagens favoritos locais com os favoritos importados do AniList:
  * - Preserva a ordem original dos favoritos manuais e evita duplicatas.
