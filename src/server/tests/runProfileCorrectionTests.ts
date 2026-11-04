@@ -36,13 +36,15 @@ assert.equal(ENABLE_PRIVATE_MESSAGES, false, 'ENABLE_PRIVATE_MESSAGES deve perma
 assert.ok(fs.existsSync(path.resolve(process.cwd(), 'src/components/chat/PrivateChatModal.tsx')));
 assert.ok(fs.existsSync(path.resolve(process.cwd(), 'src/services/chatService.ts')));
 
-// 2. Identidade Hikari Perfil e animação Brilho Aurora
+// 2. Identidade Hikari Perfil e animação Aurora Flutuante (aura atrás das letras + reflexos ao redor, sem brilho atravessando as letras)
 const indexHtml = fs.readFileSync(path.resolve(process.cwd(), 'index.html'), 'utf8');
 const headerTsx = fs.readFileSync(path.resolve(process.cwd(), 'src/components/Header.tsx'), 'utf8');
 const indexCss = fs.readFileSync(path.resolve(process.cwd(), 'src/index.css'), 'utf8');
 assert.ok(indexHtml.includes('<title>Hikari Perfil</title>'));
 assert.ok(headerTsx.includes('hikari-profile-aurora') && headerTsx.includes('Hikari Perfil'));
 assert.ok(indexCss.includes('@keyframes hikariProfileAurora') && indexCss.includes('.hikari-profile-aurora'));
+assert.ok(indexCss.includes('.hikari-profile-aurora::before') && indexCss.includes('.hikari-profile-aurora::after'));
+assert.ok(indexCss.includes('@keyframes hikariAuroraReflections'));
 
 // 3. Links para abrir perfis na lista de seguidores, seguindo e solicitações
 const followersModalTsx = fs.readFileSync(path.resolve(process.cwd(), 'src/components/modals/FollowersModal.tsx'), 'utf8');

@@ -146,22 +146,126 @@ button:active:not(:disabled), a:active:not([disabled]), [role="button"]:active {
 
 
 
-/* Identidade Hikari Perfil: brilho aurora próprio, diferente do efeito Aether. */
+/* =========================================================================
+   Identidade Hikari Perfil — Animação Exclusiva: Aurora Flutuante
+   - Texto com cor sólida refinada (sem brilho atravessando as letras).
+   - Aura violeta suave atrás das letras com efeito lento de respiração.
+   - Pequenos reflexos luminosos discretos flutuando ao redor do título.
+   ========================================================================= */
 @keyframes hikariProfileAurora {
-  0%, 12% { background-position: 180% 50%; }
-  62%, 100% { background-position: -180% 50%; }
+  0%, 100% {
+    opacity: 0.36;
+    transform: scale3d(0.92, 0.86, 1) translate3d(0px, 1px, 0);
+  }
+  50% {
+    opacity: 0.88;
+    transform: scale3d(1.08, 1.16, 1) translate3d(0px, -1px, 0);
+  }
 }
+
+@keyframes hikariAuroraTextBreath {
+  0%, 100% {
+    text-shadow:
+      0 0 10px rgba(168, 85, 247, 0.26),
+      0 0 22px rgba(124, 58, 237, 0.14);
+  }
+  50% {
+    text-shadow:
+      0 0 15px rgba(192, 132, 252, 0.56),
+      0 0 30px rgba(139, 92, 246, 0.34);
+  }
+}
+
+@keyframes hikariAuroraReflections {
+  0%, 100% {
+    opacity: 0.12;
+    transform: translate3d(-1px, 1px, 0) scale(0.94);
+  }
+  38% {
+    opacity: 0.82;
+    transform: translate3d(1px, -1.5px, 0) scale(1.04);
+  }
+  72% {
+    opacity: 0.38;
+    transform: translate3d(-0.5px, -0.5px, 0) scale(0.98);
+  }
+}
+
 .hikari-profile-aurora {
+  position: relative;
   display: inline-block;
-  color: transparent;
-  background-image: linear-gradient(105deg, #c4b5fd 0%, #e9d5ff 22%, #ffffff 34%, #a78bfa 48%, #ddd6fe 62%, #c4b5fd 78%);
-  background-size: 240% 100%;
-  background-position: 180% 50%;
-  background-clip: text;
-  -webkit-background-clip: text;
-  animation: hikariProfileAurora 6.5s ease-in-out infinite;
-  filter: drop-shadow(0 0 8px rgba(139, 92, 246, 0.22));
+  isolation: isolate;
+  color: #f5f0ff;
+  text-shadow:
+    0 0 12px rgba(168, 85, 247, 0.34),
+    0 0 24px rgba(124, 58, 237, 0.2);
+  animation: hikariAuroraTextBreath 6.4s ease-in-out infinite;
 }
+
+/* Aura violeta suave atrás das letras com efeito de respiração */
+.hikari-profile-aurora::before {
+  content: "";
+  position: absolute;
+  inset: -7px -14px;
+  z-index: -1;
+  pointer-events: none;
+  border-radius: 9999px;
+  background: radial-gradient(
+    ellipse 70% 64% at 50% 52%,
+    rgba(168, 85, 247, 0.50) 0%,
+    rgba(139, 92, 246, 0.30) 45%,
+    rgba(109, 40, 217, 0.10) 74%,
+    rgba(109, 40, 217, 0) 100%
+  );
+  filter: blur(8px);
+  opacity: 0.45;
+  transform: scale3d(0.94, 0.9, 1);
+  will-change: transform, opacity;
+  animation: hikariProfileAurora 6.4s ease-in-out infinite;
+}
+
+/* Pequenos reflexos luminosos discretos ao redor do título */
+.hikari-profile-aurora::after {
+  content: "";
+  position: absolute;
+  inset: -6px -10px;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    radial-gradient(circle 3.5px at 10% 18%, rgba(233, 213, 255, 0.85) 0%, rgba(192, 132, 252, 0.32) 55%, transparent 100%),
+    radial-gradient(circle 4px at 86% 16%, rgba(243, 232, 255, 0.82) 0%, rgba(168, 85, 247, 0.30) 55%, transparent 100%),
+    radial-gradient(circle 3px at 68% 86%, rgba(221, 214, 254, 0.76) 0%, rgba(139, 92, 246, 0.26) 55%, transparent 100%),
+    radial-gradient(circle 2.5px at 26% 84%, rgba(233, 213, 255, 0.68) 0%, rgba(167, 139, 250, 0.22) 55%, transparent 100%);
+  opacity: 0.2;
+  will-change: transform, opacity;
+  animation: hikariAuroraReflections 7.6s ease-in-out infinite;
+}
+
+@media (max-width: 640px) {
+  .hikari-profile-aurora {
+    animation-duration: 7.6s;
+  }
+  .hikari-profile-aurora::before {
+    filter: blur(6px);
+    animation-duration: 7.6s;
+  }
+  .hikari-profile-aurora::after {
+    animation-duration: 8.8s;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .hikari-profile-aurora { animation: none; background-position: 50% 50%; }
+  .hikari-profile-aurora,
+  .hikari-profile-aurora::before,
+  .hikari-profile-aurora::after {
+    animation: none !important;
+  }
+  .hikari-profile-aurora::before {
+    opacity: 0.45 !important;
+    transform: none !important;
+  }
+  .hikari-profile-aurora::after {
+    opacity: 0.25 !important;
+    transform: none !important;
+  }
 }
