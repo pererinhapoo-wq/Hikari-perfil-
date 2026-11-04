@@ -2,6 +2,10 @@ import {
   collection,
   doc,
   getDoc,
+  getDocs,
+  where,
+  writeBatch,
+  increment,
   query,
   orderBy,
   limit as firestoreLimit,
@@ -28,6 +32,12 @@ import {
 
 export { getDeterministicConversationId, extractHikariLinkPreview, canUserMessageRecipient };
 export type { UserCheckContext };
+
+function isDemoMockUserId(userId: string | null | undefined): boolean {
+  if (!userId || typeof userId !== 'string') return false;
+  const clean = userId.trim();
+  return clean.startsWith('usr_');
+}
 
 const LEGACY_CONVERSATIONS_STORAGE_KEY = 'hikari_chat_conversations_cache_v1';
 const SCOPED_CONVERSATIONS_STORAGE_PREFIX = 'hikari_chat_conversations_cache_v2:';
@@ -343,20 +353,62 @@ function mergeServerAndConfirmedLocalMessages(
   for (const m of serverMsgs) {
     const isReadAdjusted =
       m.recipientId === viewerId && m.createdAt <= localReadFloor ? true : m.isRead;
-    byId.set(m.id, isReadAdjusted !== m.isRead ? { ...m, isRead: isReadAdjusted } : m);
+    byId.set(m.id, {
+      ...m,
+      isRead: isReadAdjusted !== m.isRead ? isReadAdjusted : m.isRead,
+      status: 'sent',
+    });
   }
 
-  // Preserve any recently confirmed message (< 30s) not yet reflected in an older in-flight poll
+  // Preserve in-flight, failed, and recent local messages
   const now = Date.now();
   for (const localMsg of localMsgs) {
-    if (!byId.has(localMsg.id) && now - localMsg.createdAt < 30_000) {
-      byId.set(localMsg.id, localMsg);
+    if (!byId.has(localMsg.id)) {
+      if (localMsg.status === 'failed') {
+        // Never discard failed messages; keep visible so user can see error state
+        byId.set(localMsg.id, localMsg);
+      } else if (localMsg.status === 'sending') {
+        // Keep in-flight message while waiting for confirmation (up to 45s); transition to failed if exceeded
+        if (now - localMsg.createdAt < 45_000) {
+          byId.set(localMsg.id, localMsg);
+        } else {
+          byId.set(localMsg.id, { ...localMsg, status: 'failed' });
+        }
+      } else if (localMsg.senderId === viewerId && now - localMsg.createdAt < 60_000) {
+        // Locally confirmed recent message kept to avoid drop due to poll latency
+        byId.set(localMsg.id, localMsg);
+      }
     }
   }
 
   const merged = Array.from(byId.values());
   merged.sort((a, b) => a.createdAt - b.createdAt);
   return merged;
+}
+
+/**
+ * Updates the status ('sending' | 'sent' | 'failed') of an existing local message in cache and active channels
+ */
+function markLocalMessageStatus(
+  convId: string,
+  userId: string,
+  msgId: string,
+  status: 'sending' | 'sent' | 'failed',
+  updatedData?: Partial<PrivateMessage>
+): void {
+  const currentCached = readCachedMessages(convId, userId);
+  let changed = false;
+  const nextMessages = currentCached.map((m) => {
+    if (m.id === msgId) {
+      changed = true;
+      return { ...m, ...(updatedData || {}), status };
+    }
+    return m;
+  });
+  if (changed) {
+    writeCachedMessages(convId, nextMessages, userId);
+    emitLocalMessagesToActiveChannels(convId, userId, nextMessages);
+  }
 }
 
 // ============================================================================
@@ -468,6 +520,69 @@ export async function fetchUserConversations(userId: string): Promise<PrivateCon
   }
 
   const request = (async (): Promise<PrivateConversation[]> => {
+    // 1. Direct Firestore query when authenticated with Firebase
+    if (db && auth?.currentUser?.uid === userId) {
+      try {
+        const q = query(
+          collection(db, 'conversations'),
+          where('participants', 'array-contains', userId)
+        );
+        const snap = await getDocs(q);
+        if (!snap.empty) {
+          const firestoreConvs: PrivateConversation[] = [];
+          snap.forEach((docSnap) => {
+            const data = docSnap.data();
+            const createdAtMs = data.createdAt?.toMillis ? data.createdAt.toMillis() : Date.now();
+            const updatedAtMs = data.updatedAt?.toMillis ? data.updatedAt.toMillis() : Date.now();
+            const lastMsgRaw = data.lastMessage;
+            firestoreConvs.push({
+              id: docSnap.id,
+              participants: data.participants || [],
+              participantDetails: data.participantDetails || {},
+              lastMessage: lastMsgRaw
+                ? {
+                    ...lastMsgRaw,
+                    createdAt: lastMsgRaw.createdAt?.toMillis
+                      ? lastMsgRaw.createdAt.toMillis()
+                      : (lastMsgRaw.createdAt || Date.now()),
+                  }
+                : undefined,
+              unreadCounts: data.unreadCounts || {},
+              createdAt: createdAtMs,
+              updatedAt: updatedAtMs,
+            });
+          });
+
+          const serverConvs = firestoreConvs
+            .filter((c) => Array.isArray(c.participants) && c.participants.includes(userId))
+            .map((c) => applyClientReadFloorToConversation(userId, c));
+
+          // Preserve any optimistic/local conversation created recently not yet in remote
+          const cached = readCachedConversations(userId);
+          const serverIds = new Set(serverConvs.map((c) => c.id));
+          const now = Date.now();
+          for (const localConv of cached) {
+            if (
+              !serverIds.has(localConv.id) &&
+              localConv.participants.includes(userId) &&
+              now - localConv.updatedAt < 60_000
+            ) {
+              serverConvs.push(localConv);
+            }
+          }
+          serverConvs.sort((a, b) => b.updatedAt - a.updatedAt);
+
+          lastConversationsFetchedAtByUser.set(userId, Date.now());
+          writeCachedConversations(serverConvs, userId);
+          notifyUnreadSubscribersForUser(userId, serverConvs);
+          return serverConvs;
+        }
+      } catch (fsErr) {
+        console.warn('[Hikari Chat] Direct Firestore conversations query fallback:', fsErr);
+      }
+    }
+
+    // 2. Fallback to Express backend
     try {
       const headers = await buildChatAuthHeaders(false);
       const res = await fetch(
@@ -489,7 +604,7 @@ export async function fetchUserConversations(userId: string): Promise<PrivateCon
             if (
               !serverIds.has(localConv.id) &&
               localConv.participants.includes(userId) &&
-              now - localConv.updatedAt < 30_000
+              now - localConv.updatedAt < 60_000
             ) {
               serverConvs.push(localConv);
             }
@@ -525,15 +640,45 @@ export async function startOrGetConversation(
   sender: ParticipantSummary,
   recipient: ParticipantSummary
 ): Promise<PrivateConversation> {
-  activeChatSessionUserId = sender.id;
-  const convId = getDeterministicConversationId(sender.id, recipient.id);
+  const rawSenderId = sender.id ? sender.id.trim() : '';
+  const isDemoSender = isDemoMockUserId(rawSenderId);
+
+  let effectiveSenderId: string;
+  if (auth?.currentUser) {
+    effectiveSenderId = auth.currentUser.uid;
+    if (rawSenderId && rawSenderId !== effectiveSenderId && !isDemoSender) {
+      throw new Error('Usuário autenticado não corresponde ao remetente da conversa.');
+    }
+  } else if (isDemoSender) {
+    effectiveSenderId = rawSenderId;
+  } else {
+    throw new Error('Sessão não autenticada. É necessário estar conectado para iniciar conversas.');
+  }
+
+  activeChatSessionUserId = effectiveSenderId;
+  const convId = getDeterministicConversationId(effectiveSenderId, recipient.id);
+
+  const safeSender: ParticipantSummary = {
+    ...sender,
+    id: effectiveSenderId,
+    displayName: (sender.displayName || sender.username || 'Usuário').slice(0, 60),
+    username: (sender.username || 'usuario').slice(0, 32),
+    avatarUrl: (sender.avatarUrl || '').length <= 2048 ? sender.avatarUrl || '' : '',
+  };
+  const safeRecipient: ParticipantSummary = {
+    ...recipient,
+    id: recipient.id.trim(),
+    displayName: (recipient.displayName || recipient.username || 'Usuário').slice(0, 60),
+    username: (recipient.username || 'usuario').slice(0, 32),
+    avatarUrl: (recipient.avatarUrl || '').length <= 2048 ? recipient.avatarUrl || '' : '',
+  };
 
   try {
     const headers = await buildChatAuthHeaders(true);
     const res = await fetch(buildChatUrl('/api/chat/conversations'), {
       method: 'POST',
       headers,
-      body: JSON.stringify({ sender, recipient }),
+      body: JSON.stringify({ sender: safeSender, recipient: safeRecipient }),
     });
 
     if (!res.ok) {
@@ -543,46 +688,42 @@ export async function startOrGetConversation(
 
     const data = await res.json();
     const conv: PrivateConversation = data.conversation;
-    const cached = readCachedConversations(sender.id);
+    const cached = readCachedConversations(effectiveSenderId);
     const nextConvs = cached.some((c) => c.id === conv.id)
       ? cached.map((c) => (c.id === conv.id ? conv : c))
       : [conv, ...cached];
-    writeCachedConversations(nextConvs, sender.id);
+    writeCachedConversations(nextConvs, effectiveSenderId);
 
     // Ensure Firestore parent conversation doc exists when authenticated with Firebase
-    if (db && auth?.currentUser?.uid === sender.id) {
+    if (db && auth?.currentUser?.uid === effectiveSenderId) {
       try {
         const convDocRef = doc(db, 'conversations', convId);
         const snap = await getDoc(convDocRef);
         if (!snap.exists()) {
-          const safeSenderAvatar =
-            (sender.avatarUrl || '').length <= 2048 ? sender.avatarUrl || '' : '';
-          const safeRecipientAvatar =
-            (recipient.avatarUrl || '').length <= 2048 ? recipient.avatarUrl || '' : '';
           await setDoc(convDocRef, {
             id: convId,
-            participants: [sender.id, recipient.id],
+            participants: [effectiveSenderId, safeRecipient.id],
             participantDetails: {
-              [sender.id]: {
-                id: sender.id,
-                displayName: (sender.displayName || sender.username || 'Usuário').slice(0, 60),
-                username: (sender.username || 'usuario').slice(0, 32),
-                avatarUrl: safeSenderAvatar,
+              [effectiveSenderId]: {
+                id: effectiveSenderId,
+                displayName: safeSender.displayName,
+                username: safeSender.username,
+                avatarUrl: safeSender.avatarUrl,
               },
-              [recipient.id]: {
-                id: recipient.id,
-                displayName: (recipient.displayName || recipient.username || 'Usuário').slice(0, 60),
-                username: (recipient.username || 'usuario').slice(0, 32),
-                avatarUrl: safeRecipientAvatar,
+              [safeRecipient.id]: {
+                id: safeRecipient.id,
+                displayName: safeRecipient.displayName,
+                username: safeRecipient.username,
+                avatarUrl: safeRecipient.avatarUrl,
               },
             },
-            unreadCounts: { [sender.id]: 0, [recipient.id]: 0 },
+            unreadCounts: { [effectiveSenderId]: 0, [safeRecipient.id]: 0 },
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           });
         }
-      } catch {
-        // Non-blocking if Firestore is offline or unconfigured
+      } catch (firestoreErr) {
+        console.warn('[Hikari Chat] Failed to ensure conversation document in Firestore:', firestoreErr);
       }
     }
 
@@ -595,22 +736,22 @@ export async function startOrGetConversation(
     ) {
       throw err;
     }
-    const cached = readCachedConversations(sender.id);
+    const cached = readCachedConversations(effectiveSenderId);
     const existing = cached.find((c) => c.id === convId);
     if (existing) return existing;
 
     const newConv: PrivateConversation = {
       id: convId,
-      participants: [sender.id, recipient.id],
+      participants: [effectiveSenderId, safeRecipient.id],
       participantDetails: {
-        [sender.id]: sender,
-        [recipient.id]: recipient,
+        [effectiveSenderId]: safeSender,
+        [safeRecipient.id]: safeRecipient,
       },
-      unreadCounts: { [sender.id]: 0, [recipient.id]: 0 },
+      unreadCounts: { [effectiveSenderId]: 0, [safeRecipient.id]: 0 },
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
-    writeCachedConversations([newConv, ...cached], sender.id);
+    writeCachedConversations([newConv, ...cached], effectiveSenderId);
     return newConv;
   }
 }
@@ -624,6 +765,62 @@ export async function fetchConversationMessages(
   options?: { limit?: number; before?: number }
 ): Promise<{ messages: PrivateMessage[]; hasMore: boolean }> {
   activeChatSessionUserId = userId;
+
+  // 1. Direct Firestore messages query when authenticated with Firebase
+  if (db && auth?.currentUser?.uid === userId) {
+    try {
+      const messagesCol = collection(db, 'conversations', convId, 'messages');
+      const q = query(
+        messagesCol,
+        orderBy('createdAt', 'asc'),
+        firestoreLimit(options?.limit ?? 50)
+      );
+      const snap = await getDocs(q);
+      if (!snap.empty) {
+        const firestoreMsgs: PrivateMessage[] = [];
+        snap.forEach((docSnap) => {
+          const data = docSnap.data();
+          const createdAtMs = data.createdAt?.toMillis ? data.createdAt.toMillis() : Date.now();
+          firestoreMsgs.push({
+            id: docSnap.id,
+            conversationId: convId,
+            senderId: data.senderId,
+            senderName: data.senderName,
+            senderUsername: data.senderUsername,
+            senderAvatarUrl: data.senderAvatarUrl || '',
+            recipientId: data.recipientId,
+            text: data.text || '',
+            type: data.type || 'text',
+            mediaUrl: data.mediaUrl,
+            mediaMetadata: data.mediaMetadata,
+            linkPreview: data.linkPreview,
+            reactions: data.reactions || {},
+            isRead: data.isRead ?? false,
+            createdAt: createdAtMs,
+            status: 'sent',
+          });
+        });
+        if (!options?.before) {
+          const localCached = readCachedMessages(convId, userId);
+          const merged = mergeServerAndConfirmedLocalMessages(
+            firestoreMsgs,
+            localCached,
+            userId,
+            convId
+          );
+          writeCachedMessages(convId, merged, userId);
+          return {
+            messages: merged,
+            hasMore: false,
+          };
+        }
+      }
+    } catch (fsMsgErr) {
+      console.warn('[Hikari Chat] Direct Firestore messages fetch failed, falling back to server:', fsMsgErr);
+    }
+  }
+
+  // 2. Fallback to Express backend
   try {
     const params = new URLSearchParams({
       userId,
@@ -688,10 +885,51 @@ export async function sendPrivateMessage(payload: {
   linkPreview?: HikariLinkPreview;
 }): Promise<PrivateMessage> {
   const { sender, recipient, text, mediaUrl } = payload;
-  activeChatSessionUserId = sender.id;
+
+  // Enforce authenticated sender identity (Zero-Trust)
+  const rawSenderId = sender.id ? sender.id.trim() : '';
+  const isDemoSender = isDemoMockUserId(rawSenderId);
+
+  let effectiveSenderId: string;
+  if (auth?.currentUser) {
+    effectiveSenderId = auth.currentUser.uid;
+    if (rawSenderId && rawSenderId !== effectiveSenderId && !isDemoSender) {
+      throw new Error('Usuário autenticado não corresponde ao remetente da mensagem.');
+    }
+  } else if (isDemoSender) {
+    effectiveSenderId = rawSenderId;
+  } else {
+    throw new Error('Sessão não autenticada. É necessário estar conectado para enviar mensagens.');
+  }
+
+  activeChatSessionUserId = effectiveSenderId;
+
   const type = payload.type || (mediaUrl ? 'image' : 'text');
+  const safeSender: ParticipantSummary = {
+    ...sender,
+    id: effectiveSenderId,
+    displayName: (sender.displayName || sender.username || 'Usuário').slice(0, 60),
+    username: (sender.username || 'usuario').slice(0, 32),
+    avatarUrl: (sender.avatarUrl || '').length <= 2048 ? sender.avatarUrl || '' : '',
+  };
+  const safeRecipient: ParticipantSummary = {
+    ...recipient,
+    id: recipient.id.trim(),
+    displayName: (recipient.displayName || recipient.username || 'Usuário').slice(0, 60),
+    username: (recipient.username || 'usuario').slice(0, 32),
+    avatarUrl: (recipient.avatarUrl || '').length <= 2048 ? recipient.avatarUrl || '' : '',
+  };
+
   const targetConvId =
-    payload.conversationId || getDeterministicConversationId(sender.id, recipient.id);
+    payload.conversationId || getDeterministicConversationId(effectiveSenderId, safeRecipient.id);
+
+  const trimmedText = text ? text.trim() : '';
+  if (!trimmedText && !mediaUrl) {
+    throw new Error('A mensagem não pode ser vazia.');
+  }
+  if (trimmedText.length > 2000) {
+    throw new Error('A mensagem excede o limite de 2000 caracteres.');
+  }
 
   const mediaVal = validateMediaPayload(mediaUrl, type);
   if (!mediaVal.valid) {
@@ -699,54 +937,44 @@ export async function sendPrivateMessage(payload: {
   }
 
   const preview = payload.linkPreview || extractHikariLinkPreview(text);
-  const headers = await buildChatAuthHeaders(true);
 
-  const res = await fetch(buildChatUrl('/api/chat/messages'), {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      conversationId: targetConvId,
-      senderId: sender.id,
-      senderName: sender.displayName,
-      senderUsername: sender.username,
-      senderAvatarUrl: sender.avatarUrl,
-      recipientId: recipient.id,
-      recipientName: recipient.displayName,
-      recipientUsername: recipient.username,
-      recipientAvatarUrl: recipient.avatarUrl,
-      text,
-      type,
-      mediaUrl,
-      mediaMetadata: payload.mediaMetadata,
-      linkPreview: preview,
-    }),
-  });
+  // Generate optimistic message with status 'sending'
+  const nowMs = Date.now();
+  const msgId = `msg_${nowMs}_${Math.random().toString(36).slice(2, 10)}`;
 
-  if (!res.ok) {
-    const errData = await res.json().catch(() => ({}));
-    throw new Error(errData.error || 'Erro ao enviar mensagem.');
-  }
+  const optimisticMessage: PrivateMessage = {
+    id: msgId,
+    conversationId: targetConvId,
+    senderId: effectiveSenderId,
+    senderName: safeSender.displayName,
+    senderUsername: safeSender.username,
+    senderAvatarUrl: safeSender.avatarUrl,
+    recipientId: safeRecipient.id,
+    text,
+    type,
+    mediaUrl,
+    mediaMetadata: payload.mediaMetadata,
+    linkPreview: preview,
+    isRead: false,
+    createdAt: nowMs,
+    status: 'sending',
+  };
 
-  const data = await res.json();
-  const sentMessage: PrivateMessage = data.message;
+  // 1. Atualiza imediatamente o cache de mensagens do remetente com status 'sending'
+  const currentCached = readCachedMessages(targetConvId, effectiveSenderId);
+  const nextMessages = [...currentCached.filter((m) => m.id !== msgId), optimisticMessage];
+  writeCachedMessages(targetConvId, nextMessages, effectiveSenderId);
+  emitLocalMessagesToActiveChannels(targetConvId, effectiveSenderId, nextMessages);
 
-  // 1. Atualiza imediatamente o cache de mensagens isolado do remetente e notifica o canal ativo
-  const currentCached = readCachedMessages(targetConvId, sender.id);
-  const nextMessages = currentCached.some((m) => m.id === sentMessage.id)
-    ? currentCached
-    : [...currentCached, sentMessage];
-  writeCachedMessages(targetConvId, nextMessages, sender.id);
-  emitLocalMessagesToActiveChannels(targetConvId, sender.id, nextMessages);
-
-  // 2. Atualiza também a lista de conversas em cache para que a conversa nunca suma da barra lateral
-  const cachedConvs = readCachedConversations(sender.id);
+  // 2. Atualiza a lista de conversas em cache do remetente
+  const cachedConvs = readCachedConversations(effectiveSenderId);
   const lastMsgSnippet = {
-    id: sentMessage.id,
-    text: sentMessage.text,
-    senderId: sender.id,
-    senderName: sender.displayName,
-    type: sentMessage.type,
-    createdAt: sentMessage.createdAt,
+    id: optimisticMessage.id,
+    text: optimisticMessage.text,
+    senderId: effectiveSenderId,
+    senderName: safeSender.displayName,
+    type: optimisticMessage.type,
+    createdAt: optimisticMessage.createdAt,
     isRead: false,
   };
   let nextConvs: PrivateConversation[];
@@ -756,7 +984,7 @@ export async function sendPrivateMessage(payload: {
         ? {
             ...c,
             lastMessage: lastMsgSnippet,
-            updatedAt: Math.max(c.updatedAt, sentMessage.createdAt),
+            updatedAt: Math.max(c.updatedAt, optimisticMessage.createdAt),
           }
         : c
     );
@@ -764,97 +992,162 @@ export async function sendPrivateMessage(payload: {
     nextConvs = [
       {
         id: targetConvId,
-        participants: [sender.id, recipient.id],
+        participants: [effectiveSenderId, safeRecipient.id],
         participantDetails: {
-          [sender.id]: sender,
-          [recipient.id]: recipient,
+          [effectiveSenderId]: safeSender,
+          [safeRecipient.id]: safeRecipient,
         },
         lastMessage: lastMsgSnippet,
-        unreadCounts: { [sender.id]: 0, [recipient.id]: 1 },
-        createdAt: sentMessage.createdAt,
-        updatedAt: sentMessage.createdAt,
+        unreadCounts: { [effectiveSenderId]: 0, [safeRecipient.id]: 1 },
+        createdAt: optimisticMessage.createdAt,
+        updatedAt: optimisticMessage.createdAt,
       },
       ...cachedConvs,
     ];
   }
   nextConvs.sort((a, b) => b.updatedAt - a.updatedAt);
-  writeCachedConversations(nextConvs, sender.id);
-  emitLocalConversationsToActivePoller(sender.id, nextConvs);
+  writeCachedConversations(nextConvs, effectiveSenderId);
+  emitLocalConversationsToActivePoller(effectiveSenderId, nextConvs);
 
-  // 3. Persiste no Firestore (criando primeiro o doc pai /conversations/{convId} se ainda não existir)
-  if (db && auth?.currentUser?.uid === sender.id) {
+  // 3. Persistência no Backend Express
+  let serverMessage: PrivateMessage | null = null;
+  let backendError: string | null = null;
+  try {
+    const headers = await buildChatAuthHeaders(true);
+    const res = await fetch(buildChatUrl('/api/chat/messages'), {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        id: msgId,
+        conversationId: targetConvId,
+        senderId: effectiveSenderId,
+        senderName: safeSender.displayName,
+        senderUsername: safeSender.username,
+        senderAvatarUrl: safeSender.avatarUrl,
+        recipientId: safeRecipient.id,
+        recipientName: safeRecipient.displayName,
+        recipientUsername: safeRecipient.username,
+        recipientAvatarUrl: safeRecipient.avatarUrl,
+        text,
+        type,
+        mediaUrl,
+        mediaMetadata: payload.mediaMetadata,
+        linkPreview: preview,
+      }),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      serverMessage = data.message;
+    } else {
+      const errData = await res.json().catch(() => ({}));
+      backendError = errData.error || 'Falha ao sincronizar com servidor de chat.';
+      console.warn('[Hikari Chat] Backend message persist error:', backendError);
+    }
+  } catch (netErr) {
+    backendError = 'Erro de rede ao conectar com servidor de chat.';
+    console.warn('[Hikari Chat] Network error contacting chat backend:', netErr);
+  }
+
+  // 4. Persistência atômica no Firestore via writeBatch (cria doc pai e mensagem de uma só vez)
+  let firestorePersisted = false;
+  if (db && auth?.currentUser?.uid === effectiveSenderId) {
     try {
-      const safeSenderAvatar =
-        (sender.avatarUrl || '').length <= 2048 ? sender.avatarUrl || '' : '';
-      const safeRecipientAvatar =
-        (recipient.avatarUrl || '').length <= 2048 ? recipient.avatarUrl || '' : '';
-
       const convDocRef = doc(db, 'conversations', targetConvId);
+      const msgDocRef = doc(db, 'conversations', targetConvId, 'messages', msgId);
       const convSnap = await getDoc(convDocRef);
+
+      const batch = writeBatch(db);
+
       if (!convSnap.exists()) {
-        await setDoc(convDocRef, {
+        batch.set(convDocRef, {
           id: targetConvId,
-          participants: [sender.id, recipient.id],
+          participants: [effectiveSenderId, safeRecipient.id],
           participantDetails: {
-            [sender.id]: {
-              id: sender.id,
-              displayName: (sender.displayName || sender.username || 'Usuário').slice(0, 60),
-              username: (sender.username || 'usuario').slice(0, 32),
-              avatarUrl: safeSenderAvatar,
+            [effectiveSenderId]: {
+              id: effectiveSenderId,
+              displayName: safeSender.displayName,
+              username: safeSender.username,
+              avatarUrl: safeSender.avatarUrl,
             },
-            [recipient.id]: {
-              id: recipient.id,
-              displayName: (recipient.displayName || recipient.username || 'Usuário').slice(0, 60),
-              username: (recipient.username || 'usuario').slice(0, 32),
-              avatarUrl: safeRecipientAvatar,
+            [safeRecipient.id]: {
+              id: safeRecipient.id,
+              displayName: safeRecipient.displayName,
+              username: safeRecipient.username,
+              avatarUrl: safeRecipient.avatarUrl,
             },
           },
-          unreadCounts: { [sender.id]: 0, [recipient.id]: 1 },
+          lastMessage: {
+            id: msgId,
+            text,
+            senderId: effectiveSenderId,
+            senderName: safeSender.displayName,
+            type,
+            createdAt: serverTimestamp(),
+            isRead: false,
+          },
+          unreadCounts: {
+            [effectiveSenderId]: 0,
+            [safeRecipient.id]: 1,
+          },
           createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        batch.update(convDocRef, {
+          lastMessage: {
+            id: msgId,
+            text,
+            senderId: effectiveSenderId,
+            senderName: safeSender.displayName,
+            type,
+            createdAt: serverTimestamp(),
+            isRead: false,
+          },
+          [`unreadCounts.${safeRecipient.id}`]: increment(1),
           updatedAt: serverTimestamp(),
         });
       }
 
-      const msgDocRef = doc(db, 'conversations', targetConvId, 'messages', sentMessage.id);
-      await setDoc(msgDocRef, {
-        id: sentMessage.id,
+      batch.set(msgDocRef, {
+        id: msgId,
         conversationId: targetConvId,
-        senderId: sender.id,
-        senderName: (sender.displayName || sender.username || 'Usuário').slice(0, 60),
-        senderUsername: (sender.username || 'usuario').slice(0, 32),
-        senderAvatarUrl: safeSenderAvatar,
-        recipientId: recipient.id,
-        text: sentMessage.text,
-        type: sentMessage.type,
-        ...(sentMessage.mediaUrl ? { mediaUrl: sentMessage.mediaUrl } : {}),
-        ...(sentMessage.mediaMetadata ? { mediaMetadata: sentMessage.mediaMetadata } : {}),
-        ...(sentMessage.linkPreview ? { linkPreview: sentMessage.linkPreview } : {}),
+        senderId: effectiveSenderId,
+        senderName: safeSender.displayName,
+        senderUsername: safeSender.username,
+        senderAvatarUrl: safeSender.avatarUrl,
+        recipientId: safeRecipient.id,
+        text,
+        type,
+        ...(mediaUrl ? { mediaUrl } : {}),
+        ...(payload.mediaMetadata ? { mediaMetadata: payload.mediaMetadata } : {}),
+        ...(preview ? { linkPreview: preview } : {}),
         isRead: false,
         createdAt: serverTimestamp(),
       });
 
-      const currentRecipientUnread = convSnap.exists()
-        ? Number(convSnap.data()?.unreadCounts?.[recipient.id] || 0)
-        : 0;
-      await updateDoc(convDocRef, {
-        lastMessage: {
-          id: sentMessage.id,
-          text: sentMessage.text,
-          senderId: sender.id,
-          senderName: (sender.displayName || sender.username || 'Usuário').slice(0, 60),
-          type: sentMessage.type,
-          createdAt: serverTimestamp(),
-          isRead: false,
-        },
-        [`unreadCounts.${recipient.id}`]: currentRecipientUnread + 1,
-        updatedAt: serverTimestamp(),
-      });
-    } catch {
-      // Ignora erro do Firestore caso permissões ou modo offline
+      await batch.commit();
+      firestorePersisted = true;
+    } catch (fsErr) {
+      console.error('[Hikari Chat] Failed to persist message batch in Firestore:', fsErr);
     }
   }
 
-  return sentMessage;
+  // 5. Verificação de persistência
+  if (!serverMessage && !firestorePersisted) {
+    // Both backends failed to persist: mark optimistic message as 'failed'
+    markLocalMessageStatus(targetConvId, effectiveSenderId, msgId, 'failed');
+    throw new Error(backendError || 'Não foi possível gravar a mensagem. Verifique sua conexão e tente novamente.');
+  }
+
+  // Confirmation succeeded: mark as 'sent'
+  const confirmedMessage: PrivateMessage = {
+    ...(serverMessage || optimisticMessage),
+    id: msgId,
+    status: 'sent',
+  };
+  markLocalMessageStatus(targetConvId, effectiveSenderId, msgId, 'sent', confirmedMessage);
+  return confirmedMessage;
 }
 
 /**
@@ -925,12 +1218,14 @@ export async function markConversationAsRead(convId: string, userId: string): Pr
           unreadIncomingIds.map((msgId) =>
             updateDoc(doc(firestoreDb, 'conversations', convId, 'messages', msgId), {
               isRead: true,
-            }).catch(() => {})
+            }).catch((err) => {
+              console.warn('[Hikari Chat] Failed to mark message isRead in Firestore:', msgId, err);
+            })
           )
         );
       }
-    } catch {
-      // Ignora
+    } catch (fsErr) {
+      console.warn('[Hikari Chat] Failed to mark conversation as read in Firestore:', fsErr);
     }
   }
 }
@@ -1418,42 +1713,42 @@ export function subscribeToConversation(
               });
             });
 
-            if (remoteMsgs.length > 0) {
-              activeChannel.firestoreRealtimeActive = true;
-              stopChannelPollTimer(activeChannel);
+            activeChannel.firestoreRealtimeActive = true;
+            stopChannelPollTimer(activeChannel);
 
-              const mergedMsgs = mergeServerAndConfirmedLocalMessages(
-                remoteMsgs,
-                activeChannel.lastKnownMessages,
-                userId,
-                convId
-              );
+            const mergedMsgs = mergeServerAndConfirmedLocalMessages(
+              remoteMsgs,
+              activeChannel.lastKnownMessages,
+              userId,
+              convId
+            );
 
-              const isEqual = areMessagesAndTypingEqual(
-                activeChannel.lastKnownMessages,
-                mergedMsgs,
-                activeChannel.lastKnownTyping,
-                activeChannel.lastKnownTyping
-              );
-              if (!isEqual) {
-                activeChannel.lastKnownMessages = mergedMsgs;
-                writeCachedMessages(convId, mergedMsgs, userId);
-                const payload = {
-                  messages: mergedMsgs,
-                  typingUsers: activeChannel.lastKnownTyping,
-                };
-                for (const listener of activeChannel.listeners) {
-                  listener(payload);
-                }
+            const isEqual = areMessagesAndTypingEqual(
+              activeChannel.lastKnownMessages,
+              mergedMsgs,
+              activeChannel.lastKnownTyping,
+              activeChannel.lastKnownTyping
+            );
+            if (!isEqual) {
+              activeChannel.lastKnownMessages = mergedMsgs;
+              writeCachedMessages(convId, mergedMsgs, userId);
+              const payload = {
+                messages: mergedMsgs,
+                typingUsers: activeChannel.lastKnownTyping,
+              };
+              for (const listener of activeChannel.listeners) {
+                listener(payload);
               }
             }
           },
-          () => {
+          (snapshotErr) => {
+            console.warn('[Hikari Chat] Realtime conversation snapshot error, using polling fallback:', snapshotErr);
             activeChannel.firestoreRealtimeActive = false;
             startChannelPollTimerIfNeeded(activeChannel);
           }
         );
-      } catch {
+      } catch (err) {
+        console.warn('[Hikari Chat] Failed to register Firestore realtime listener:', err);
         channel.firestoreUnsubscribe = null;
         channel.firestoreRealtimeActive = false;
       }

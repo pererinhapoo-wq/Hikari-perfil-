@@ -81,6 +81,59 @@ service cloud.firestore {
         && (!('showOnlineStatus' in settings) || settings.showOnlineStatus is bool);
     }
 
+    function getOtherParticipant(participants, myUid) {
+      return participants[0] == myUid ? participants[1] : participants[0];
+    }
+
+    function isValidUnreadCounts(counts, participants) {
+      return counts is map
+        && counts.keys().hasAll(participants)
+        && counts.keys().hasOnly(participants)
+        && counts[participants[0]] is int
+        && counts[participants[0]] >= 0
+        && counts[participants[1]] is int
+        && counts[participants[1]] >= 0;
+    }
+
+    function isValidReadTimestamps(data, participants) {
+      return data is map
+        && data.keys().hasOnly(participants)
+        && (!(participants[0] in data) || (data[participants[0]] is int && data[participants[0]] >= 0))
+        && (!(participants[1] in data) || (data[participants[1]] is int && data[participants[1]] >= 0));
+    }
+
+    function isValidLastMessageSnippet(lastMsg, participants) {
+      return lastMsg is map
+        && lastMsg.keys().hasAll([
+          'id',
+          'text',
+          'senderId',
+          'senderName',
+          'type',
+          'createdAt',
+          'isRead'
+        ])
+        && lastMsg.keys().hasOnly([
+          'id',
+          'text',
+          'senderId',
+          'senderName',
+          'type',
+          'createdAt',
+          'isRead'
+        ])
+        && isValidId(lastMsg.id)
+        && lastMsg.text is string
+        && lastMsg.text.size() <= 2000
+        && (lastMsg.senderId in participants)
+        && lastMsg.senderName is string
+        && lastMsg.senderName.size() >= 1
+        && lastMsg.senderName.size() <= 60
+        && (lastMsg.type in ['text', 'image', 'gif', 'link'])
+        && lastMsg.createdAt is timestamp
+        && lastMsg.isRead is bool;
+    }
+
     function isValidConversation(data) {
       return data.keys().hasAll([
           'id',
@@ -118,8 +171,9 @@ service cloud.firestore {
         && isValidId(data.participants[1])
         && data.participants[0] != data.participants[1]
         && data.participantDetails is map
-        && data.unreadCounts is map
-        && (!('lastReadAtByUser' in data) || data.lastReadAtByUser is map)
+        && isValidUnreadCounts(data.unreadCounts, data.participants)
+        && (!('lastMessage' in data) || isValidLastMessageSnippet(data.lastMessage, data.participants))
+        && (!('lastReadAtByUser' in data) || isValidReadTimestamps(data.lastReadAtByUser, data.participants))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -736,7 +790,13 @@ service cloud.firestore {
     match /conversations/{convId} {
       allow get: if isSignedIn()
         && isValidId(convId)
-        && (request.auth.uid in resource.data.participants);
+        && (
+          (resource != null && (request.auth.uid in resource.data.participants))
+          || (resource == null && (
+            convId.matches('^conv_' + request.auth.uid + '__[a-zA-Z0-9_\\-]+$')
+            || convId.matches('^conv_[a-zA-Z0-9_\\-]+__' + request.auth.uid + '$')
+          ))
+        );
 
       allow list: if isSignedIn()
         && (request.auth.uid in resource.data.participants);
@@ -745,8 +805,33 @@ service cloud.firestore {
         && isValidId(convId)
         && isValidConversation(incoming())
         && (request.auth.uid in incoming().participants)
+        && (
+          convId == ('conv_' + incoming().participants[0] + '__' + incoming().participants[1])
+          || convId == ('conv_' + incoming().participants[1] + '__' + incoming().participants[0])
+        )
         && incoming().createdAt == request.time
-        && incoming().updatedAt == request.time;
+        && incoming().updatedAt == request.time
+        && (
+          // Caso A: Criação de conversa vazia (ambos os contadores zerados, sem lastMessage)
+          (
+            !('lastMessage' in incoming())
+            && incoming().unreadCounts[incoming().participants[0]] == 0
+            && incoming().unreadCounts[incoming().participants[1]] == 0
+          )
+          // Caso B: Criação atômica com primeira mensagem no mesmo writeBatch
+          || (
+            ('lastMessage' in incoming())
+            && incoming().lastMessage.senderId == request.auth.uid
+            && incoming().unreadCounts[request.auth.uid] == 0
+            && incoming().unreadCounts[getOtherParticipant(incoming().participants, request.auth.uid)] == 1
+            && existsAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id))
+            && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.senderId == request.auth.uid
+            && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.recipientId == getOtherParticipant(incoming().participants, request.auth.uid)
+            && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.text == incoming().lastMessage.text
+            && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.type == incoming().lastMessage.type
+            && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.createdAt == incoming().lastMessage.createdAt
+          )
+        );
 
       allow update: if isSignedIn()
         && isValidId(convId)
@@ -755,12 +840,43 @@ service cloud.firestore {
         && incoming().participants == existing().participants
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly([
-          'lastMessage',
-          'unreadCounts',
-          'lastReadAtByUser',
-          'updatedAt'
-        ]);
+        && (
+          // Operação 1: Envio de Mensagem (remetente atualiza lastMessage, incrementa unreadCount do destinatário em exatamente 1, e valida mensagem real no mesmo batch)
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly(['lastMessage', 'unreadCounts', 'updatedAt'])
+            && ('lastMessage' in incoming())
+            && incoming().lastMessage.senderId == request.auth.uid
+            && incoming().unreadCounts[request.auth.uid] == existing().unreadCounts[request.auth.uid]
+            && incoming().unreadCounts[getOtherParticipant(resource.data.participants, request.auth.uid)] == existing().unreadCounts[getOtherParticipant(resource.data.participants, request.auth.uid)] + 1
+            && existsAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id))
+            && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.senderId == request.auth.uid
+            && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.recipientId == getOtherParticipant(resource.data.participants, request.auth.uid)
+            && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.text == incoming().lastMessage.text
+            && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.type == incoming().lastMessage.type
+            && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.createdAt == incoming().lastMessage.createdAt
+          )
+          // Operação 2: Leitura de Mensagens (usuário zera exclusivamente seu próprio unreadCount e atualiza apenas seu lastReadAtByUser)
+          || (
+            incoming().diff(existing()).affectedKeys().hasOnly(['unreadCounts', 'lastReadAtByUser', 'updatedAt'])
+            && incoming().unreadCounts[request.auth.uid] == 0
+            && incoming().unreadCounts[getOtherParticipant(resource.data.participants, request.auth.uid)] == existing().unreadCounts[getOtherParticipant(resource.data.participants, request.auth.uid)]
+            // Não pode remover o mapa lastReadAtByUser se ele já existia no documento
+            && (!('lastReadAtByUser' in existing()) || ('lastReadAtByUser' in incoming()))
+            // Se lastReadAtByUser estiver no incoming, preserva rigorosamente a entrada do outro usuário e atualiza apenas a própria
+            && (
+              !('lastReadAtByUser' in incoming())
+              || (
+                (('lastReadAtByUser' in existing()) && (getOtherParticipant(resource.data.participants, request.auth.uid) in existing().lastReadAtByUser)
+                  ? incoming().lastReadAtByUser[getOtherParticipant(resource.data.participants, request.auth.uid)] == existing().lastReadAtByUser[getOtherParticipant(resource.data.participants, request.auth.uid)]
+                  : !(getOtherParticipant(resource.data.participants, request.auth.uid) in incoming().lastReadAtByUser)
+                )
+                && (request.auth.uid in incoming().lastReadAtByUser)
+                && incoming().lastReadAtByUser[request.auth.uid] is int
+                && incoming().lastReadAtByUser[request.auth.uid] >= 0
+              )
+            )
+          )
+        );
 
       allow delete: if false;
 
@@ -778,8 +894,12 @@ service cloud.firestore {
         allow create: if isSignedIn()
           && isValidId(convId)
           && isValidId(msgId)
-          && (request.auth.uid in get(/databases/$(database)/documents/conversations/$(convId)).data.participants)
-          && isValidMessage(incoming(), convId);
+          && isValidMessage(incoming(), convId)
+          && incoming().senderId == request.auth.uid
+          && existsAfter(/databases/$(database)/documents/conversations/$(convId))
+          && (request.auth.uid in getAfter(/databases/$(database)/documents/conversations/$(convId)).data.participants)
+          && (incoming().recipientId in getAfter(/databases/$(database)/documents/conversations/$(convId)).data.participants)
+          && incoming().recipientId != request.auth.uid;
 
         allow update: if isSignedIn()
           && isValidId(convId)
