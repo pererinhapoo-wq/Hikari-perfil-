@@ -89,7 +89,7 @@ async function getMergedOwnerNotificationsState(ownerUid: string) {
 
 /**
  * POST /api/users/:targetId/report
- * Registra denúncia de perfil no Firestore (persistente entre instâncias serverless).
+ * Registra denúncia de perfil no socialStore e no Firestore quando configurado.
  */
 socialRouter.post('/:targetId/report', async (req: Request, res: Response) => {
   const caller = await verifyRequestUser(req);
@@ -97,12 +97,30 @@ socialRouter.post('/:targetId/report', async (req: Request, res: Response) => {
     return res.status(401).json({ ok: false, message: 'Entre na sua conta para denunciar um perfil.' });
   }
 
-  const targetId = String(req.params.targetId || '').trim();
+  const rawTargetId = String(req.params.targetId || '').trim();
+  const targetRec = socialStore.getUserRecord(rawTargetId);
+  const resolvedTargetId = targetRec ? targetRec.uid : rawTargetId;
   const reason = String(req.body?.reason || '').trim();
   const details = String(req.body?.details || '').trim().slice(0, 600);
-  const allowedReasons = new Set(['assédio ou bullying', 'spam ou golpe', 'conteúdo impróprio', 'falsidade ideológica', 'outro']);
+  const targetUsername =
+    typeof req.body?.targetUsername === 'string' ? req.body.targetUsername.trim() : undefined;
+  const targetDisplayName =
+    typeof req.body?.targetDisplayName === 'string' ? req.body.targetDisplayName.trim() : undefined;
+  const reporterUsername =
+    typeof req.body?.reporterUsername === 'string' ? req.body.reporterUsername.trim() : undefined;
+  const reporterDisplayName =
+    typeof req.body?.reporterDisplayName === 'string'
+      ? req.body.reporterDisplayName.trim()
+      : undefined;
+  const allowedReasons = new Set([
+    'assédio ou bullying',
+    'spam ou golpe',
+    'conteúdo impróprio',
+    'falsidade ideológica',
+    'outro',
+  ]);
 
-  if (!targetId || targetId.length > 160 || targetId === caller.uid) {
+  if (!resolvedTargetId || resolvedTargetId.length > 160 || resolvedTargetId === caller.uid) {
     return res.status(400).json({ ok: false, message: 'Perfil selecionado para denúncia inválido.' });
   }
   if (!allowedReasons.has(reason.toLowerCase())) {
@@ -110,33 +128,94 @@ socialRouter.post('/:targetId/report', async (req: Request, res: Response) => {
   }
 
   try {
-    const db = getAdminFirestore();
-    const recentReports = await db.collection('profile_reports')
-      .where('reporterUid', '==', caller.uid)
-      .limit(100)
-      .get();
-    const duplicate = recentReports.docs.some((doc) => {
-      const data = doc.data();
-      return data.targetId === targetId && data.status === 'pending';
-    });
-    if (duplicate) {
-      return res.json({ ok: true, duplicate: true, message: 'Você já enviou uma denúncia pendente para este perfil.' });
+    const existingLocalPending = socialStore
+      .getProfileReports(500)
+      .some(
+        (r) =>
+          r.reporterUid === caller.uid &&
+          (r.targetId === resolvedTargetId || r.targetId === rawTargetId) &&
+          r.status === 'pending'
+      );
+    if (existingLocalPending) {
+      return res.json({
+        ok: true,
+        duplicate: true,
+        message: 'Você já enviou uma denúncia pendente para este perfil.',
+      });
     }
 
-    await db.collection('profile_reports').add({
-      targetId,
+    if (getFirebaseAdminStatus().isConfigured) {
+      try {
+        const db = getAdminFirestore();
+        const recentReports = await db
+          .collection('profile_reports')
+          .where('reporterUid', '==', caller.uid)
+          .limit(100)
+          .get();
+        const duplicateFirestore = recentReports.docs.some((doc) => {
+          const data = doc.data();
+          return (
+            (data.targetId === resolvedTargetId || data.targetId === rawTargetId) &&
+            data.status === 'pending'
+          );
+        });
+        if (duplicateFirestore) {
+          return res.json({
+            ok: true,
+            duplicate: true,
+            message: 'Você já enviou uma denúncia pendente para este perfil.',
+          });
+        }
+      } catch (firestoreReadErr) {
+        console.warn('[social] Leitura de denúncias no Firestore indisponível; usando socialStore:', firestoreReadErr);
+      }
+    }
+
+    const report = socialStore.submitProfileReport({
+      targetId: resolvedTargetId,
+      targetUsername,
+      targetDisplayName,
       reporterUid: caller.uid,
+      reporterUsername,
+      reporterDisplayName,
       reason,
       details,
-      targetType: 'profile',
-      status: 'pending',
-      createdAt: new Date().toISOString(),
-      createdAtMs: Date.now(),
     });
-    return res.status(201).json({ ok: true, message: 'Denúncia enviada para análise.' });
+
+    if (getFirebaseAdminStatus().isConfigured) {
+      try {
+        const db = getAdminFirestore();
+        await db
+          .collection('profile_reports')
+          .doc(report.id)
+          .set(
+            {
+              ...report,
+              ...(report.targetUsername ? { targetUsername: report.targetUsername } : {}),
+              ...(report.targetDisplayName ? { targetDisplayName: report.targetDisplayName } : {}),
+              ...(report.reporterUsername ? { reporterUsername: report.reporterUsername } : {}),
+              ...(report.reporterDisplayName
+                ? { reporterDisplayName: report.reporterDisplayName }
+                : {}),
+            },
+            { merge: true }
+          );
+      } catch (firestoreWriteErr) {
+        console.warn('[social] Escrita de denúncia no Firestore falhou; mantida no socialStore:', firestoreWriteErr);
+      }
+    }
+
+    return res.status(201).json({
+      ok: true,
+      reportId: report.id,
+      message: 'Denúncia enviada para análise.',
+    });
   } catch (err) {
     console.error('[social] Não foi possível registrar denúncia de perfil:', err);
-    return res.status(503).json({ ok: false, message: 'O serviço de denúncias está indisponível no momento. Tente novamente mais tarde.' });
+    return res.status(503).json({
+      ok: false,
+      message: 'O serviço de denúncias está indisponível no momento. Tente novamente mais tarde.',
+    });
   }
 });
 
@@ -194,6 +273,11 @@ socialRouter.put('/:userId/sync', async (req: Request, res: Response) => {
     favoritePeople: Array.isArray(body.favoritePeople) ? body.favoritePeople : undefined,
     activities: Array.isArray(body.activities) ? body.activities : undefined,
     comments: Array.isArray(body.comments) ? body.comments : undefined,
+    followers: Array.isArray(body.followers) ? body.followers : undefined,
+    following: Array.isArray(body.following) ? body.following : undefined,
+    followRequests: Array.isArray(body.followRequests) ? body.followRequests : undefined,
+    followingIds: Array.isArray(body.followingIds) ? body.followingIds : undefined,
+    requestedIds: Array.isArray(body.requestedIds) ? body.requestedIds : undefined,
     blockedIds: Array.isArray(body.blockedIds) ? body.blockedIds : undefined,
     notifications: Array.isArray(body.notifications) ? body.notifications : undefined,
     updatedAtMs: typeof body.updatedAtMs === 'number' ? body.updatedAtMs : Date.now(),

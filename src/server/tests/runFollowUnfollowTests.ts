@@ -54,8 +54,9 @@ function test(name: string, fn: () => void) {
 // --------------------------------------------------------------------------
 console.log('\n--- 1. Rótulos e Ícones da Relação de Seguidor ---');
 
-test('No perfil de outro usuário não seguido, botão deve indicar "Seguir"', () => {
+test('No perfil de outro usuário não seguido (e que não segue você), botão deve indicar "Seguir"', () => {
   const isFollowing = false;
+  const isFollower = false;
   const isRequested = false;
   const isPrivate = false;
 
@@ -65,9 +66,30 @@ test('No perfil de outro usuário não seguido, botão deve indicar "Seguir"', (
     ? 'Solicitado'
     : isPrivate
     ? 'Solicitar para Seguir'
+    : isFollower
+    ? 'Seguir de volta'
     : 'Seguir';
 
   assert.equal(label, 'Seguir');
+});
+
+test('No perfil de alguém que segue você mas você ainda não segue, botão deve indicar "Seguir de volta"', () => {
+  const isFollowing = false;
+  const isFollower = true;
+  const isRequested = false;
+  const isPrivate = false;
+
+  const label = isFollowing
+    ? 'Deixar de seguir'
+    : isRequested
+    ? 'Solicitado'
+    : isPrivate
+    ? 'Solicitar para Seguir'
+    : isFollower
+    ? 'Seguir de volta'
+    : 'Seguir';
+
+  assert.equal(label, 'Seguir de volta');
 });
 
 test('No perfil de outro usuário já seguido, botão deve indicar diretamente "Deixar de seguir"', () => {

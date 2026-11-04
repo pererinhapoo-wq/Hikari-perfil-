@@ -36,6 +36,25 @@ export interface StoredUserRecord {
   blockedIds: string[];
   notifications: NotificationItem[];
   updatedAtMs: number;
+  workspaceHydrated?: boolean;
+  socialMutated?: boolean;
+}
+
+export interface StoredProfileReport {
+  id: string;
+  targetType: 'profile';
+  targetId: string;
+  targetUsername?: string;
+  targetDisplayName?: string;
+  reporterUid: string;
+  reporterUsername?: string;
+  reporterDisplayName?: string;
+  reason: string;
+  details: string;
+  status: 'pending' | 'in_review' | 'resolved' | 'dismissed';
+  createdAt: string;
+  createdAtMs: number;
+  updatedAtMs?: number;
 }
 
 export interface SyncUserPayload {
@@ -47,6 +66,11 @@ export interface SyncUserPayload {
   favoritePeople?: FavoritePerson[];
   activities?: UserActivity[];
   comments?: HikariComment[];
+  followers?: FollowUser[];
+  following?: FollowUser[];
+  followRequests?: FollowRequest[];
+  followingIds?: string[];
+  requestedIds?: string[];
   blockedIds?: string[];
   notifications?: NotificationItem[];
   updatedAtMs?: number;
@@ -239,6 +263,7 @@ function createMinimalUserRecord(
 export class SocialStore {
   private users = new Map<string, StoredUserRecord>();
   private usernameIndex = new Map<string, string>();
+  private reports: StoredProfileReport[] = [];
   private storageFilePath: string;
   private persistDisabled: boolean;
 
@@ -259,6 +284,7 @@ export class SocialStore {
     this.persistDisabled = ephemeral;
     this.users.clear();
     this.usernameIndex.clear();
+    this.reports = [];
   }
 
   private rebuildUsernameIndex(): void {
@@ -275,29 +301,42 @@ export class SocialStore {
       if (!fs.existsSync(this.storageFilePath)) return;
       const raw = fs.readFileSync(this.storageFilePath, 'utf8');
       if (!raw.trim()) return;
-      const parsed = JSON.parse(raw) as { users?: Record<string, StoredUserRecord> };
-      if (!parsed || typeof parsed.users !== 'object' || parsed.users === null) return;
+      const parsed = JSON.parse(raw) as {
+        users?: Record<string, StoredUserRecord>;
+        reports?: StoredProfileReport[];
+      };
+      if (!parsed || typeof parsed !== 'object') return;
 
-      for (const [uid, rec] of Object.entries(parsed.users)) {
-        if (!rec || typeof rec !== 'object' || rec.uid !== uid || !rec.profile) continue;
-        this.users.set(uid, {
-          ...rec,
-          animes: Array.isArray(rec.animes) ? rec.animes : [],
-          favoriteCharacters: Array.isArray(rec.favoriteCharacters) ? rec.favoriteCharacters : [],
-          favoriteCompanies: Array.isArray(rec.favoriteCompanies) ? rec.favoriteCompanies : [],
-          favoritePeople: Array.isArray(rec.favoritePeople) ? rec.favoritePeople : [],
-          activities: Array.isArray(rec.activities) ? rec.activities : [],
-          comments: Array.isArray(rec.comments) ? rec.comments : [],
-          followers: Array.isArray(rec.followers) ? rec.followers : [],
-          following: Array.isArray(rec.following) ? rec.following : [],
-          followRequests: Array.isArray(rec.followRequests) ? rec.followRequests : [],
-          followingIds: Array.isArray(rec.followingIds) ? rec.followingIds : [],
-          requestedIds: Array.isArray(rec.requestedIds) ? rec.requestedIds : [],
-          blockedIds: Array.isArray(rec.blockedIds) ? rec.blockedIds : [],
-          notifications: Array.isArray(rec.notifications) ? rec.notifications : [],
-          updatedAtMs: typeof rec.updatedAtMs === 'number' ? rec.updatedAtMs : Date.now(),
-        });
+      if (parsed.users && typeof parsed.users === 'object') {
+        for (const [uid, rec] of Object.entries(parsed.users)) {
+          if (!rec || typeof rec !== 'object' || rec.uid !== uid || !rec.profile) continue;
+          this.users.set(uid, {
+            ...rec,
+            animes: Array.isArray(rec.animes) ? rec.animes : [],
+            favoriteCharacters: Array.isArray(rec.favoriteCharacters) ? rec.favoriteCharacters : [],
+            favoriteCompanies: Array.isArray(rec.favoriteCompanies) ? rec.favoriteCompanies : [],
+            favoritePeople: Array.isArray(rec.favoritePeople) ? rec.favoritePeople : [],
+            activities: Array.isArray(rec.activities) ? rec.activities : [],
+            comments: Array.isArray(rec.comments) ? rec.comments : [],
+            followers: Array.isArray(rec.followers) ? rec.followers : [],
+            following: Array.isArray(rec.following) ? rec.following : [],
+            followRequests: Array.isArray(rec.followRequests) ? rec.followRequests : [],
+            followingIds: Array.isArray(rec.followingIds) ? rec.followingIds : [],
+            requestedIds: Array.isArray(rec.requestedIds) ? rec.requestedIds : [],
+            blockedIds: Array.isArray(rec.blockedIds) ? rec.blockedIds : [],
+            notifications: Array.isArray(rec.notifications) ? rec.notifications : [],
+            updatedAtMs: typeof rec.updatedAtMs === 'number' ? rec.updatedAtMs : Date.now(),
+          });
+        }
       }
+
+      if (Array.isArray(parsed.reports)) {
+        this.reports = parsed.reports.filter(
+          (r): r is StoredProfileReport =>
+            Boolean(r && typeof r === 'object' && typeof r.id === 'string' && r.targetId)
+        );
+      }
+
       this.rebuildUsernameIndex();
     } catch {
       // Ignore corrupted disk cache gracefully
@@ -316,7 +355,11 @@ export class SocialStore {
         serializedUsers[uid] = rec;
       }
       const tmpPath = `${this.storageFilePath}.${process.pid}.tmp`;
-      fs.writeFileSync(tmpPath, JSON.stringify({ version: 1, users: serializedUsers }), 'utf8');
+      fs.writeFileSync(
+        tmpPath,
+        JSON.stringify({ version: 1, users: serializedUsers, reports: this.reports }),
+        'utf8'
+      );
       fs.renameSync(tmpPath, this.storageFilePath);
     } catch {
       // Safe fallback in read-only serverless filesystems
@@ -367,13 +410,70 @@ export class SocialStore {
       }
     }
 
+    let nextFollowers = existing.followers;
+    let nextFollowing = existing.following;
+    let nextFollowRequests = existing.followRequests;
+    let nextFollowingIds = existing.followingIds;
+    let nextRequestedIds = existing.requestedIds;
+
+    // On initial owner workspace hydration (before any server-side social mutation),
+    // merge persisted follower/following relationships from the owner's Firestore workspace.
+    if (!existing.workspaceHydrated && !existing.socialMutated) {
+      if (Array.isArray(payload.followers) && payload.followers.length > 0) {
+        const byId = new Map<string, FollowUser>();
+        for (const f of [...existing.followers, ...payload.followers]) {
+          if (f && f.id && !byId.has(f.id)) {
+            byId.set(f.id, f);
+          }
+        }
+        nextFollowers = [...byId.values()];
+      }
+      if (Array.isArray(payload.following) && payload.following.length > 0) {
+        const byId = new Map<string, FollowUser>();
+        for (const f of [...existing.following, ...payload.following]) {
+          if (f && f.id && !byId.has(f.id)) {
+            byId.set(f.id, f);
+          }
+        }
+        nextFollowing = [...byId.values()];
+      }
+      if (Array.isArray(payload.followingIds) && payload.followingIds.length > 0) {
+        nextFollowingIds = Array.from(
+          new Set([...existing.followingIds, ...payload.followingIds.filter(Boolean)])
+        );
+      } else if (nextFollowing.length > 0 && nextFollowingIds.length === 0) {
+        nextFollowingIds = nextFollowing.map((u) => u.id);
+      }
+      if (Array.isArray(payload.requestedIds) && payload.requestedIds.length > 0) {
+        nextRequestedIds = Array.from(
+          new Set([...existing.requestedIds, ...payload.requestedIds.filter(Boolean)])
+        );
+      }
+      if (Array.isArray(payload.followRequests) && payload.followRequests.length > 0) {
+        const byId = new Map<string, FollowRequest>();
+        for (const r of [...existing.followRequests, ...payload.followRequests]) {
+          if (r && r.id && !byId.has(r.id)) {
+            byId.set(r.id, r);
+          }
+        }
+        nextFollowRequests = [...byId.values()];
+      }
+    }
+
+    const hasExplicitSocialArrays =
+      Boolean(existing.socialMutated) ||
+      Boolean(existing.workspaceHydrated) ||
+      Array.isArray(payload.followers) ||
+      Array.isArray(payload.following) ||
+      Array.isArray(payload.followingIds);
+
     const authoritativeFollowersCount =
-      existing.followers.length > 0
-        ? existing.followers.length
+      hasExplicitSocialArrays || nextFollowers.length > 0
+        ? nextFollowers.length
         : Math.max(0, Number(incomingProfile.followersCount) || 0);
     const authoritativeFollowingCount =
-      existing.followingIds.length > 0
-        ? existing.followingIds.length
+      hasExplicitSocialArrays || nextFollowingIds.length > 0
+        ? nextFollowingIds.length
         : Math.max(0, Number(incomingProfile.followingCount) || 0);
 
     const updatedProfile: UserProfile = {
@@ -395,17 +495,21 @@ export class SocialStore {
           clientById.set(n.id, n);
         }
       }
-      nextNotifications = existing.notifications.map((serverNotif) => {
-        const clientNotif = clientById.get(serverNotif.id);
-        if (!clientNotif) return serverNotif;
-        return {
-          ...serverNotif,
-          isRead: Boolean(serverNotif.isRead || clientNotif.isRead),
-          ...(serverNotif.handled || clientNotif.handled
-            ? { handled: serverNotif.handled || clientNotif.handled }
-            : {}),
-        };
-      });
+      if (!existing.workspaceHydrated && existing.notifications.length === 0) {
+        nextNotifications = payload.notifications.filter((n) => Boolean(n && n.id));
+      } else {
+        nextNotifications = existing.notifications.map((serverNotif) => {
+          const clientNotif = clientById.get(serverNotif.id);
+          if (!clientNotif) return serverNotif;
+          return {
+            ...serverNotif,
+            isRead: Boolean(serverNotif.isRead || clientNotif.isRead),
+            ...(serverNotif.handled || clientNotif.handled
+              ? { handled: serverNotif.handled || clientNotif.handled }
+              : {}),
+          };
+        });
+      }
     }
 
     const nextRecord: StoredUserRecord = {
@@ -424,9 +528,15 @@ export class SocialStore {
         : existing.favoritePeople,
       activities: Array.isArray(payload.activities) ? payload.activities : existing.activities,
       comments: Array.isArray(payload.comments) ? payload.comments : existing.comments,
+      followers: nextFollowers,
+      following: nextFollowing,
+      followRequests: nextFollowRequests,
+      followingIds: nextFollowingIds,
+      requestedIds: nextRequestedIds,
       blockedIds: Array.isArray(payload.blockedIds) ? payload.blockedIds : existing.blockedIds,
       notifications: nextNotifications,
       updatedAtMs: Math.max(existing.updatedAtMs, Number(payload.updatedAtMs) || Date.now()),
+      workspaceHydrated: true,
     };
 
     if (prevUsername && prevUsername !== updatedProfile.username.toLowerCase()) {
@@ -703,6 +813,8 @@ export class SocialStore {
         ];
       }
 
+      follower.socialMutated = true;
+      target.socialMutated = true;
       follower.updatedAtMs = nowMs;
       target.updatedAtMs = nowMs;
       this.saveToDisk();
@@ -796,6 +908,8 @@ export class SocialStore {
       target.notifications = [createdNotif, ...target.notifications];
     }
 
+    follower.socialMutated = true;
+    target.socialMutated = true;
     follower.updatedAtMs = nowMs;
     target.updatedAtMs = nowMs;
     this.saveToDisk();
@@ -829,6 +943,7 @@ export class SocialStore {
         f.id === targetUid ? { ...f, isFollowing: false } : f
       );
       follower.profile.followingCount = follower.followingIds.length;
+      follower.socialMutated = true;
       follower.updatedAtMs = nowMs;
     }
 
@@ -840,6 +955,7 @@ export class SocialStore {
         u.id === followerUid ? { ...u, isFollower: false } : u
       );
       target.profile.followersCount = target.followers.length;
+      target.socialMutated = true;
       target.updatedAtMs = nowMs;
       targetFollowersCount = target.profile.followersCount;
     }
@@ -1063,6 +1179,116 @@ export class SocialStore {
       this.saveToDisk();
     }
     return merged;
+  }
+
+  public submitProfileReport(input: {
+    id?: string;
+    targetId: string;
+    targetUsername?: string;
+    targetDisplayName?: string;
+    reporterUid: string;
+    reporterUsername?: string;
+    reporterDisplayName?: string;
+    reason: string;
+    details?: string;
+  }): StoredProfileReport {
+    const cleanTargetId = String(input.targetId || '').trim();
+    const cleanReporterUid = String(input.reporterUid || '').trim();
+    if (!cleanTargetId || !cleanReporterUid || cleanTargetId === cleanReporterUid) {
+      throw new Error('Operação de denúncia inválida.');
+    }
+
+    const targetRec = this.getUserRecord(cleanTargetId);
+    const reporterRec = this.getUserRecord(cleanReporterUid);
+    const resolvedTargetId = targetRec ? targetRec.uid : cleanTargetId;
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+
+    const report: StoredProfileReport = {
+      id:
+        input.id && input.id.trim()
+          ? input.id.trim()
+          : `rep_${nowMs}_${Math.random().toString(36).slice(2, 8)}`,
+      targetType: 'profile',
+      targetId: resolvedTargetId,
+      targetUsername:
+        input.targetUsername ||
+        targetRec?.profile.username ||
+        undefined,
+      targetDisplayName:
+        input.targetDisplayName ||
+        targetRec?.profile.displayName ||
+        undefined,
+      reporterUid: cleanReporterUid,
+      reporterUsername:
+        input.reporterUsername ||
+        reporterRec?.profile.username ||
+        undefined,
+      reporterDisplayName:
+        input.reporterDisplayName ||
+        reporterRec?.profile.displayName ||
+        undefined,
+      reason: String(input.reason || '').trim().slice(0, 80),
+      details: String(input.details || '').trim().slice(0, 1000),
+      status: 'pending',
+      createdAt: nowIso,
+      createdAtMs: nowMs,
+      updatedAtMs: nowMs,
+    };
+
+    this.reports = [report, ...this.reports.filter((r) => r.id !== report.id)].slice(0, 500);
+    this.saveToDisk();
+    return report;
+  }
+
+  public mergeExternalProfileReports(external: StoredProfileReport[]): StoredProfileReport[] {
+    if (!Array.isArray(external) || external.length === 0) {
+      return this.getProfileReports();
+    }
+    const byId = new Map<string, StoredProfileReport>();
+    for (const item of [...this.reports, ...external]) {
+      if (!item || !item.id || !item.targetId) continue;
+      const existing = byId.get(item.id);
+      if (!existing) {
+        byId.set(item.id, item);
+      } else {
+        const existingUpdated = existing.updatedAtMs ?? existing.createdAtMs ?? 0;
+        const incomingUpdated = item.updatedAtMs ?? item.createdAtMs ?? 0;
+        byId.set(
+          item.id,
+          incomingUpdated >= existingUpdated ? { ...existing, ...item } : { ...item, ...existing }
+        );
+      }
+    }
+    this.reports = [...byId.values()].sort(
+      (a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0)
+    );
+    this.saveToDisk();
+    return this.reports;
+  }
+
+  public getProfileReports(limit = 100): StoredProfileReport[] {
+    return [...this.reports]
+      .sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0))
+      .slice(0, Math.max(1, limit));
+  }
+
+  public updateProfileReportStatus(
+    reportId: string,
+    status: 'pending' | 'in_review' | 'resolved' | 'dismissed'
+  ): StoredProfileReport | null {
+    const cleanId = String(reportId || '').trim();
+    if (!cleanId) return null;
+    const idx = this.reports.findIndex((r) => r.id === cleanId);
+    if (idx === -1) return null;
+    const updated: StoredProfileReport = {
+      ...this.reports[idx],
+      status,
+      updatedAtMs: Date.now(),
+    };
+    this.reports[idx] = updated;
+    this.saveToDisk();
+    return updated;
   }
 }
 

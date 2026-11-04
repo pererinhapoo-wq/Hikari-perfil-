@@ -1,5 +1,5 @@
 import type { Request } from 'express';
-import { getAdminAuth } from './firebaseAdmin.js';
+import { getAdminAuth, getFirebaseAdminStatus } from './firebaseAdmin.js';
 import { verifyFirebaseJwtCryptographically } from './adminAuth.js';
 import { CURRENT_USER, OTHER_USERS } from '../data/mockData.js';
 
@@ -78,9 +78,9 @@ export async function verifyAuthenticatedUserToken(
   }
 
   // 1. Firebase Admin SDK verification when service account is available
-  const adminAuth = getAdminAuth();
-  if (adminAuth) {
+  if (getFirebaseAdminStatus().isConfigured) {
     try {
+      const adminAuth = getAdminAuth();
       const decoded = await adminAuth.verifyIdToken(cleanToken, true);
       if (!decoded || !decoded.uid || !VALID_UID_REGEX.test(decoded.uid)) {
         return {

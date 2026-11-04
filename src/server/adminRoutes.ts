@@ -8,6 +8,7 @@ import {
   type AdminUserContext,
 } from './adminAuth.js';
 import { getFirebaseAdminStatus, getAdminFirestore } from './firebaseAdmin.js';
+import { socialStore, type StoredProfileReport } from './socialStore.js';
 import { 
   OTHER_USERS, 
   CURRENT_USER, 
@@ -311,6 +312,82 @@ adminRouter.get(
   }
 );
 
+async function buildAdminModerationResponse() {
+  if (getFirebaseAdminStatus().isConfigured) {
+    try {
+      const snapshot = await getAdminFirestore()
+        .collection('profile_reports')
+        .orderBy('createdAtMs', 'desc')
+        .limit(100)
+        .get();
+      const firestoreReports: StoredProfileReport[] = snapshot.docs.map((doc) => {
+        const data = doc.data();
+        const rawStatus = String(data.status || 'pending');
+        const status: StoredProfileReport['status'] =
+          rawStatus === 'in_review' || rawStatus === 'resolved' || rawStatus === 'dismissed'
+            ? rawStatus
+            : 'pending';
+        return {
+          id: doc.id,
+          targetType: 'profile',
+          targetId: String(data.targetId || ''),
+          ...(typeof data.targetUsername === 'string' ? { targetUsername: data.targetUsername } : {}),
+          ...(typeof data.targetDisplayName === 'string'
+            ? { targetDisplayName: data.targetDisplayName }
+            : {}),
+          reporterUid: String(data.reporterUid || ''),
+          ...(typeof data.reporterUsername === 'string'
+            ? { reporterUsername: data.reporterUsername }
+            : {}),
+          ...(typeof data.reporterDisplayName === 'string'
+            ? { reporterDisplayName: data.reporterDisplayName }
+            : {}),
+          reason: String(data.reason || 'Não informado'),
+          details: String(data.details || ''),
+          status,
+          createdAt: String(data.createdAt || ''),
+          createdAtMs: Number(data.createdAtMs) || Date.now(),
+          ...(typeof data.updatedAtMs === 'number' ? { updatedAtMs: data.updatedAtMs } : {}),
+        };
+      });
+      socialStore.mergeExternalProfileReports(firestoreReports);
+    } catch (err) {
+      console.warn('[admin] Falha ao ler profile_reports do Firestore; usando socialStore:', err);
+    }
+  }
+
+  const reports = socialStore.getProfileReports(100).map((report) => {
+    const targetRec = socialStore.getUserRecord(report.targetId);
+    const reporterRec = socialStore.getUserRecord(report.reporterUid);
+    return {
+      ...report,
+      targetUsername: report.targetUsername || targetRec?.profile.username,
+      targetDisplayName: report.targetDisplayName || targetRec?.profile.displayName,
+      reporterUsername: report.reporterUsername || reporterRec?.profile.username,
+      reporterDisplayName: report.reporterDisplayName || reporterRec?.profile.displayName,
+    };
+  });
+
+  const pending = reports.filter(
+    (report) => report.status === 'pending' || report.status === 'in_review'
+  ).length;
+
+  return {
+    reports,
+    total: reports.length,
+    pending,
+    systemNotice: reports.length
+      ? 'Denúncias reais recebidas e disponíveis para gerenciamento.'
+      : 'Nenhuma denúncia pendente registrada no momento.',
+    frameworkReady: true,
+    futureCapabilities: [
+      'Análise manual de denúncias de perfis',
+      'Registro de decisões de moderação',
+    ],
+    automatedPunishments: 'Desativadas. Nenhuma punição é aplicada automaticamente.',
+  };
+}
+
 /**
  * 4. MODERAÇÃO
  * Consulta de denúncias e infrações reais.
@@ -321,48 +398,69 @@ adminRouter.get(
   requireAdminAuth,
   async (_req: Request, res: Response) => {
     try {
-      const snapshot = await getAdminFirestore()
-        .collection('profile_reports')
-        .orderBy('createdAtMs', 'desc')
-        .limit(100)
-        .get();
-      const reports = snapshot.docs.map((doc) => {
-        const data = doc.data();
-        return {
-          id: doc.id,
-          targetType: String(data.targetType || 'profile'),
-          targetId: String(data.targetId || ''),
-          reporterUid: String(data.reporterUid || ''),
-          reason: String(data.reason || 'Não informado'),
-          details: String(data.details || ''),
-          status: String(data.status || 'pending'),
-          createdAt: String(data.createdAt || ''),
-        };
-      });
-      const pending = reports.filter((report) => report.status === 'pending').length;
-      return res.json({
-        reports,
-        total: reports.length,
-        pending,
-        systemNotice: reports.length ? 'Denúncias reais recebidas e aguardando análise.' : 'Nenhuma denúncia pendente registrada no momento.',
-        frameworkReady: true,
-        futureCapabilities: [
-          'Análise manual de denúncias de perfis',
-          'Registro de decisões de moderação',
-        ],
-        automatedPunishments: 'Desativadas. Nenhuma punição é aplicada automaticamente.',
-      });
-    } catch (err) {
+      const payload = await buildAdminModerationResponse();
+      return res.json(payload);
+    } catch {
       return res.json({
         reports: [],
         total: 0,
         pending: 0,
-        systemNotice: 'O armazenamento de denúncias não está disponível. Verifique a configuração do Firebase Admin.',
+        systemNotice: 'O armazenamento de denúncias não está disponível no momento.',
         frameworkReady: false,
         futureCapabilities: ['Análise manual de denúncias'],
         automatedPunishments: 'Desativadas.',
       });
     }
+  }
+);
+
+/**
+ * PATCH /api/admin/moderation/reports/:reportId
+ * Atualiza o status de uma denúncia existente (pending | in_review | resolved | dismissed).
+ * Estritamente protegido por requireAdminAuth (AUTHORIZED_ADMIN_UID).
+ */
+adminRouter.patch(
+  '/moderation/reports/:reportId',
+  requireAdminAuth,
+  async (req: Request, res: Response) => {
+    const reportId = String(req.params.reportId || '').trim();
+    const rawStatus = String(req.body?.status || '').trim();
+    const allowedStatuses = new Set(['pending', 'in_review', 'resolved', 'dismissed']);
+
+    if (!reportId || !allowedStatuses.has(rawStatus)) {
+      return res.status(400).json({
+        error: 'INVALID_STATUS',
+        message: 'Identificador de denúncia ou status inválido.',
+      });
+    }
+
+    const status = rawStatus as StoredProfileReport['status'];
+    const updated = socialStore.updateProfileReportStatus(reportId, status);
+
+    if (getFirebaseAdminStatus().isConfigured) {
+      try {
+        await getAdminFirestore()
+          .collection('profile_reports')
+          .doc(reportId)
+          .set({ status, updatedAtMs: Date.now() }, { merge: true });
+      } catch (err) {
+        console.warn('[admin] Falha ao atualizar status da denúncia no Firestore:', err);
+      }
+    }
+
+    if (!updated) {
+      return res.status(404).json({
+        error: 'NOT_FOUND',
+        message: 'Denúncia não encontrada.',
+      });
+    }
+
+    const payload = await buildAdminModerationResponse();
+    return res.json({
+      ok: true,
+      updatedReport: updated,
+      ...payload,
+    });
   }
 );
 

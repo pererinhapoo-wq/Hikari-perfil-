@@ -109,6 +109,11 @@ export async function syncOwnerSocialWorkspace(
     favoritePeople?: FavoritePerson[];
     activities?: UserActivity[];
     comments?: HikariComment[];
+    followers?: FollowUser[];
+    following?: FollowUser[];
+    followRequests?: FollowRequest[];
+    followingIds?: string[];
+    requestedIds?: string[];
     blockedIds?: string[];
     notifications?: NotificationItem[];
     updatedAtMs?: number;
@@ -257,7 +262,13 @@ export async function fetchAuthorizedUserProfileComplete(
 export async function submitRemoteProfileReport(
   targetId: string,
   reason: string,
-  details = ''
+  details = '',
+  metadata?: {
+    targetUsername?: string;
+    targetDisplayName?: string;
+    reporterUsername?: string;
+    reporterDisplayName?: string;
+  }
 ): Promise<{ ok: boolean; duplicate?: boolean; message?: string } | null> {
   const cleanTarget = targetId.trim();
   if (!cleanTarget) return null;
@@ -267,7 +278,11 @@ export async function submitRemoteProfileReport(
     const res = await fetch(buildApiUrl(`/api/users/${encodeURIComponent(cleanTarget)}/report`), {
       method: 'POST',
       headers,
-      body: JSON.stringify({ reason, details }),
+      body: JSON.stringify({
+        reason,
+        details,
+        ...(metadata ? metadata : {}),
+      }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) return { ok: false, message: typeof data?.message === 'string' ? data.message : 'Não foi possível enviar a denúncia.' };

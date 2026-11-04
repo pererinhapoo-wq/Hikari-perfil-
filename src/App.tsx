@@ -328,19 +328,26 @@ function mergeServerSocialIntoWorkspace(
     }
   }
 
-  const nextFollowers =
-    social.followers.length > 0 || prev.followers.length === 0 ? social.followers : prev.followers;
-  const nextFollowing =
-    social.following.length > 0 || prev.following.length === 0 ? social.following : prev.following;
-  const nextFollowRequests = social.followRequests;
-  const nextFollowingIds =
-    social.followingIds.length > 0 || prev.followingIds.length === 0
-      ? social.followingIds
-      : prev.followingIds;
-  const nextRequestedIds = social.requestedIds;
+  const nextFollowers = Array.isArray(social.followers) ? social.followers : prev.followers;
+  const nextFollowing = Array.isArray(social.following) ? social.following : prev.following;
+  const nextFollowRequests = Array.isArray(social.followRequests)
+    ? social.followRequests
+    : prev.followRequests;
+  const nextFollowingIds = Array.isArray(social.followingIds)
+    ? social.followingIds
+    : prev.followingIds;
+  const nextRequestedIds = Array.isArray(social.requestedIds)
+    ? social.requestedIds
+    : prev.requestedIds;
 
-  const nextFollowersCount = Math.max(social.followersCount, nextFollowers.length);
-  const nextFollowingCount = Math.max(social.followingCount, nextFollowingIds.length);
+  const nextFollowersCount =
+    typeof social.followersCount === 'number'
+      ? Math.max(social.followersCount, nextFollowers.length)
+      : nextFollowers.length;
+  const nextFollowingCount =
+    typeof social.followingCount === 'number'
+      ? Math.max(social.followingCount, nextFollowingIds.length)
+      : nextFollowingIds.length;
 
   const prevNotifSig = prev.notifications
     .map((n) => `${n.id}:${n.isRead ? 1 : 0}:${n.handled || ''}`)
@@ -552,6 +559,9 @@ export default function App() {
 
   // Busy lock to prevent concurrent or duplicated follow/unfollow clicks
   const [isFollowPending, setIsFollowPending] = useState(false);
+  const [pendingFollowTargetIds, setPendingFollowTargetIds] = useState<Set<string>>(
+    () => new Set()
+  );
 
   // UID-isolated personal state for real Firebase accounts (keyed strictly by user.uid)
   const [authSession, setAuthSession] = useState<AuthSessionState | null>(null);
@@ -1078,7 +1088,10 @@ export default function App() {
     isAuthWorkspaceReady && authSession ? authSession.workspace : null;
 
   const updateAuthWorkspace = useCallback(
-    (updater: (prev: UserPersonalWorkspace) => UserPersonalWorkspace) => {
+    (
+      updater: (prev: UserPersonalWorkspace) => UserPersonalWorkspace,
+      options?: { immediate?: boolean }
+    ) => {
       if (!isAuthenticated || !user) return;
       const targetUid = user.uid;
       setAuthSession((prev) => {
@@ -1087,11 +1100,15 @@ export default function App() {
             ? prev.workspace
             : readLocalUserWorkspace(targetUid) ?? createEmptyUserWorkspace(targetUid);
         const updated = updater(baseWorkspace);
-        const stamped = writeLocalUserWorkspace(targetUid, {
-          ...updated,
-          uid: targetUid,
-          updatedAtMs: Date.now(),
-        });
+        const stamped = writeLocalUserWorkspace(
+          targetUid,
+          {
+            ...updated,
+            uid: targetUid,
+            updatedAtMs: Date.now(),
+          },
+          { immediate: options?.immediate }
+        );
         const resolvedProfile = buildProfileFromFirebaseUser(user, stamped.profileOverrides);
         syncPublicProfileProjection(resolvedProfile, stamped.animes, stamped.updatedAtMs, {
           favoriteCharacters: stamped.favoriteCharacters,
@@ -1101,13 +1118,13 @@ export default function App() {
           comments: stamped.comments,
         });
         setPublicProfilesRevision((r) => r + 1);
-        void saveUserWorkspaceToFirestore(targetUid, resolvedProfile, stamped).then(
-          (syncStatus) => {
-            setAuthSession((curr) =>
-              curr && curr.uid === targetUid ? { ...curr, firestoreStatus: syncStatus } : curr
-            );
-          }
-        );
+        void saveUserWorkspaceToFirestore(targetUid, resolvedProfile, stamped, {
+          immediate: options?.immediate,
+        }).then((syncStatus) => {
+          setAuthSession((curr) =>
+            curr && curr.uid === targetUid ? { ...curr, firestoreStatus: syncStatus } : curr
+          );
+        });
         return {
           uid: targetUid,
           workspace: stamped,
@@ -1154,6 +1171,11 @@ export default function App() {
         favoritePeople: activeAuthWorkspace.favoritePeople,
         activities: activeAuthWorkspace.activities,
         comments: activeAuthWorkspace.comments,
+        followers: activeAuthWorkspace.followers,
+        following: activeAuthWorkspace.following,
+        followRequests: activeAuthWorkspace.followRequests,
+        followingIds: activeAuthWorkspace.followingIds,
+        requestedIds: activeAuthWorkspace.requestedIds,
         blockedIds: activeAuthWorkspace.blockedIds,
         notifications: activeAuthWorkspace.notifications,
         updatedAtMs: activeAuthWorkspace.updatedAtMs || Date.now(),
@@ -1622,6 +1644,41 @@ export default function App() {
   const isFollowingActive = followingIds.has(activeProfile.id);
   const isRequestedActive = requestedIds.has(activeProfile.id);
   const isBlockedActive = blockedIds.has(activeProfile.id);
+  const isFollowerActive = useMemo(() => {
+    if (isOwnProfile) return false;
+    const targetId = activeProfile.id;
+    const targetUsername = activeProfile.username?.toLowerCase();
+    if (
+      followers.some(
+        (f) => f.id === targetId || (targetUsername && f.username?.toLowerCase() === targetUsername)
+      )
+    ) {
+      return true;
+    }
+    if (
+      notifications.some(
+        (n) =>
+          n.type === 'new_follower' &&
+          (n.actor?.id === targetId ||
+            (targetUsername && n.actor?.username?.toLowerCase() === targetUsername))
+      )
+    ) {
+      return true;
+    }
+    const visitedFollowing = remoteVisitedDetails[targetId]?.following;
+    if (Array.isArray(visitedFollowing) && visitedFollowing.some((u) => u.id === currentUser.id)) {
+      return true;
+    }
+    return false;
+  }, [
+    isOwnProfile,
+    activeProfile.id,
+    activeProfile.username,
+    followers,
+    notifications,
+    remoteVisitedDetails,
+    currentUser.id,
+  ]);
 
   // Strict privacy gate: when a profile is private, ALL non-owners (including previous followers) are blocked
   const isPrivateLocked =
@@ -2023,32 +2080,31 @@ export default function App() {
 
           // A resposta do backend pode conter arrays vazios legítimos. Não use merge que
           // restaure arrays antigos do cache: remova o alvo explicitamente após a confirmação.
-          updateAuthWorkspace((prev) => {
-            const { nextWorkspace } = mergeServerSocialIntoWorkspace(
-              prev,
-              remoteRes.callerSocialState
-            );
-            const nextFollowingIds = nextWorkspace.followingIds.filter((id) => id !== targetId);
-            const nextRequestedIds = nextWorkspace.requestedIds.filter((id) => id !== targetId);
-            const nextFollowing = nextWorkspace.following.filter((u) => u.id !== targetId);
-            const wasInFollowing = prev.followingIds.includes(targetId);
-            return {
-              ...nextWorkspace,
-              followingIds: nextFollowingIds,
-              requestedIds: nextRequestedIds,
-              following: nextFollowing,
-              followers: nextWorkspace.followers.map((u) =>
-                u.id === targetId ? { ...u, isFollowing: false } : u
-              ),
-              profileOverrides: {
-                ...nextWorkspace.profileOverrides,
-                followingCount: Math.max(
-                  0,
-                  (prev.profileOverrides.followingCount ?? prev.followingIds.length) - (wasInFollowing ? 1 : 0)
+          updateAuthWorkspace(
+            (prev) => {
+              const { nextWorkspace } = mergeServerSocialIntoWorkspace(
+                prev,
+                remoteRes.callerSocialState
+              );
+              const nextFollowingIds = nextWorkspace.followingIds.filter((id) => id !== targetId);
+              const nextRequestedIds = nextWorkspace.requestedIds.filter((id) => id !== targetId);
+              const nextFollowing = nextWorkspace.following.filter((u) => u.id !== targetId);
+              return {
+                ...nextWorkspace,
+                followingIds: nextFollowingIds,
+                requestedIds: nextRequestedIds,
+                following: nextFollowing,
+                followers: nextWorkspace.followers.map((u) =>
+                  u.id === targetId ? { ...u, isFollowing: false } : u
                 ),
-              },
-            };
-          });
+                profileOverrides: {
+                  ...nextWorkspace.profileOverrides,
+                  followingCount: nextFollowingIds.length,
+                },
+              };
+            },
+            { immediate: true }
+          );
 
           const updatedTargetFollowers =
             remoteRes?.targetFollowersCount ??
@@ -2100,64 +2156,70 @@ export default function App() {
         );
 
         if (followRes?.callerSocialState) {
-          updateAuthWorkspace((prev) => {
-            const { nextWorkspace } = mergeServerSocialIntoWorkspace(
-              prev,
-              followRes.callerSocialState
-            );
-            return nextWorkspace;
-          });
-        } else {
-          updateAuthWorkspace((prev) => {
-            const followingSet = new Set(prev.followingIds);
-            const requestedSet = new Set(prev.requestedIds);
-            let nextFollowing = prev.following;
-            let nextFollowers = prev.followers;
-
-            if (activeProfile.isPrivate) {
-              requestedSet.add(targetId);
-            } else {
-              followingSet.add(targetId);
-              if (!prev.following.some((u) => u.id === targetId)) {
-                nextFollowing = [
-                  {
-                    id: targetId,
-                    username: activeProfile.username,
-                    displayName: activeProfile.displayName,
-                    avatarUrl: activeProfile.avatarUrl,
-                    bio: activeProfile.bio,
-                    isFollowing: true,
-                    isRequested: false,
-                    isFollower: prev.followers.some((u) => u.id === targetId),
-                    isBlocked: false,
-                    createdAt: activeProfile.createdAt,
-                  },
-                  ...prev.following,
-                ];
-              }
-              nextFollowers = prev.followers.map((u) =>
-                u.id === targetId ? { ...u, isFollowing: true } : u
+          updateAuthWorkspace(
+            (prev) => {
+              const { nextWorkspace } = mergeServerSocialIntoWorkspace(
+                prev,
+                followRes.callerSocialState
               );
-            }
+              return nextWorkspace;
+            },
+            { immediate: true }
+          );
+        } else {
+          updateAuthWorkspace(
+            (prev) => {
+              const followingSet = new Set(prev.followingIds);
+              const requestedSet = new Set(prev.requestedIds);
+              let nextFollowing = prev.following;
+              let nextFollowers = prev.followers;
 
-            const currentFollowingCount =
-              prev.profileOverrides.followingCount ?? prev.following.length;
+              if (activeProfile.isPrivate) {
+                requestedSet.add(targetId);
+              } else {
+                followingSet.add(targetId);
+                if (!prev.following.some((u) => u.id === targetId)) {
+                  nextFollowing = [
+                    {
+                      id: targetId,
+                      username: activeProfile.username,
+                      displayName: activeProfile.displayName,
+                      avatarUrl: activeProfile.avatarUrl,
+                      bio: activeProfile.bio,
+                      isFollowing: true,
+                      isRequested: false,
+                      isFollower: prev.followers.some((u) => u.id === targetId),
+                      isBlocked: false,
+                      createdAt: activeProfile.createdAt,
+                    },
+                    ...prev.following,
+                  ];
+                }
+                nextFollowers = prev.followers.map((u) =>
+                  u.id === targetId ? { ...u, isFollowing: true } : u
+                );
+              }
 
-            return {
-              ...prev,
-              followingIds: Array.from(followingSet),
-              requestedIds: Array.from(requestedSet),
-              following: nextFollowing,
-              followers: nextFollowers,
-              profileOverrides:
-                delta !== 0
-                  ? {
-                      ...prev.profileOverrides,
-                      followingCount: Math.max(0, currentFollowingCount + delta),
-                    }
-                  : prev.profileOverrides,
-            };
-          });
+              const currentFollowingCount =
+                prev.profileOverrides.followingCount ?? prev.following.length;
+
+              return {
+                ...prev,
+                followingIds: Array.from(followingSet),
+                requestedIds: Array.from(requestedSet),
+                following: nextFollowing,
+                followers: nextFollowers,
+                profileOverrides:
+                  delta !== 0
+                    ? {
+                        ...prev.profileOverrides,
+                        followingCount: Math.max(0, currentFollowingCount + delta),
+                      }
+                    : prev.profileOverrides,
+              };
+            },
+            { immediate: true }
+          );
         }
 
         if (delta !== 0 || followRes) {
@@ -2434,22 +2496,26 @@ export default function App() {
     if (isAuthenticated) {
       const remoteRes = await unfollowRemoteUser(userId);
       if (!remoteRes?.ok || !remoteRes.callerSocialState) return;
-      updateAuthWorkspace((prev) => {
-        const { nextWorkspace } = mergeServerSocialIntoWorkspace(prev, remoteRes.callerSocialState);
-        return {
-          ...nextWorkspace,
-          following: nextWorkspace.following.filter((u) => u.id !== userId),
-          followingIds: nextWorkspace.followingIds.filter((id) => id !== userId),
-          requestedIds: nextWorkspace.requestedIds.filter((id) => id !== userId),
-          profileOverrides: {
-            ...nextWorkspace.profileOverrides,
-            followingCount: Math.max(
-              0,
-              (prev.profileOverrides.followingCount ?? prev.followingIds.length) - (prev.followingIds.includes(userId) ? 1 : 0)
+      updateAuthWorkspace(
+        (prev) => {
+          const { nextWorkspace } = mergeServerSocialIntoWorkspace(prev, remoteRes.callerSocialState);
+          const nextFollowingIds = nextWorkspace.followingIds.filter((id) => id !== userId);
+          return {
+            ...nextWorkspace,
+            following: nextWorkspace.following.filter((u) => u.id !== userId),
+            followingIds: nextFollowingIds,
+            requestedIds: nextWorkspace.requestedIds.filter((id) => id !== userId),
+            followers: nextWorkspace.followers.map((u) =>
+              u.id === userId ? { ...u, isFollowing: false } : u
             ),
-          },
-        };
-      });
+            profileOverrides: {
+              ...nextWorkspace.profileOverrides,
+              followingCount: nextFollowingIds.length,
+            },
+          };
+        },
+        { immediate: true }
+      );
       setRemoteVisitedProfiles((prev) => {
         if (!prev[userId]) return prev;
         return { ...prev, [userId]: { ...prev[userId], followersCount: remoteRes.targetFollowersCount } };
@@ -2460,6 +2526,9 @@ export default function App() {
     }
 
     setDemoFollowing((prev) => prev.filter((u) => u.id !== userId));
+    setDemoFollowers((prev) =>
+      prev.map((u) => (u.id === userId ? { ...u, isFollowing: false } : u))
+    );
     setDemoFollowingIds((prev) => {
       const next = new Set(prev);
       next.delete(userId);
@@ -2471,6 +2540,233 @@ export default function App() {
       return { ...prev, [userId]: { ...prev[userId], followersCount: Math.max(0, prev[userId].followersCount - 1) } };
     });
   };
+
+  // Handler: Seguir de volta diretamente pela notificação de novo seguidor sem recarregar a página
+  const handleFollowBackFromNotification = useCallback(
+    async (actor: NotificationItem['actor'], notifId: string) => {
+      const targetId = actor?.id?.trim();
+      if (!targetId || targetId === currentUser.id) return;
+      if (
+        followingIds.has(targetId) ||
+        requestedIds.has(targetId) ||
+        blockedIds.has(targetId) ||
+        pendingFollowTargetIds.has(targetId)
+      ) {
+        return;
+      }
+
+      handleMarkNotificationAsRead(notifId);
+      setPendingFollowTargetIds((prev) => new Set(prev).add(targetId));
+
+      try {
+        if (isAuthenticated) {
+          const targetProfile = authOtherProfilesMap[targetId];
+          const followRes = await followRemoteUser(
+            targetId,
+            {
+              username: currentUser.username,
+              displayName: currentUser.displayName,
+              avatarUrl: currentUser.avatarUrl,
+            },
+            {
+              username: targetProfile?.username || actor.username,
+              displayName: targetProfile?.displayName || actor.displayName,
+              avatarUrl: targetProfile?.avatarUrl || actor.avatarUrl,
+              isPrivate: Boolean(targetProfile?.isPrivate),
+            }
+          );
+
+          if (followRes?.callerSocialState) {
+            updateAuthWorkspace(
+              (prev) => {
+                const { nextWorkspace } = mergeServerSocialIntoWorkspace(
+                  prev,
+                  followRes.callerSocialState
+                );
+                return nextWorkspace;
+              },
+              { immediate: true }
+            );
+          } else {
+            updateAuthWorkspace(
+              (prev) => {
+                const followingSet = new Set(prev.followingIds);
+                const requestedSet = new Set(prev.requestedIds);
+                let nextFollowing = prev.following;
+                let nextFollowers = prev.followers;
+
+                if (targetProfile?.isPrivate) {
+                  requestedSet.add(targetId);
+                } else {
+                  followingSet.add(targetId);
+                  if (!prev.following.some((u) => u.id === targetId)) {
+                    nextFollowing = [
+                      {
+                        id: targetId,
+                        username: targetProfile?.username || actor.username,
+                        displayName: targetProfile?.displayName || actor.displayName,
+                        avatarUrl: targetProfile?.avatarUrl || actor.avatarUrl,
+                        bio: targetProfile?.bio || '',
+                        isFollowing: true,
+                        isRequested: false,
+                        isFollower: true,
+                        isBlocked: false,
+                        createdAt: targetProfile?.createdAt || 'Agora',
+                      },
+                      ...prev.following,
+                    ];
+                  }
+                  if (prev.followers.some((u) => u.id === targetId)) {
+                    nextFollowers = prev.followers.map((u) =>
+                      u.id === targetId ? { ...u, isFollowing: true } : u
+                    );
+                  } else {
+                    nextFollowers = [
+                      {
+                        id: targetId,
+                        username: targetProfile?.username || actor.username,
+                        displayName: targetProfile?.displayName || actor.displayName,
+                        avatarUrl: targetProfile?.avatarUrl || actor.avatarUrl,
+                        bio: targetProfile?.bio || '',
+                        isFollowing: true,
+                        isRequested: false,
+                        isFollower: true,
+                        isBlocked: false,
+                        createdAt: targetProfile?.createdAt || 'Agora',
+                      },
+                      ...prev.followers,
+                    ];
+                  }
+                }
+
+                const nextFollowingIds = Array.from(followingSet);
+                return {
+                  ...prev,
+                  followingIds: nextFollowingIds,
+                  requestedIds: Array.from(requestedSet),
+                  following: nextFollowing,
+                  followers: nextFollowers,
+                  profileOverrides: {
+                    ...prev.profileOverrides,
+                    followingCount: nextFollowingIds.length,
+                  },
+                };
+              },
+              { immediate: true }
+            );
+          }
+
+          if (!targetProfile?.isPrivate) {
+            const nextFollowersCount =
+              followRes?.targetFollowersCount ?? (targetProfile?.followersCount ?? 0) + 1;
+            setRemoteVisitedProfiles((prev) => {
+              const currentTarget = prev[targetId] ?? targetProfile;
+              if (!currentTarget) return prev;
+              return {
+                ...prev,
+                [targetId]: {
+                  ...currentTarget,
+                  followersCount: nextFollowersCount,
+                },
+              };
+            });
+            setRemoteVisitedDetails((prev) => {
+              if (!prev[targetId]) return prev;
+              return {
+                ...prev,
+                [targetId]: {
+                  ...prev[targetId],
+                  profile: {
+                    ...prev[targetId].profile,
+                    followersCount: nextFollowersCount,
+                  },
+                },
+              };
+            });
+            adjustCachedPublicProfileFollowersCount(targetId, 1);
+            setPublicProfilesRevision((r) => r + 1);
+          }
+          return;
+        }
+
+        // Demo Mode
+        const targetDemoProfile = demoOtherProfiles[targetId] || OTHER_USERS[targetId];
+        if (targetDemoProfile?.isPrivate) {
+          setDemoRequestedIds((prev) => new Set(prev).add(targetId));
+          return;
+        }
+
+        setDemoFollowingIds((prev) => new Set(prev).add(targetId));
+        setDemoProfile((prev) => ({
+          ...prev,
+          followingCount: prev.followingCount + 1,
+        }));
+        setDemoOtherProfiles((prev) => {
+          const existingTarget = prev[targetId] ??
+            OTHER_USERS[targetId] ?? {
+              ...NEUTRAL_LOADING_PROFILE,
+              id: targetId,
+              username: actor.username,
+              displayName: actor.displayName,
+              avatarUrl: actor.avatarUrl,
+              followersCount: 0,
+              followingCount: 1,
+            };
+          return {
+            ...prev,
+            [targetId]: {
+              ...existingTarget,
+              followersCount: existingTarget.followersCount + 1,
+            },
+          };
+        });
+        setDemoFollowing((prev) => {
+          if (prev.some((u) => u.id === targetId)) return prev;
+          return [
+            {
+              id: targetId,
+              username: targetDemoProfile?.username || actor.username,
+              displayName: targetDemoProfile?.displayName || actor.displayName,
+              avatarUrl: targetDemoProfile?.avatarUrl || actor.avatarUrl,
+              bio: targetDemoProfile?.bio || '',
+              isFollowing: true,
+              isRequested: false,
+              isFollower: true,
+              isBlocked: false,
+              createdAt: targetDemoProfile?.createdAt || 'Agora',
+            },
+            ...prev,
+          ];
+        });
+        setDemoFollowers((prev) =>
+          prev.map((u) => (u.id === targetId ? { ...u, isFollowing: true } : u))
+        );
+      } catch (err) {
+        console.error('Falha ao seguir de volta pela notificação:', err);
+      } finally {
+        setPendingFollowTargetIds((prev) => {
+          const next = new Set(prev);
+          next.delete(targetId);
+          return next;
+        });
+      }
+    },
+    [
+      currentUser.id,
+      currentUser.username,
+      currentUser.displayName,
+      currentUser.avatarUrl,
+      followingIds,
+      requestedIds,
+      blockedIds,
+      pendingFollowTargetIds,
+      handleMarkNotificationAsRead,
+      isAuthenticated,
+      authOtherProfilesMap,
+      updateAuthWorkspace,
+      demoOtherProfiles,
+    ]
+  );
 
   // Handler: Update episode progress (single-slot update without full-list map cloning)
   const handleUpdateEpisode = useCallback(
@@ -3471,6 +3767,11 @@ export default function App() {
         onNavigateTab={handleTabChange}
         onAcceptRequest={handleAcceptRequest}
         onRejectRequest={handleRejectRequest}
+        followingIds={followingIds}
+        requestedIds={requestedIds}
+        blockedIds={blockedIds}
+        pendingFollowTargetIds={pendingFollowTargetIds}
+        onFollowBackNotification={handleFollowBackFromNotification}
         isAuthenticated={isAuthenticated}
         authenticatedEmail={isAuthenticated ? user?.email ?? null : null}
         onLogout={isAuthenticated ? handleLogout : undefined}
@@ -3492,11 +3793,19 @@ export default function App() {
           profile={activeProfile}
           isOwnProfile={isOwnProfile}
           isFollowing={isFollowingActive}
+          isFollower={isFollowerActive}
           isRequested={isRequestedActive}
           isBlocked={isBlockedActive}
           isFollowPending={isFollowPending}
           canReportProfile={isAuthenticated && !isOwnProfile}
-          onSubmitProfileReport={(reason, details) => submitRemoteProfileReport(activeProfile.id, reason, details)}
+          onSubmitProfileReport={(reason, details) =>
+            submitRemoteProfileReport(activeProfile.id, reason, details, {
+              targetUsername: activeProfile.username,
+              targetDisplayName: activeProfile.displayName,
+              reporterUsername: currentUser.username,
+              reporterDisplayName: currentUser.displayName,
+            })
+          }
           canDirectMessage={activeProfileDirectMessageCheck.allowed}
           directMessageDisabledReason={activeProfileDirectMessageCheck.reason}
           onFollowToggle={handleFollowToggle}

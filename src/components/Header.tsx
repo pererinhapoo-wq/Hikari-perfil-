@@ -46,6 +46,11 @@ interface HeaderProps {
   onNavigateTab: (tab: 'overview' | 'animes' | 'comments' | 'about' | 'activity' | 'favorites') => void;
   onAcceptRequest: (requestId: string, notifId?: string) => void;
   onRejectRequest: (requestId: string, notifId?: string) => void;
+  followingIds?: Set<string>;
+  requestedIds?: Set<string>;
+  blockedIds?: Set<string>;
+  pendingFollowTargetIds?: Set<string>;
+  onFollowBackNotification?: (actor: NotificationItem['actor'], notifId: string) => void;
   isAuthenticated?: boolean;
   authenticatedEmail?: string | null;
   onLogout?: () => void;
@@ -75,6 +80,11 @@ export const Header: React.FC<HeaderProps> = React.memo(({
   onNavigateTab,
   onAcceptRequest,
   onRejectRequest,
+  followingIds,
+  requestedIds,
+  blockedIds,
+  pendingFollowTargetIds,
+  onFollowBackNotification,
   isAuthenticated = false,
   authenticatedEmail = null,
   onLogout,
@@ -765,6 +775,43 @@ export const Header: React.FC<HeaderProps> = React.memo(({
                                   )}
                                 </div>
                               )}
+
+                              {/* Interactive Follow Back control for new follower notifications */}
+                              {notif.type === 'new_follower' &&
+                                onFollowBackNotification &&
+                                notif.actor?.id &&
+                                notif.actor.id !== currentUser.id &&
+                                !blockedIds?.has(notif.actor.id) && (
+                                  <div
+                                    className="ml-11 flex items-center gap-2 pt-1"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    {followingIds?.has(notif.actor.id) ? (
+                                      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-300 bg-emerald-950/40 px-2.5 py-0.5 rounded-lg border border-emerald-500/30">
+                                        <Check className="h-3 w-3" /> Seguindo
+                                      </span>
+                                    ) : requestedIds?.has(notif.actor.id) ? (
+                                      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-300 bg-amber-950/40 px-2.5 py-0.5 rounded-lg border border-amber-500/30">
+                                        Solicitado
+                                      </span>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        disabled={pendingFollowTargetIds?.has(notif.actor.id)}
+                                        onClick={(e) => {
+                                          e.preventDefault();
+                                          e.stopPropagation();
+                                          onFollowBackNotification(notif.actor, notif.id);
+                                        }}
+                                        className="rounded-lg bg-purple-600 hover:bg-purple-500 disabled:opacity-60 px-3 py-1 text-xs font-semibold text-white shadow-sm transition-all active:scale-95 cursor-pointer"
+                                      >
+                                        {pendingFollowTargetIds?.has(notif.actor.id)
+                                          ? 'Seguindo...'
+                                          : 'Seguir de volta'}
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
                             </div>
                           );
                         })

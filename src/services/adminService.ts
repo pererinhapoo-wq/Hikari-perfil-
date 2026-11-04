@@ -65,11 +65,17 @@ export interface AdminModerationData {
     id: string;
     targetType: string;
     targetId?: string;
+    targetUsername?: string;
+    targetDisplayName?: string;
     reporterUid?: string;
+    reporterUsername?: string;
+    reporterDisplayName?: string;
     reason: string;
     details?: string;
-    status?: string;
+    status?: 'pending' | 'in_review' | 'resolved' | 'dismissed' | string;
     createdAt: string;
+    createdAtMs?: number;
+    updatedAtMs?: number;
   }>;
   total: number;
   pending: number;
@@ -356,6 +362,25 @@ export async function fetchAdminModeration(idToken?: string | null): Promise<Adm
   const res = await fetchAdminProtected('/api/admin/moderation', idToken);
   if (!res.ok) {
     throw new Error(`Acesso negado (${res.status}): Não foi possível carregar o módulo de moderação.`);
+  }
+  return await res.json();
+}
+
+export async function updateAdminReportStatus(
+  reportId: string,
+  status: 'pending' | 'in_review' | 'resolved' | 'dismissed',
+  idToken?: string | null
+): Promise<AdminModerationData> {
+  const res = await fetchAdminProtected(
+    `/api/admin/moderation/reports/${encodeURIComponent(reportId)}`,
+    idToken,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ status }),
+    }
+  );
+  if (!res.ok) {
+    throw new Error(`Falha ao atualizar denúncia (${res.status}).`);
   }
   return await res.json();
 }

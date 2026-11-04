@@ -24,6 +24,7 @@ interface ProfileHeaderProps {
   profile: UserProfile;
   isOwnProfile: boolean;
   isFollowing: boolean;
+  isFollower?: boolean;
   isRequested: boolean;
   isBlocked: boolean;
   isFollowPending?: boolean;
@@ -46,6 +47,7 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
   profile,
   isOwnProfile,
   isFollowing,
+  isFollower = false,
   isRequested,
   isBlocked,
   isFollowPending = false,
@@ -279,6 +281,8 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
                       ? 'Cancelar solicitação'
                       : profile.isPrivate
                       ? 'Solicitar para Seguir'
+                      : isFollower
+                      ? 'Seguir de volta'
                       : 'Seguir'
                   }
                 >
@@ -303,6 +307,11 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
                     <>
                       <Lock className="h-4 w-4" />
                       <span>Solicitar para Seguir</span>
+                    </>
+                  ) : isFollower ? (
+                    <>
+                      <UserPlus className="h-4 w-4" />
+                      <span>Seguir de volta</span>
                     </>
                   ) : (
                     <>

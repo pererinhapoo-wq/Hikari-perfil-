@@ -31,6 +31,7 @@ import {
   fetchAdminUsers,
   fetchAdminAnimes,
   fetchAdminModeration,
+  updateAdminReportStatus,
   fetchAdminMetrics,
   fetchAdminSecurity,
   runAdminHealthCheck,
@@ -67,6 +68,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onReturnToApp, idToken }
   const [animeSearch, setAnimeSearch] = useState<string>('');
 
   const [moderation, setModeration] = useState<AdminModerationData | null>(null);
+  const [updatingReportId, setUpdatingReportId] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<AdminMetricsData | null>(null);
   const [security, setSecurity] = useState<AdminSecurityData | null>(null);
 
@@ -139,11 +141,27 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onReturnToApp, idToken }
     }
   };
 
+  const handleUpdateReportStatus = async (
+    reportId: string,
+    nextStatus: 'pending' | 'in_review' | 'resolved' | 'dismissed'
+  ) => {
+    setUpdatingReportId(reportId);
+    setError(null);
+    try {
+      const updatedModeration = await updateAdminReportStatus(reportId, nextStatus, idToken);
+      setModeration(updatedModeration);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Falha ao atualizar status da denúncia.');
+    } finally {
+      setUpdatingReportId(null);
+    }
+  };
+
   const navItems = [
     { id: 'overview' as const, label: 'Visão Geral', icon: LayoutDashboard },
     { id: 'users' as const, label: 'Usuários', icon: Users, badge: usersTotal || undefined },
     { id: 'animes' as const, label: 'Animes', icon: Film, badge: animesTotal || undefined },
-    { id: 'moderation' as const, label: 'Moderação', icon: ShieldAlert },
+    { id: 'moderation' as const, label: 'Moderação', icon: ShieldAlert, badge: moderation?.pending || undefined },
     { id: 'metrics' as const, label: 'Estatísticas', icon: BarChart3 },
     { id: 'security' as const, label: 'Segurança', icon: ShieldCheck },
   ];
@@ -748,17 +766,112 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onReturnToApp, idToken }
 
               {moderation?.reports?.length ? (
                 <div className="space-y-3">
-                  {moderation.reports.map((report) => (
-                    <article key={report.id} className="rounded-xl border border-purple-900/40 bg-[#120B22] p-4 space-y-2">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="text-sm font-semibold text-white">Denúncia de perfil · {report.reason}</span>
-                        <span className="rounded-md border border-amber-600/30 bg-amber-950/30 px-2 py-1 text-[10px] font-semibold text-amber-200">{report.status || 'pending'}</span>
-                      </div>
-                      <p className="text-xs text-purple-200/80">Perfil denunciado: <span className="font-mono">{report.targetId || 'Não informado'}</span></p>
-                      {report.details && <p className="text-xs leading-relaxed text-purple-300/80">{report.details}</p>}
-                      <p className="text-[10px] text-purple-400/60">Denunciante: {report.reporterUid || 'Não informado'} · {report.createdAt || 'Data indisponível'}</p>
-                    </article>
-                  ))}
+                  {moderation.reports.map((report) => {
+                    const currentStatus = report.status || 'pending';
+                    const statusLabel =
+                      currentStatus === 'in_review'
+                        ? 'Em análise'
+                        : currentStatus === 'resolved'
+                        ? 'Resolvida'
+                        : currentStatus === 'dismissed'
+                        ? 'Arquivada'
+                        : 'Pendente';
+                    const statusBadgeClass =
+                      currentStatus === 'resolved'
+                        ? 'border-emerald-600/30 bg-emerald-950/30 text-emerald-200'
+                        : currentStatus === 'dismissed'
+                        ? 'border-zinc-600/30 bg-zinc-900/50 text-zinc-300'
+                        : currentStatus === 'in_review'
+                        ? 'border-purple-500/40 bg-purple-950/40 text-purple-200'
+                        : 'border-amber-600/30 bg-amber-950/30 text-amber-200';
+                    const isUpdating = updatingReportId === report.id;
+
+                    return (
+                      <article
+                        key={report.id}
+                        className="rounded-xl border border-purple-900/40 bg-[#120B22] p-4 space-y-2.5"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-sm font-semibold text-white">
+                            Denúncia de perfil · {report.reason}
+                          </span>
+                          <span
+                            className={`rounded-md border px-2 py-1 text-[10px] font-semibold ${statusBadgeClass}`}
+                          >
+                            {statusLabel}
+                          </span>
+                        </div>
+                        <p className="text-xs text-purple-200/80">
+                          Perfil denunciado:{' '}
+                          {report.targetDisplayName || report.targetUsername ? (
+                            <span className="font-semibold text-white">
+                              {report.targetDisplayName || `@${report.targetUsername}`}{' '}
+                              {report.targetUsername ? `(@${report.targetUsername}) ` : ''}
+                            </span>
+                          ) : null}
+                          <span className="font-mono text-purple-300/80">
+                            {report.targetId || 'Não informado'}
+                          </span>
+                        </p>
+                        {report.details && (
+                          <p className="text-xs leading-relaxed text-purple-300/80">
+                            {report.details}
+                          </p>
+                        )}
+                        <div className="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-purple-900/30">
+                          <p className="text-[10px] text-purple-400/60">
+                            Denunciante:{' '}
+                            {report.reporterDisplayName || report.reporterUsername
+                              ? `${report.reporterDisplayName || `@${report.reporterUsername}`} (${report.reporterUid || 'UID indisponível'})`
+                              : report.reporterUid || 'Não informado'}{' '}
+                            · {report.createdAt ? new Date(report.createdAt).toLocaleString('pt-BR') : 'Data indisponível'}
+                          </p>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {currentStatus !== 'in_review' && (
+                              <button
+                                type="button"
+                                disabled={isUpdating}
+                                onClick={() => handleUpdateReportStatus(report.id, 'in_review')}
+                                className="rounded-lg border border-purple-700/40 bg-purple-950/40 px-2.5 py-1 text-[11px] font-semibold text-purple-200 hover:bg-purple-900/50 transition-colors disabled:opacity-50"
+                              >
+                                Em análise
+                              </button>
+                            )}
+                            {currentStatus !== 'resolved' && (
+                              <button
+                                type="button"
+                                disabled={isUpdating}
+                                onClick={() => handleUpdateReportStatus(report.id, 'resolved')}
+                                className="rounded-lg border border-emerald-700/40 bg-emerald-950/40 px-2.5 py-1 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-900/50 transition-colors disabled:opacity-50"
+                              >
+                                Resolver
+                              </button>
+                            )}
+                            {currentStatus !== 'dismissed' && (
+                              <button
+                                type="button"
+                                disabled={isUpdating}
+                                onClick={() => handleUpdateReportStatus(report.id, 'dismissed')}
+                                className="rounded-lg border border-zinc-700/40 bg-zinc-900/50 px-2.5 py-1 text-[11px] font-semibold text-zinc-300 hover:bg-zinc-800/70 transition-colors disabled:opacity-50"
+                              >
+                                Arquivar
+                              </button>
+                            )}
+                            {currentStatus !== 'pending' && (
+                              <button
+                                type="button"
+                                disabled={isUpdating}
+                                onClick={() => handleUpdateReportStatus(report.id, 'pending')}
+                                className="rounded-lg border border-amber-700/40 bg-amber-950/30 px-2.5 py-1 text-[11px] font-semibold text-amber-200 hover:bg-amber-900/40 transition-colors disabled:opacity-50"
+                              >
+                                Reabrir
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </article>
+                    );
+                  })}
                 </div>
               ) : (
                 <div className="rounded-2xl border border-purple-900/40 bg-[#120B22] p-6 text-center space-y-3">
