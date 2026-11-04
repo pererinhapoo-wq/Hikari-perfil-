@@ -1,0 +1,5 @@
+{
+  "summary": "Checkpoint local da Etapa 1.4 contendo a auditoria e as correções de integridade estrita das mensagens privadas em firestore.rules (prevenção de falsificação de senderName, trava de isRead inicial e igualdade de msgId).",
+  "updatedAt": "2026-11-04T02:19:41.861412932Z",
+  "userFacing": true
+}

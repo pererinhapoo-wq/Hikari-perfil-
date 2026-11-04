@@ -822,14 +822,17 @@ service cloud.firestore {
           || (
             ('lastMessage' in incoming())
             && incoming().lastMessage.senderId == request.auth.uid
+            && incoming().lastMessage.isRead == false
             && incoming().unreadCounts[request.auth.uid] == 0
             && incoming().unreadCounts[getOtherParticipant(incoming().participants, request.auth.uid)] == 1
             && existsAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id))
             && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.senderId == request.auth.uid
+            && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.senderName == incoming().lastMessage.senderName
             && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.recipientId == getOtherParticipant(incoming().participants, request.auth.uid)
             && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.text == incoming().lastMessage.text
             && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.type == incoming().lastMessage.type
             && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.createdAt == incoming().lastMessage.createdAt
+            && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.isRead == incoming().lastMessage.isRead
           )
         );
 
@@ -846,14 +849,17 @@ service cloud.firestore {
             incoming().diff(existing()).affectedKeys().hasOnly(['lastMessage', 'unreadCounts', 'updatedAt'])
             && ('lastMessage' in incoming())
             && incoming().lastMessage.senderId == request.auth.uid
+            && incoming().lastMessage.isRead == false
             && incoming().unreadCounts[request.auth.uid] == existing().unreadCounts[request.auth.uid]
             && incoming().unreadCounts[getOtherParticipant(resource.data.participants, request.auth.uid)] == existing().unreadCounts[getOtherParticipant(resource.data.participants, request.auth.uid)] + 1
             && existsAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id))
             && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.senderId == request.auth.uid
+            && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.senderName == incoming().lastMessage.senderName
             && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.recipientId == getOtherParticipant(resource.data.participants, request.auth.uid)
             && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.text == incoming().lastMessage.text
             && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.type == incoming().lastMessage.type
             && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.createdAt == incoming().lastMessage.createdAt
+            && getAfter(/databases/$(database)/documents/conversations/$(convId)/messages/$(incoming().lastMessage.id)).data.isRead == incoming().lastMessage.isRead
           )
           // Operação 2: Leitura de Mensagens (usuário zera exclusivamente seu próprio unreadCount e atualiza apenas seu lastReadAtByUser)
           || (
@@ -894,6 +900,7 @@ service cloud.firestore {
         allow create: if isSignedIn()
           && isValidId(convId)
           && isValidId(msgId)
+          && incoming().id == msgId
           && isValidMessage(incoming(), convId)
           && incoming().senderId == request.auth.uid
           && existsAfter(/databases/$(database)/documents/conversations/$(convId))
