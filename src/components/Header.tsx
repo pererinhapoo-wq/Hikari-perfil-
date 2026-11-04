@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
+import { ENABLE_PRIVATE_MESSAGES } from '../config/features';
 import { createPortal } from 'react-dom';
 import { 
   Bell, 
@@ -518,7 +519,7 @@ export const Header: React.FC<HeaderProps> = React.memo(({
           )}
 
           {/* Direct Messages Button */}
-          {onOpenMessages && (
+          {ENABLE_PRIVATE_MESSAGES && onOpenMessages && (
             <button
               type="button"
               onClick={() => {

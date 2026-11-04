@@ -13,6 +13,7 @@ import {
   MessageSquare
 } from 'lucide-react';
 import { UserProfile } from '../types';
+import { ENABLE_PRIVATE_MESSAGES } from '../config/features';
 import { HikariEternalBadge } from './badge/HikariEternalBadge';
 import { AetherAnimatedName } from './badge/AetherAnimatedName';
 
@@ -276,8 +277,8 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
                   )}
                 </button>
 
-                {/* Direct Message button respecting recipient privacy */}
-                <button
+                {/* Mensagens privadas temporariamente desativadas por feature flag. */}
+                {ENABLE_PRIVATE_MESSAGES && <button
                   type="button"
                   onClick={onOpenDirectMessage}
                   disabled={isBlocked || canDirectMessage === false}
@@ -294,7 +295,7 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
                 >
                   <MessageSquare className="h-4 w-4 text-purple-300 group-hover:scale-110 transition-transform" />
                   <span>Mensagem</span>
-                </button>
+                </button>}
 
                 {/* Block / Unblock toggle */}
                 <button

@@ -25,6 +25,7 @@ import {
   ShieldAlert
 } from 'lucide-react';
 import { UserProfile, AnimeItem } from '../../types';
+import { ENABLE_PRIVATE_MESSAGES } from '../../config/features';
 import {
   fetchAniListUser,
   fetchAniListAnimeList,
@@ -1329,7 +1330,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </div>
                 </div>
 
-                {/* Section: Direct Messages Privacy Control */}
+                {/* Preferências de mensagens ficam preservadas, mas ocultas enquanto o recurso está desativado. */}
+                {ENABLE_PRIVATE_MESSAGES && <>
                 <div className="space-y-3 pt-2 border-t border-purple-900/30">
                   <div className="flex items-center gap-1.5">
                     <MessageSquare className="h-4 w-4 text-purple-400" />
@@ -1448,7 +1450,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   )}
                 </div>
 
-                {/* Section: Status Online no Chat (Presença) */}
+                {/* Presença no chat também fica oculta enquanto mensagens privadas estão desativadas. */}
                 <div className="space-y-3 pt-2 border-t border-purple-900/30">
                   <div className="flex items-center gap-2">
                     <span className="h-2.5 w-2.5 rounded-full bg-emerald-500 shadow-sm shadow-emerald-500/50" />
@@ -1494,6 +1496,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     )}
                   </div>
                 </div>
+
+                </>}
 
                 {/* Section: Blocked Users Management */}
                 <div className="space-y-3 pt-2 border-t border-purple-900/30">

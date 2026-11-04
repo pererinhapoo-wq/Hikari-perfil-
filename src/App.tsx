@@ -1,5 +1,6 @@
 import React, { Suspense, lazy, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Loader2 } from 'lucide-react';
+import { ENABLE_PRIVATE_MESSAGES } from './config/features';
 import { updateProfile } from 'firebase/auth';
 import { Header } from './components/Header';
 import { ProfileHeader } from './components/ProfileHeader';
@@ -102,6 +103,7 @@ import {
   mergeFavoriteCharacters,
   mergeFavoriteCompanies,
   mergeFavoritePeople,
+  pruneAniListFavoritesOnDisconnect,
   isGenericOrMissingPoster,
   normalizeTitle,
 } from './utils/animeSyncHelpers';
@@ -1851,7 +1853,7 @@ export default function App() {
 
   // Synchronize user context with server for authoritative privacy and block checks (deduplicated by payload signature)
   useEffect(() => {
-    if (!currentUser.id) return;
+    if (!ENABLE_PRIVATE_MESSAGES || !currentUser.id) return;
     const currentFollowerIds = (activeFollowersSource ?? []).map((f) => f.id);
 
     syncUserPrivacyContext({
@@ -1879,8 +1881,12 @@ export default function App() {
     activeFollowersSource,
   ]);
 
-  // Subscribe passively to unread messages count without background polling while PrivateChatModal is closed
+  // Mensagens privadas desativadas temporariamente: não iniciar listeners nem polling.
   useEffect(() => {
+    if (!ENABLE_PRIVATE_MESSAGES) {
+      setUnreadMessagesCount(0);
+      return;
+    }
     if (!currentUser.id) {
       setUnreadMessagesCount(0);
       return;
@@ -1923,6 +1929,7 @@ export default function App() {
 
   // Handler: Open chat modal with optional preselected recipient
   const handleOpenChat = useCallback((targetRecipientId?: string) => {
+    if (!ENABLE_PRIVATE_MESSAGES) return;
     setChatRecipientId(targetRecipientId || null);
     setIsChatOpen(true);
   }, []);
@@ -2977,6 +2984,9 @@ export default function App() {
           return {
             ...prev,
             animes: prunedAnimes,
+            favoriteCharacters: pruneAniListFavoritesOnDisconnect(prev.favoriteCharacters, 'char_al_'),
+            favoriteCompanies: pruneAniListFavoritesOnDisconnect(prev.favoriteCompanies, 'comp_al_'),
+            favoritePeople: pruneAniListFavoritesOnDisconnect(prev.favoritePeople, 'person_al_'),
             profileOverrides: {
               ...prev.profileOverrides,
               externalAccounts: nextExternalAccounts,
@@ -3008,6 +3018,9 @@ export default function App() {
       invalidateActivitiesCache(currentUser.id);
       setDemoProfile(nextDemoProfile);
       setDemoAnimes(prunedAnimes);
+      setDemoFavoriteCharacters((prev) => pruneAniListFavoritesOnDisconnect(prev, 'char_al_'));
+      setDemoFavoriteCompanies((prev) => pruneAniListFavoritesOnDisconnect(prev, 'comp_al_'));
+      setDemoFavoritePeople((prev) => pruneAniListFavoritesOnDisconnect(prev, 'person_al_'));
       void saveAnimesToIndexedDb(CURRENT_USER.id, prunedAnimes);
       setDemoActivities((prev) => [disconnectActivity, ...prev]);
     },
@@ -3559,8 +3572,8 @@ export default function App() {
         isAuthenticated={isAuthenticated}
         authenticatedEmail={isAuthenticated ? user?.email ?? null : null}
         onLogout={isAuthenticated ? handleLogout : undefined}
-        onOpenMessages={handleOpenMessagesFromHeader}
-        unreadMessagesCount={unreadMessagesCount}
+        onOpenMessages={ENABLE_PRIVATE_MESSAGES ? handleOpenMessagesFromHeader : undefined}
+        unreadMessagesCount={ENABLE_PRIVATE_MESSAGES ? unreadMessagesCount : 0}
         onOpenAdminPanel={handleNavigateToAdmin}
         onOpenAuth={!isAuthenticated ? handleOpenAuthFromHeader : undefined}
         onOpenProfileSearch={() => setIsProfileSearchOpen(true)}
@@ -3784,7 +3797,7 @@ export default function App() {
       )}
 
       {/* Private Direct Messages Chat Drawer / Modal — downloaded & mounted strictly when opened */}
-      {isChatOpen && (
+      {ENABLE_PRIVATE_MESSAGES && isChatOpen && (
         <Suspense fallback={<ModalLoadingFallback label="Carregando mensagens..." />}>
           <LazyPrivateChatModal
             isOpen={isChatOpen}
