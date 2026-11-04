@@ -50,10 +50,24 @@ let activeChatSessionUserId: string | null = null;
 let chatTestTokenOverride: string | null = null;
 let chatBaseUrlOverride = '';
 
+export interface ChatTestFirestoreHooks {
+  getDoc?: (docRef: any) => Promise<any>;
+  onSnapshot?: (
+    q: any,
+    onNext: (snap: any) => void,
+    onError: (err: any) => void
+  ) => () => void;
+  authUid?: string | null;
+  dbPresent?: boolean;
+}
+
+let chatTestFirestoreHooks: ChatTestFirestoreHooks | null = null;
+
 export function configureChatServiceForTests(options: {
   token?: string | null;
   baseUrl?: string;
   activeUserId?: string | null;
+  firestoreHooks?: ChatTestFirestoreHooks | null;
 }): void {
   if (options.token !== undefined) {
     chatTestTokenOverride = options.token;
@@ -63,6 +77,9 @@ export function configureChatServiceForTests(options: {
   }
   if (options.activeUserId !== undefined) {
     activeChatSessionUserId = options.activeUserId;
+  }
+  if (options.firestoreHooks !== undefined) {
+    chatTestFirestoreHooks = options.firestoreHooks;
   }
 }
 
@@ -289,11 +306,13 @@ export function clearChatSessionMemoryCache(keepUid?: string): void {
 
   for (const [channelKey, channel] of Array.from(activeConversationChannels.entries())) {
     if (!cleanKeep || channel.userId !== cleanKeep) {
+      channel.checkGeneration++;
       stopChannelPollTimer(channel);
       if (channel.firestoreUnsubscribe) {
         channel.firestoreUnsubscribe();
         channel.firestoreUnsubscribe = null;
       }
+      channel.firestoreRealtimeActive = false;
       channel.listeners.clear();
       activeConversationChannels.delete(channelKey);
     }
@@ -745,6 +764,7 @@ export async function startOrGetConversation(
             updatedAt: serverTimestamp(),
           });
         }
+        activateConversationRealtimeListener(convId, effectiveSenderId);
       } catch (firestoreErr) {
         console.warn('[Hikari Chat] Failed to ensure conversation document in Firestore:', firestoreErr);
       }
@@ -792,13 +812,16 @@ export async function fetchConversationMessages(
   // 1. Direct Firestore messages query when authenticated with Firebase
   if (db && auth?.currentUser?.uid === userId) {
     try {
-      const messagesCol = collection(db, 'conversations', convId, 'messages');
-      const q = query(
-        messagesCol,
-        orderBy('createdAt', 'asc'),
-        firestoreLimit(options?.limit ?? 50)
-      );
-      const snap = await getDocs(q);
+      const convDocRef = doc(db, 'conversations', convId);
+      const convSnap = await getDoc(convDocRef);
+      if (convSnap.exists()) {
+        const messagesCol = collection(db, 'conversations', convId, 'messages');
+        const q = query(
+          messagesCol,
+          orderBy('createdAt', 'asc'),
+          firestoreLimit(options?.limit ?? 50)
+        );
+        const snap = await getDocs(q);
       if (!snap.empty) {
         const firestoreMsgs: PrivateMessage[] = [];
         snap.forEach((docSnap) => {
@@ -837,6 +860,7 @@ export async function fetchConversationMessages(
             hasMore: false,
           };
         }
+      }
       }
     } catch (fsMsgErr) {
       console.warn('[Hikari Chat] Direct Firestore messages fetch failed, falling back to server:', fsMsgErr);
@@ -1151,6 +1175,9 @@ export async function sendPrivateMessage(payload: {
 
       await batch.commit();
       firestorePersisted = true;
+
+      // Etapa 1.7: Reativa ou inicia o listener do Firestore em tempo real imediatamente após a confirmação do batch.commit()
+      activateConversationRealtimeListener(targetConvId, effectiveSenderId);
     } catch (fsErr) {
       console.error('[Hikari Chat] Failed to persist message batch in Firestore:', fsErr);
     }
@@ -1415,6 +1442,10 @@ interface SharedConversationChannel {
   hasResolvedInitial: boolean;
   lastKnownMessages: PrivateMessage[];
   lastKnownTyping: string[];
+  isCheckingParentDoc: boolean;
+  parentDocChecked: boolean;
+  parentDocExists: boolean;
+  checkGeneration: number;
 }
 
 interface SharedConversationsPoller {
@@ -1477,9 +1508,10 @@ async function pollChannelOnce(channel: SharedConversationChannel): Promise<void
       }
       return;
     }
-    if (channel.listeners.size === 0) return;
+    if (channel.listeners.size === 0 || channel.firestoreRealtimeActive) return;
 
     const data = await res.json();
+    if (channel.listeners.size === 0 || channel.firestoreRealtimeActive) return;
     const serverMessages: PrivateMessage[] = Array.isArray(data.messages) ? data.messages : [];
     const incomingTyping: string[] = Array.isArray(data.typingUsers) ? data.typingUsers : [];
 
@@ -1512,6 +1544,12 @@ async function pollChannelOnce(channel: SharedConversationChannel): Promise<void
       for (const listener of channel.listeners) {
         listener(payload);
       }
+    }
+
+    // Se o documento pai ainda não existia no Firestore mas o backend agora retornou mensagens,
+    // verifica se o documento foi criado no Firestore pelo outro participante para ativar o listener em tempo real
+    if (!channel.parentDocExists && !channel.firestoreUnsubscribe && !channel.isCheckingParentDoc && serverMessages.length > 0) {
+      void attachFirestoreListenerIfParentExists(channel);
     }
   } catch {
     // Falha de rede: se ainda não emitiu resolução inicial e não há mensagens em cache, notifica erro explícito
@@ -1698,6 +1736,299 @@ export function subscribeToUnreadMessagesCount(
   };
 }
 
+function startFirestoreMessagesListener(channel: SharedConversationChannel): void {
+  if (channel.firestoreUnsubscribe !== null || channel.firestoreRealtimeActive) {
+    return;
+  }
+  const effectiveDb = chatTestFirestoreHooks?.dbPresent !== undefined
+    ? (chatTestFirestoreHooks.dbPresent ? (db || true) : null)
+    : db;
+  const effectiveUid = chatTestFirestoreHooks?.authUid !== undefined
+    ? chatTestFirestoreHooks.authUid
+    : auth?.currentUser?.uid;
+
+  if (!effectiveDb || effectiveUid !== channel.userId) {
+    return;
+  }
+  if (channel.listeners.size === 0 || activeConversationChannels.get(channel.key) !== channel) {
+    return;
+  }
+
+  const activeChannel = channel;
+  const convId = channel.convId;
+  const userId = channel.userId;
+
+  try {
+    const onNextHandler = (snapshot: any) => {
+      if (activeChannel.listeners.size === 0) return;
+
+      const remoteMsgs: PrivateMessage[] = [];
+      snapshot.forEach((docSnap: any) => {
+        const data = typeof docSnap.data === 'function' ? docSnap.data() : docSnap.data;
+        const createdAtMs = data.createdAt?.toMillis
+          ? data.createdAt.toMillis()
+          : (data.createdAt || Date.now());
+        remoteMsgs.push({
+          id: docSnap.id,
+          conversationId: convId,
+          senderId: data.senderId,
+          senderName: data.senderName,
+          senderUsername: data.senderUsername,
+          senderAvatarUrl: data.senderAvatarUrl || '',
+          recipientId: data.recipientId,
+          text: data.text || '',
+          type: data.type || 'text',
+          mediaUrl: data.mediaUrl,
+          mediaMetadata: data.mediaMetadata,
+          linkPreview: data.linkPreview,
+          reactions: data.reactions || {},
+          isRead: data.isRead ?? false,
+          createdAt: createdAtMs,
+          status: 'sent',
+        });
+      });
+
+      activeChannel.firestoreRealtimeActive = true;
+      stopChannelPollTimer(activeChannel);
+
+      const mergedMsgs = mergeServerAndConfirmedLocalMessages(
+        remoteMsgs,
+        activeChannel.lastKnownMessages,
+        userId,
+        convId
+      );
+
+      const isInitial = !activeChannel.hasResolvedInitial;
+      activeChannel.hasResolvedInitial = true;
+
+      const isEqual = areMessagesAndTypingEqual(
+        activeChannel.lastKnownMessages,
+        mergedMsgs,
+        activeChannel.lastKnownTyping,
+        activeChannel.lastKnownTyping
+      );
+
+      // Emite se houver alteração OU se for a primeira resolução do canal (mesmo vazia)
+      if (!isEqual || isInitial) {
+        activeChannel.lastKnownMessages = mergedMsgs;
+        writeCachedMessages(convId, mergedMsgs, userId);
+        const payload: ConversationUpdatePayload = {
+          messages: mergedMsgs,
+          typingUsers: activeChannel.lastKnownTyping,
+          error: null,
+        };
+        for (const listener of activeChannel.listeners) {
+          listener(payload);
+        }
+      }
+    };
+
+    const onErrorHandler = (snapshotErr: any) => {
+      activeChannel.firestoreRealtimeActive = false;
+      const errCode = snapshotErr?.code;
+
+      if (errCode === 'permission-denied') {
+        // Documento pai existia, mas subcoleção retornou permission-denied: falha de segurança genuína
+        console.error('[Hikari Chat] Security permission denied on messages subcollection in Firestore:', {
+          convId,
+          userId,
+          code: errCode,
+          message: snapshotErr?.message,
+        });
+        for (const listener of activeChannel.listeners) {
+          listener({
+            messages: activeChannel.lastKnownMessages,
+            typingUsers: activeChannel.lastKnownTyping,
+            error: 'Acesso negado às mensagens desta conversa.',
+          });
+        }
+        return;
+      }
+
+      // Falha de conexão ou outro erro transitório do Firestore: preserva fallback e registra causa
+      console.warn('[Hikari Chat] Realtime conversation snapshot connection error, using polling fallback:', {
+        convId,
+        code: errCode,
+        message: snapshotErr?.message,
+      });
+
+      if (!activeChannel.hasResolvedInitial && activeChannel.lastKnownMessages.length === 0) {
+        for (const listener of activeChannel.listeners) {
+          listener({
+            messages: activeChannel.lastKnownMessages,
+            typingUsers: activeChannel.lastKnownTyping,
+            error: 'Falha de conexão com Firestore. Alternando para sincronização local...',
+          });
+        }
+      }
+      startChannelPollTimerIfNeeded(activeChannel);
+    };
+
+    if (chatTestFirestoreHooks?.onSnapshot) {
+      activeChannel.firestoreUnsubscribe = chatTestFirestoreHooks.onSnapshot(
+        { convId },
+        onNextHandler,
+        onErrorHandler
+      );
+    } else {
+      const messagesCol = collection(db as any, 'conversations', convId, 'messages');
+      const q = query(messagesCol, orderBy('createdAt', 'asc'), firestoreLimit(50));
+      activeChannel.firestoreUnsubscribe = onSnapshot(q, onNextHandler, onErrorHandler);
+    }
+  } catch (err) {
+    console.warn('[Hikari Chat] Failed to register Firestore realtime listener:', err);
+    channel.firestoreUnsubscribe = null;
+    channel.firestoreRealtimeActive = false;
+    startChannelPollTimerIfNeeded(channel);
+  }
+}
+
+/**
+ * Ativa ou inicia o listener Firestore em tempo real de uma conversa aberta logo após a confirmação
+ * de gravação atômica do documento pai e primeira mensagem via batch.commit() ou startOrGetConversation.
+ */
+export function activateConversationRealtimeListener(convId: string, userId: string): void {
+  const channelKey = `${userId}::${convId}`;
+  const activeChannel = activeConversationChannels.get(channelKey);
+  if (activeChannel && activeChannel.listeners.size > 0) {
+    activeChannel.parentDocExists = true;
+    activeChannel.parentDocChecked = true;
+    if (!activeChannel.firestoreUnsubscribe) {
+      startFirestoreMessagesListener(activeChannel);
+    }
+  }
+}
+
+async function attachFirestoreListenerIfParentExists(channel: SharedConversationChannel): Promise<void> {
+  if (channel.firestoreUnsubscribe !== null || channel.firestoreRealtimeActive) {
+    return;
+  }
+
+  const effectiveDb = chatTestFirestoreHooks?.dbPresent !== undefined
+    ? (chatTestFirestoreHooks.dbPresent ? (db || true) : null)
+    : db;
+  const effectiveUid = chatTestFirestoreHooks?.authUid !== undefined
+    ? chatTestFirestoreHooks.authUid
+    : auth?.currentUser?.uid;
+
+  if (!effectiveDb || effectiveUid !== channel.userId) {
+    return;
+  }
+
+  if (channel.isCheckingParentDoc) {
+    return;
+  }
+
+  if (channel.parentDocChecked && !channel.parentDocExists) {
+    return;
+  }
+
+  if (channel.parentDocChecked && channel.parentDocExists) {
+    startFirestoreMessagesListener(channel);
+    return;
+  }
+
+  channel.isCheckingParentDoc = true;
+  const generation = ++channel.checkGeneration;
+
+  try {
+    const convDocRef = db
+      ? doc(db, 'conversations', channel.convId)
+      : ({ id: channel.convId, path: `conversations/${channel.convId}` } as any);
+    let convSnap: any;
+    try {
+      if (chatTestFirestoreHooks?.getDoc) {
+        convSnap = await chatTestFirestoreHooks.getDoc(convDocRef);
+      } else {
+        convSnap = await getDoc(convDocRef);
+      }
+    } catch (parentGetErr: any) {
+      if (
+        generation !== channel.checkGeneration ||
+        channel.listeners.size === 0 ||
+        activeConversationChannels.get(channel.key) !== channel
+      ) {
+        return;
+      }
+      channel.isCheckingParentDoc = false;
+
+      const errorCode = parentGetErr?.code;
+      if (errorCode === 'permission-denied') {
+        console.error('[Hikari Chat] Security permission denied checking conversation parent document in Firestore:', {
+          convId: channel.convId,
+          userId: channel.userId,
+          code: errorCode,
+          message: parentGetErr?.message,
+        });
+        for (const listener of channel.listeners) {
+          listener({
+            messages: channel.lastKnownMessages,
+            typingUsers: channel.lastKnownTyping,
+            error: 'Acesso negado à conversa. Você não tem permissão para visualizar estas mensagens.',
+          });
+        }
+        return;
+      }
+
+      console.warn('[Hikari Chat] Transient connection error checking parent conversation document:', {
+        convId: channel.convId,
+        code: errorCode,
+        message: parentGetErr?.message,
+      });
+      return;
+    }
+
+    if (
+      generation !== channel.checkGeneration ||
+      channel.listeners.size === 0 ||
+      activeConversationChannels.get(channel.key) !== channel
+    ) {
+      return;
+    }
+    channel.isCheckingParentDoc = false;
+    channel.parentDocChecked = true;
+
+    if (!convSnap || (typeof convSnap.exists === 'function' ? !convSnap.exists() : !convSnap.exists)) {
+      // Documento pai inexistente: situação esperada para conversa nova ainda não persistida no Firestore.
+      // NÃO inicia o listener da subcoleção e NÃO emite mensagem de erro.
+      channel.parentDocExists = false;
+      return;
+    }
+
+    channel.parentDocExists = true;
+
+    const convData = typeof convSnap.data === 'function' ? convSnap.data() : convSnap.data;
+    if (convData && Array.isArray(convData.participants)) {
+      if (!convData.participants.includes(channel.userId)) {
+        console.error('[Hikari Chat] Security error: User is not an authorized participant in conversation:', {
+          convId: channel.convId,
+          userId: channel.userId,
+          participants: convData.participants,
+        });
+        for (const listener of channel.listeners) {
+          listener({
+            messages: channel.lastKnownMessages,
+            typingUsers: channel.lastKnownTyping,
+            error: 'Acesso negado às mensagens desta conversa.',
+          });
+        }
+        return;
+      }
+    }
+
+    startFirestoreMessagesListener(channel);
+  } catch (unexpectedErr) {
+    if (
+      generation === channel.checkGeneration &&
+      channel.listeners.size > 0 &&
+      activeConversationChannels.get(channel.key) === channel
+    ) {
+      channel.isCheckingParentDoc = false;
+      console.warn('[Hikari Chat] Unexpected error checking conversation in Firestore:', unexpectedErr);
+    }
+  }
+}
+
 /**
  * Assina atualizações em tempo real de uma conversa aberta (isolada por userId + convId).
  */
@@ -1725,6 +2056,10 @@ export function subscribeToConversation(
       hasResolvedInitial: false,
       lastKnownMessages: readCachedMessages(convId, userId),
       lastKnownTyping: [],
+      isCheckingParentDoc: false,
+      parentDocChecked: false,
+      parentDocExists: false,
+      checkGeneration: 0,
     };
     activeConversationChannels.set(channelKey, channel);
   }
@@ -1741,101 +2076,18 @@ export function subscribeToConversation(
   }
 
   if (isNewChannel) {
-    if (db && auth?.currentUser?.uid === userId) {
-      try {
-        const messagesCol = collection(db, 'conversations', convId, 'messages');
-        const q = query(messagesCol, orderBy('createdAt', 'asc'), firestoreLimit(50));
-        const activeChannel = channel;
-        channel.firestoreUnsubscribe = onSnapshot(
-          q,
-          (snapshot) => {
-            if (activeChannel.listeners.size === 0) return;
-
-            const remoteMsgs: PrivateMessage[] = [];
-            snapshot.forEach((docSnap) => {
-              const data = docSnap.data();
-              const createdAtMs = data.createdAt?.toMillis ? data.createdAt.toMillis() : Date.now();
-              remoteMsgs.push({
-                id: docSnap.id,
-                conversationId: convId,
-                senderId: data.senderId,
-                senderName: data.senderName,
-                senderUsername: data.senderUsername,
-                senderAvatarUrl: data.senderAvatarUrl || '',
-                recipientId: data.recipientId,
-                text: data.text || '',
-                type: data.type || 'text',
-                mediaUrl: data.mediaUrl,
-                mediaMetadata: data.mediaMetadata,
-                linkPreview: data.linkPreview,
-                reactions: data.reactions || {},
-                isRead: data.isRead ?? false,
-                createdAt: createdAtMs,
-                status: 'sent',
-              });
-            });
-
-            activeChannel.firestoreRealtimeActive = true;
-            stopChannelPollTimer(activeChannel);
-
-            const mergedMsgs = mergeServerAndConfirmedLocalMessages(
-              remoteMsgs,
-              activeChannel.lastKnownMessages,
-              userId,
-              convId
-            );
-
-            const isInitial = !activeChannel.hasResolvedInitial;
-            activeChannel.hasResolvedInitial = true;
-
-            const isEqual = areMessagesAndTypingEqual(
-              activeChannel.lastKnownMessages,
-              mergedMsgs,
-              activeChannel.lastKnownTyping,
-              activeChannel.lastKnownTyping
-            );
-
-            // Emite obrigatoriamente se houve alteração OU se for a primeira resolução do canal (mesmo vazia!)
-            if (!isEqual || isInitial) {
-              activeChannel.lastKnownMessages = mergedMsgs;
-              writeCachedMessages(convId, mergedMsgs, userId);
-              const payload: ConversationUpdatePayload = {
-                messages: mergedMsgs,
-                typingUsers: activeChannel.lastKnownTyping,
-                error: null,
-              };
-              for (const listener of activeChannel.listeners) {
-                listener(payload);
-              }
-            }
-          },
-          (snapshotErr) => {
-            console.warn('[Hikari Chat] Realtime conversation snapshot error, using polling fallback:', snapshotErr);
-            activeChannel.firestoreRealtimeActive = false;
-            // Se o snapshot falhar e não há mensagens em cache, notifica os listeners com erro sem fingir vazio
-            if (!activeChannel.hasResolvedInitial && activeChannel.lastKnownMessages.length === 0) {
-              for (const listener of activeChannel.listeners) {
-                listener({
-                  messages: activeChannel.lastKnownMessages,
-                  typingUsers: activeChannel.lastKnownTyping,
-                  error: 'Falha ao sincronizar com Firestore. Tentando fallback...',
-                });
-              }
-            }
-            startChannelPollTimerIfNeeded(activeChannel);
-          }
-        );
-      } catch (err) {
-        console.warn('[Hikari Chat] Failed to register Firestore realtime listener:', err);
-        channel.firestoreUnsubscribe = null;
-        channel.firestoreRealtimeActive = false;
-      }
-    }
+    // Etapa 1.7: Verifica com getDoc a existência do documento pai antes de abrir o listener da subcoleção
+    void attachFirestoreListenerIfParentExists(channel);
 
     if (!isDocumentHidden()) {
       void pollChannelOnce(channel);
     }
     startChannelPollTimerIfNeeded(channel);
+  } else {
+    // Se o canal já existia mas ainda não iniciou o listener e não está verificando o pai
+    if (!channel.firestoreUnsubscribe && !channel.firestoreRealtimeActive && !channel.isCheckingParentDoc) {
+      void attachFirestoreListenerIfParentExists(channel);
+    }
   }
 
   return () => {
@@ -1843,11 +2095,13 @@ export function subscribeToConversation(
     if (!currentChannel) return;
     currentChannel.listeners.delete(onUpdate);
     if (currentChannel.listeners.size === 0) {
+      currentChannel.checkGeneration++;
       stopChannelPollTimer(currentChannel);
       if (currentChannel.firestoreUnsubscribe) {
         currentChannel.firestoreUnsubscribe();
         currentChannel.firestoreUnsubscribe = null;
       }
+      currentChannel.firestoreRealtimeActive = false;
       activeConversationChannels.delete(channelKey);
     }
     detachChatVisibilityListenerIfIdle();
