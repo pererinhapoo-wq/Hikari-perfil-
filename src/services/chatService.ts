@@ -1,6 +1,7 @@
 import {
   collection,
   doc,
+  getDoc,
   query,
   orderBy,
   limit as firestoreLimit,
@@ -28,14 +29,90 @@ import {
 export { getDeterministicConversationId, extractHikariLinkPreview, canUserMessageRecipient };
 export type { UserCheckContext };
 
-const LOCAL_STORAGE_CONVERSATIONS_KEY = 'hikari_chat_conversations_cache_v1';
-const LOCAL_STORAGE_MESSAGES_KEY_PREFIX = 'hikari_chat_messages_cache_v1:';
+const LEGACY_CONVERSATIONS_STORAGE_KEY = 'hikari_chat_conversations_cache_v1';
+const SCOPED_CONVERSATIONS_STORAGE_PREFIX = 'hikari_chat_conversations_cache_v2:';
+const SCOPED_MESSAGES_STORAGE_PREFIX = 'hikari_chat_messages_cache_v2:';
 const PASSIVE_UNREAD_REFRESH_COOLDOWN_MS = 60_000;
 const CONVERSATIONS_LIST_POLL_MS = 4000;
 const CONVERSATION_MESSAGES_POLL_MS = 2500;
 
-function getLocalMessagesKey(convId: string): string {
-  return `${LOCAL_STORAGE_MESSAGES_KEY_PREFIX}${convId}`;
+let activeChatSessionUserId: string | null = null;
+let chatTestTokenOverride: string | null = null;
+let chatBaseUrlOverride = '';
+
+export function configureChatServiceForTests(options: {
+  token?: string | null;
+  baseUrl?: string;
+  activeUserId?: string | null;
+}): void {
+  if (options.token !== undefined) {
+    chatTestTokenOverride = options.token;
+  }
+  if (options.baseUrl !== undefined) {
+    chatBaseUrlOverride = options.baseUrl.replace(/\/+$/, '');
+  }
+  if (options.activeUserId !== undefined) {
+    activeChatSessionUserId = options.activeUserId;
+  }
+}
+
+export function setActiveChatSessionUser(userId: string | null): void {
+  activeChatSessionUserId = userId ? userId.trim() || null : null;
+}
+
+function buildChatUrl(pathname: string): string {
+  return `${chatBaseUrlOverride}${pathname}`;
+}
+
+async function buildChatAuthHeaders(includeJsonContentType = false): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {};
+  if (includeJsonContentType) {
+    headers['Content-Type'] = 'application/json';
+  }
+
+  if (chatTestTokenOverride) {
+    headers.Authorization = `Bearer ${chatTestTokenOverride}`;
+    return headers;
+  }
+
+  if (auth?.currentUser) {
+    try {
+      const token = await auth.currentUser.getIdToken();
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+    } catch {
+      // Allow local/offline fallback if token renewal fails transiently
+    }
+  }
+
+  return headers;
+}
+
+function resolveChatCacheScopeUid(explicitUserId?: string): string | null {
+  if (explicitUserId && explicitUserId.trim()) {
+    return explicitUserId.trim();
+  }
+  if (activeChatSessionUserId) {
+    return activeChatSessionUserId;
+  }
+  if (auth?.currentUser?.uid) {
+    return auth.currentUser.uid;
+  }
+  if (passiveUnreadSubscribersByUser.size === 1) {
+    return Array.from(passiveUnreadSubscribersByUser.keys())[0];
+  }
+  return null;
+}
+
+function getScopedConversationsKey(userId?: string): string {
+  const uid = resolveChatCacheScopeUid(userId);
+  return uid ? `${SCOPED_CONVERSATIONS_STORAGE_PREFIX}${uid}` : LEGACY_CONVERSATIONS_STORAGE_KEY;
+}
+
+function getScopedMessagesKey(convId: string, userId?: string): string {
+  const uid = resolveChatCacheScopeUid(userId) || 'shared';
+  return `${SCOPED_MESSAGES_STORAGE_PREFIX}${uid}:${convId}`;
 }
 
 function isDocumentHidden(): boolean {
@@ -43,16 +120,22 @@ function isDocumentHidden(): boolean {
 }
 
 // ============================================================================
-// Write-through In-Memory Cache for Chat Storage (eliminates repeated JSON.parse)
+// UID-Scoped Write-Through In-Memory Cache for Chat Storage
 // ============================================================================
 
-let memoryConversationsCache: PrivateConversation[] | null = null;
-let lastConversationsRaw: string | null = null;
+const memoryConversationsByScope = new Map<
+  string,
+  { conversations: PrivateConversation[]; lastRaw: string | null }
+>();
 
 const memoryMessagesCache = new Map<
   string,
   { messages: PrivateMessage[]; lastRaw: string | null }
 >();
+
+// Tracks explicit per-user, per-conversation read timestamps so stale in-flight polls
+// never revert a viewed conversation back to unread ("barra roxa").
+const lastMarkedReadAtByUserAndConv = new Map<string, number>();
 
 let chatStorageListenerAttached = false;
 
@@ -61,100 +144,219 @@ function ensureChatStorageListener(): void {
   chatStorageListenerAttached = true;
   window.addEventListener('storage', (event: StorageEvent) => {
     if (!event.key) {
-      memoryConversationsCache = null;
-      lastConversationsRaw = null;
+      memoryConversationsByScope.clear();
       memoryMessagesCache.clear();
       return;
     }
-    if (event.key === LOCAL_STORAGE_CONVERSATIONS_KEY) {
-      memoryConversationsCache = null;
-      lastConversationsRaw = null;
+    if (
+      event.key === LEGACY_CONVERSATIONS_STORAGE_KEY ||
+      event.key.startsWith(SCOPED_CONVERSATIONS_STORAGE_PREFIX)
+    ) {
+      memoryConversationsByScope.delete(event.key);
       notifyAllUnreadSubscribersFromCache();
       return;
     }
-    if (event.key.startsWith(LOCAL_STORAGE_MESSAGES_KEY_PREFIX)) {
-      const convId = event.key.slice(LOCAL_STORAGE_MESSAGES_KEY_PREFIX.length);
-      if (convId) {
-        memoryMessagesCache.delete(convId);
-      }
+    if (event.key.startsWith(SCOPED_MESSAGES_STORAGE_PREFIX)) {
+      memoryMessagesCache.delete(event.key);
     }
   });
 }
 
-export function readCachedConversations(): PrivateConversation[] {
+export function readCachedConversations(userId?: string): PrivateConversation[] {
   ensureChatStorageListener();
+  const storageKey = getScopedConversationsKey(userId);
+  const mem = memoryConversationsByScope.get(storageKey);
+
   if (typeof window === 'undefined' || !window.localStorage) {
-    return memoryConversationsCache ?? [];
+    return mem?.conversations ?? [];
   }
   try {
-    const raw = window.localStorage.getItem(LOCAL_STORAGE_CONVERSATIONS_KEY);
-    if (memoryConversationsCache !== null && raw === lastConversationsRaw) {
-      return memoryConversationsCache;
+    const raw = window.localStorage.getItem(storageKey);
+    if (mem && raw === mem.lastRaw) {
+      return mem.conversations;
     }
-    lastConversationsRaw = raw;
     if (!raw) {
-      memoryConversationsCache = [];
-      return memoryConversationsCache;
+      memoryConversationsByScope.set(storageKey, { conversations: [], lastRaw: null });
+      return [];
     }
     const parsed = JSON.parse(raw);
-    memoryConversationsCache = Array.isArray(parsed) ? parsed : [];
-    return memoryConversationsCache;
+    const conversations = Array.isArray(parsed) ? (parsed as PrivateConversation[]) : [];
+    memoryConversationsByScope.set(storageKey, { conversations, lastRaw: raw });
+    return conversations;
   } catch {
-    return memoryConversationsCache ?? [];
+    return mem?.conversations ?? [];
   }
 }
 
-export function writeCachedConversations(conversations: PrivateConversation[]): void {
+export function writeCachedConversations(
+  conversations: PrivateConversation[],
+  userId?: string
+): void {
   ensureChatStorageListener();
-  memoryConversationsCache = conversations;
+  const scopeUid = resolveChatCacheScopeUid(userId);
+  const filtered = scopeUid
+    ? conversations.filter((c) => Array.isArray(c.participants) && c.participants.includes(scopeUid))
+    : conversations;
+  const storageKey = getScopedConversationsKey(scopeUid ?? undefined);
+
+  let serialized: string | null = null;
   if (typeof window !== 'undefined' && window.localStorage) {
     try {
-      const serialized = JSON.stringify(conversations);
-      lastConversationsRaw = serialized;
-      window.localStorage.setItem(LOCAL_STORAGE_CONVERSATIONS_KEY, serialized);
+      serialized = JSON.stringify(filtered);
+      window.localStorage.setItem(storageKey, serialized);
     } catch {
       // Ignore storage quota
     }
   }
-  notifyAllUnreadSubscribersFromCache();
+  memoryConversationsByScope.set(storageKey, { conversations: filtered, lastRaw: serialized });
+
+  if (scopeUid) {
+    notifyUnreadSubscribersForUser(scopeUid, filtered);
+  } else {
+    notifyAllUnreadSubscribersFromCache();
+  }
 }
 
-export function readCachedMessages(convId: string): PrivateMessage[] {
+export function readCachedMessages(convId: string, userId?: string): PrivateMessage[] {
   ensureChatStorageListener();
-  const cached = memoryMessagesCache.get(convId);
+  const storageKey = getScopedMessagesKey(convId, userId);
+  const cached = memoryMessagesCache.get(storageKey);
   if (typeof window === 'undefined' || !window.localStorage) {
     return cached?.messages ?? [];
   }
   try {
-    const raw = window.localStorage.getItem(getLocalMessagesKey(convId));
+    const raw = window.localStorage.getItem(storageKey);
     if (cached && raw === cached.lastRaw) {
       return cached.messages;
     }
     if (!raw) {
-      memoryMessagesCache.set(convId, { messages: [], lastRaw: null });
+      memoryMessagesCache.set(storageKey, { messages: [], lastRaw: null });
       return [];
     }
     const parsed = JSON.parse(raw);
-    const messages = Array.isArray(parsed) ? parsed : [];
-    memoryMessagesCache.set(convId, { messages, lastRaw: raw });
+    const messages = Array.isArray(parsed) ? (parsed as PrivateMessage[]) : [];
+    memoryMessagesCache.set(storageKey, { messages, lastRaw: raw });
     return messages;
   } catch {
     return cached?.messages ?? [];
   }
 }
 
-export function writeCachedMessages(convId: string, messages: PrivateMessage[]): void {
+export function writeCachedMessages(
+  convId: string,
+  messages: PrivateMessage[],
+  userId?: string
+): void {
   ensureChatStorageListener();
+  const storageKey = getScopedMessagesKey(convId, userId);
   let serialized: string | null = null;
   if (typeof window !== 'undefined' && window.localStorage) {
     try {
       serialized = JSON.stringify(messages);
-      window.localStorage.setItem(getLocalMessagesKey(convId), serialized);
+      window.localStorage.setItem(storageKey, serialized);
     } catch {
       // Ignore storage quota
     }
   }
-  memoryMessagesCache.set(convId, { messages, lastRaw: serialized });
+  memoryMessagesCache.set(storageKey, { messages, lastRaw: serialized });
+}
+
+/**
+ * Purges volatile chat caches, active pollers, and listeners belonging to other accounts
+ * during logout or account switching so messages/conversations never leak across sessions.
+ */
+export function clearChatSessionMemoryCache(keepUid?: string): void {
+  const cleanKeep = keepUid?.trim() || null;
+  activeChatSessionUserId = cleanKeep;
+
+  for (const [pollerUid, poller] of Array.from(activeConversationPollers.entries())) {
+    if (!cleanKeep || pollerUid !== cleanKeep) {
+      stopListPollerTimer(poller);
+      poller.listeners.clear();
+      activeConversationPollers.delete(pollerUid);
+    }
+  }
+
+  for (const [channelKey, channel] of Array.from(activeConversationChannels.entries())) {
+    if (!cleanKeep || channel.userId !== cleanKeep) {
+      stopChannelPollTimer(channel);
+      if (channel.firestoreUnsubscribe) {
+        channel.firestoreUnsubscribe();
+        channel.firestoreUnsubscribe = null;
+      }
+      channel.listeners.clear();
+      activeConversationChannels.delete(channelKey);
+    }
+  }
+
+  for (const [subUid, bucket] of Array.from(passiveUnreadSubscribersByUser.entries())) {
+    if (!cleanKeep || subUid !== cleanKeep) {
+      bucket.listeners.clear();
+      passiveUnreadSubscribersByUser.delete(subUid);
+    }
+  }
+
+  memoryConversationsByScope.clear();
+  memoryMessagesCache.clear();
+  inFlightConversationsByUser.clear();
+  lastConversationsFetchedAtByUser.clear();
+  if (!cleanKeep) {
+    lastSyncedPrivacySignatureByUserId.clear();
+    lastMarkedReadAtByUserAndConv.clear();
+  }
+  detachChatVisibilityListenerIfIdle();
+}
+
+function applyClientReadFloorToConversation(
+  userId: string,
+  conv: PrivateConversation
+): PrivateConversation {
+  const localReadFloor = lastMarkedReadAtByUserAndConv.get(`${userId}::${conv.id}`) ?? 0;
+  if (localReadFloor <= 0) return conv;
+
+  const lastMsgTime = conv.lastMessage?.createdAt ?? 0;
+  if (lastMsgTime <= localReadFloor && (conv.unreadCounts?.[userId] ?? 0) > 0) {
+    return {
+      ...conv,
+      unreadCounts: {
+        ...conv.unreadCounts,
+        [userId]: 0,
+      },
+      lastMessage:
+        conv.lastMessage && conv.lastMessage.senderId !== userId
+          ? { ...conv.lastMessage, isRead: true }
+          : conv.lastMessage,
+    };
+  }
+  return conv;
+}
+
+function mergeServerAndConfirmedLocalMessages(
+  serverMsgs: PrivateMessage[],
+  localMsgs: PrivateMessage[],
+  viewerId: string,
+  convId: string
+): PrivateMessage[] {
+  const localReadFloor = lastMarkedReadAtByUserAndConv.get(`${viewerId}::${convId}`) ?? 0;
+  const byId = new Map<string, PrivateMessage>();
+
+  for (const m of serverMsgs) {
+    const isReadAdjusted =
+      m.recipientId === viewerId && m.createdAt <= localReadFloor ? true : m.isRead;
+    byId.set(m.id, isReadAdjusted !== m.isRead ? { ...m, isRead: isReadAdjusted } : m);
+  }
+
+  // Preserve any recently confirmed message (< 30s) not yet reflected in an older in-flight poll
+  const now = Date.now();
+  for (const localMsg of localMsgs) {
+    if (!byId.has(localMsg.id) && now - localMsg.createdAt < 30_000) {
+      byId.set(localMsg.id, localMsg);
+    }
+  }
+
+  const merged = Array.from(byId.values());
+  merged.sort((a, b) => a.createdAt - b.createdAt);
+  return merged;
 }
 
 // ============================================================================
@@ -170,6 +372,7 @@ let syncPrivacyContextNetworkCalls = 0;
  */
 export async function syncUserPrivacyContext(context: UserCheckContext): Promise<void> {
   if (!context.id) return;
+  activeChatSessionUserId = context.id;
 
   const normalizedPayload = {
     id: context.id,
@@ -192,13 +395,13 @@ export async function syncUserPrivacyContext(context: UserCheckContext): Promise
   syncPrivacyContextNetworkCalls++;
 
   try {
-    await fetch('/api/chat/sync-user-context', {
+    const headers = await buildChatAuthHeaders(true);
+    await fetch(buildChatUrl('/api/chat/sync-user-context'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: signature,
     });
   } catch {
-    // Permite tentar novamente em caso de falha transitória
     if (lastSyncedPrivacySignatureByUserId.get(context.id) === signature) {
       lastSyncedPrivacySignatureByUserId.delete(context.id);
     }
@@ -233,7 +436,7 @@ function computeUnreadTotalForUser(userId: string, convs: PrivateConversation[])
 function notifyUnreadSubscribersForUser(userId: string, convs?: PrivateConversation[]): void {
   const bucket = passiveUnreadSubscribersByUser.get(userId);
   if (!bucket || bucket.listeners.size === 0) return;
-  const source = convs ?? readCachedConversations();
+  const source = convs ?? readCachedConversations(userId);
   const nextCount = computeUnreadTotalForUser(userId, source);
   if (nextCount !== bucket.lastEmittedCount) {
     bucket.lastEmittedCount = nextCount;
@@ -245,9 +448,10 @@ function notifyUnreadSubscribersForUser(userId: string, convs?: PrivateConversat
 
 function notifyAllUnreadSubscribersFromCache(): void {
   if (passiveUnreadSubscribersByUser.size === 0) return;
-  const cached = readCachedConversations();
   for (const userId of passiveUnreadSubscribersByUser.keys()) {
-    notifyUnreadSubscribersForUser(userId, cached);
+    const scoped = readCachedConversations(userId);
+    const fallback = scoped.length > 0 ? scoped : readCachedConversations();
+    notifyUnreadSubscribersForUser(userId, fallback);
   }
 }
 
@@ -255,6 +459,9 @@ function notifyAllUnreadSubscribersFromCache(): void {
  * Consulta conversas do usuário atual (com deduplicação de requisições concorrentes)
  */
 export async function fetchUserConversations(userId: string): Promise<PrivateConversation[]> {
+  if (!userId) return [];
+  activeChatSessionUserId = userId;
+
   const existingRequest = inFlightConversationsByUser.get(userId);
   if (existingRequest) {
     return existingRequest;
@@ -262,20 +469,43 @@ export async function fetchUserConversations(userId: string): Promise<PrivateCon
 
   const request = (async (): Promise<PrivateConversation[]> => {
     try {
-      const res = await fetch(`/api/chat/conversations?userId=${encodeURIComponent(userId)}`);
+      const headers = await buildChatAuthHeaders(false);
+      const res = await fetch(
+        buildChatUrl(`/api/chat/conversations?userId=${encodeURIComponent(userId)}`),
+        { headers }
+      );
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.conversations)) {
+          const serverConvs = (data.conversations as PrivateConversation[])
+            .filter((c) => Array.isArray(c.participants) && c.participants.includes(userId))
+            .map((c) => applyClientReadFloorToConversation(userId, c));
+
+          // Preserve any optimistic/local conversation created moments ago not yet in a stale poll
+          const cached = readCachedConversations(userId);
+          const serverIds = new Set(serverConvs.map((c) => c.id));
+          const now = Date.now();
+          for (const localConv of cached) {
+            if (
+              !serverIds.has(localConv.id) &&
+              localConv.participants.includes(userId) &&
+              now - localConv.updatedAt < 30_000
+            ) {
+              serverConvs.push(localConv);
+            }
+          }
+          serverConvs.sort((a, b) => b.updatedAt - a.updatedAt);
+
           lastConversationsFetchedAtByUser.set(userId, Date.now());
-          writeCachedConversations(data.conversations);
-          notifyUnreadSubscribersForUser(userId, data.conversations);
-          return data.conversations;
+          writeCachedConversations(serverConvs, userId);
+          notifyUnreadSubscribersForUser(userId, serverConvs);
+          return serverConvs;
         }
       }
     } catch {
-      // Fallback para cache local
+      // Fallback para cache local isolado por UID
     }
-    const fallback = readCachedConversations().filter((c) => c.participants.includes(userId));
+    const fallback = readCachedConversations(userId).filter((c) => c.participants.includes(userId));
     notifyUnreadSubscribersForUser(userId, fallback);
     return fallback;
   })();
@@ -295,12 +525,14 @@ export async function startOrGetConversation(
   sender: ParticipantSummary,
   recipient: ParticipantSummary
 ): Promise<PrivateConversation> {
+  activeChatSessionUserId = sender.id;
   const convId = getDeterministicConversationId(sender.id, recipient.id);
 
   try {
-    const res = await fetch('/api/chat/conversations', {
+    const headers = await buildChatAuthHeaders(true);
+    const res = await fetch(buildChatUrl('/api/chat/conversations'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({ sender, recipient }),
     });
 
@@ -311,18 +543,59 @@ export async function startOrGetConversation(
 
     const data = await res.json();
     const conv: PrivateConversation = data.conversation;
-    const cached = readCachedConversations();
+    const cached = readCachedConversations(sender.id);
     const nextConvs = cached.some((c) => c.id === conv.id)
       ? cached.map((c) => (c.id === conv.id ? conv : c))
       : [conv, ...cached];
-    writeCachedConversations(nextConvs);
+    writeCachedConversations(nextConvs, sender.id);
+
+    // Ensure Firestore parent conversation doc exists when authenticated with Firebase
+    if (db && auth?.currentUser?.uid === sender.id) {
+      try {
+        const convDocRef = doc(db, 'conversations', convId);
+        const snap = await getDoc(convDocRef);
+        if (!snap.exists()) {
+          const safeSenderAvatar =
+            (sender.avatarUrl || '').length <= 2048 ? sender.avatarUrl || '' : '';
+          const safeRecipientAvatar =
+            (recipient.avatarUrl || '').length <= 2048 ? recipient.avatarUrl || '' : '';
+          await setDoc(convDocRef, {
+            id: convId,
+            participants: [sender.id, recipient.id],
+            participantDetails: {
+              [sender.id]: {
+                id: sender.id,
+                displayName: (sender.displayName || sender.username || 'Usuário').slice(0, 60),
+                username: (sender.username || 'usuario').slice(0, 32),
+                avatarUrl: safeSenderAvatar,
+              },
+              [recipient.id]: {
+                id: recipient.id,
+                displayName: (recipient.displayName || recipient.username || 'Usuário').slice(0, 60),
+                username: (recipient.username || 'usuario').slice(0, 32),
+                avatarUrl: safeRecipientAvatar,
+              },
+            },
+            unreadCounts: { [sender.id]: 0, [recipient.id]: 0 },
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+      } catch {
+        // Non-blocking if Firestore is offline or unconfigured
+      }
+    }
+
     return conv;
   } catch (err) {
-    if (err instanceof Error && err.message !== 'Failed to fetch' && !err.message.includes('fetch')) {
+    if (
+      err instanceof Error &&
+      err.message !== 'Failed to fetch' &&
+      !err.message.includes('fetch')
+    ) {
       throw err;
     }
-    // Fallback local se o servidor offline
-    const cached = readCachedConversations();
+    const cached = readCachedConversations(sender.id);
     const existing = cached.find((c) => c.id === convId);
     if (existing) return existing;
 
@@ -337,7 +610,7 @@ export async function startOrGetConversation(
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
-    writeCachedConversations([newConv, ...cached]);
+    writeCachedConversations([newConv, ...cached], sender.id);
     return newConv;
   }
 }
@@ -350,34 +623,51 @@ export async function fetchConversationMessages(
   userId: string,
   options?: { limit?: number; before?: number }
 ): Promise<{ messages: PrivateMessage[]; hasMore: boolean }> {
+  activeChatSessionUserId = userId;
   try {
     const params = new URLSearchParams({
       userId,
-      limit: String(options?.limit ?? 30),
+      limit: String(options?.limit ?? 50),
     });
     if (options?.before) {
       params.set('before', String(options.before));
     }
 
+    const headers = await buildChatAuthHeaders(false);
     const res = await fetch(
-      `/api/chat/conversations/${encodeURIComponent(convId)}/messages?${params.toString()}`
+      buildChatUrl(
+        `/api/chat/conversations/${encodeURIComponent(convId)}/messages?${params.toString()}`
+      ),
+      { headers }
     );
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data.messages)) {
+        const serverMessages = data.messages as PrivateMessage[];
         if (!options?.before) {
-          writeCachedMessages(convId, data.messages);
+          const localCached = readCachedMessages(convId, userId);
+          const merged = mergeServerAndConfirmedLocalMessages(
+            serverMessages,
+            localCached,
+            userId,
+            convId
+          );
+          writeCachedMessages(convId, merged, userId);
+          return {
+            messages: merged,
+            hasMore: Boolean(data.hasMore),
+          };
         }
         return data;
       }
     }
   } catch {
-    // Fallback para cache
+    // Fallback para cache isolado por UID
   }
 
-  const cached = readCachedMessages(convId);
+  const cached = readCachedMessages(convId, userId);
   const before = options?.before;
-  const limit = options?.limit ?? 30;
+  const limit = options?.limit ?? 50;
   const filtered = before ? cached.filter((m) => m.createdAt < before) : cached;
   const startIndex = Math.max(0, filtered.length - limit);
   const slice = filtered.slice(startIndex);
@@ -398,21 +688,22 @@ export async function sendPrivateMessage(payload: {
   linkPreview?: HikariLinkPreview;
 }): Promise<PrivateMessage> {
   const { sender, recipient, text, mediaUrl } = payload;
+  activeChatSessionUserId = sender.id;
   const type = payload.type || (mediaUrl ? 'image' : 'text');
   const targetConvId =
     payload.conversationId || getDeterministicConversationId(sender.id, recipient.id);
 
-  // Validação preliminar no client
   const mediaVal = validateMediaPayload(mediaUrl, type);
   if (!mediaVal.valid) {
     throw new Error(mediaVal.error);
   }
 
   const preview = payload.linkPreview || extractHikariLinkPreview(text);
+  const headers = await buildChatAuthHeaders(true);
 
-  const res = await fetch('/api/chat/messages', {
+  const res = await fetch(buildChatUrl('/api/chat/messages'), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({
       conversationId: targetConvId,
       senderId: sender.id,
@@ -420,6 +711,9 @@ export async function sendPrivateMessage(payload: {
       senderUsername: sender.username,
       senderAvatarUrl: sender.avatarUrl,
       recipientId: recipient.id,
+      recipientName: recipient.displayName,
+      recipientUsername: recipient.username,
+      recipientAvatarUrl: recipient.avatarUrl,
       text,
       type,
       mediaUrl,
@@ -436,25 +730,99 @@ export async function sendPrivateMessage(payload: {
   const data = await res.json();
   const sentMessage: PrivateMessage = data.message;
 
-  // Atualiza cache local e notifica canal ativo sem esperar próximo ciclo
-  const currentCached = readCachedMessages(targetConvId);
+  // 1. Atualiza imediatamente o cache de mensagens isolado do remetente e notifica o canal ativo
+  const currentCached = readCachedMessages(targetConvId, sender.id);
   const nextMessages = currentCached.some((m) => m.id === sentMessage.id)
     ? currentCached
     : [...currentCached, sentMessage];
-  writeCachedMessages(targetConvId, nextMessages);
-  emitLocalMessagesToActiveChannels(targetConvId, nextMessages);
+  writeCachedMessages(targetConvId, nextMessages, sender.id);
+  emitLocalMessagesToActiveChannels(targetConvId, sender.id, nextMessages);
 
-  // Tenta persistir no Firestore se estiver inicializado com Firebase Auth
+  // 2. Atualiza também a lista de conversas em cache para que a conversa nunca suma da barra lateral
+  const cachedConvs = readCachedConversations(sender.id);
+  const lastMsgSnippet = {
+    id: sentMessage.id,
+    text: sentMessage.text,
+    senderId: sender.id,
+    senderName: sender.displayName,
+    type: sentMessage.type,
+    createdAt: sentMessage.createdAt,
+    isRead: false,
+  };
+  let nextConvs: PrivateConversation[];
+  if (cachedConvs.some((c) => c.id === targetConvId)) {
+    nextConvs = cachedConvs.map((c) =>
+      c.id === targetConvId
+        ? {
+            ...c,
+            lastMessage: lastMsgSnippet,
+            updatedAt: Math.max(c.updatedAt, sentMessage.createdAt),
+          }
+        : c
+    );
+  } else {
+    nextConvs = [
+      {
+        id: targetConvId,
+        participants: [sender.id, recipient.id],
+        participantDetails: {
+          [sender.id]: sender,
+          [recipient.id]: recipient,
+        },
+        lastMessage: lastMsgSnippet,
+        unreadCounts: { [sender.id]: 0, [recipient.id]: 1 },
+        createdAt: sentMessage.createdAt,
+        updatedAt: sentMessage.createdAt,
+      },
+      ...cachedConvs,
+    ];
+  }
+  nextConvs.sort((a, b) => b.updatedAt - a.updatedAt);
+  writeCachedConversations(nextConvs, sender.id);
+  emitLocalConversationsToActivePoller(sender.id, nextConvs);
+
+  // 3. Persiste no Firestore (criando primeiro o doc pai /conversations/{convId} se ainda não existir)
   if (db && auth?.currentUser?.uid === sender.id) {
     try {
+      const safeSenderAvatar =
+        (sender.avatarUrl || '').length <= 2048 ? sender.avatarUrl || '' : '';
+      const safeRecipientAvatar =
+        (recipient.avatarUrl || '').length <= 2048 ? recipient.avatarUrl || '' : '';
+
+      const convDocRef = doc(db, 'conversations', targetConvId);
+      const convSnap = await getDoc(convDocRef);
+      if (!convSnap.exists()) {
+        await setDoc(convDocRef, {
+          id: targetConvId,
+          participants: [sender.id, recipient.id],
+          participantDetails: {
+            [sender.id]: {
+              id: sender.id,
+              displayName: (sender.displayName || sender.username || 'Usuário').slice(0, 60),
+              username: (sender.username || 'usuario').slice(0, 32),
+              avatarUrl: safeSenderAvatar,
+            },
+            [recipient.id]: {
+              id: recipient.id,
+              displayName: (recipient.displayName || recipient.username || 'Usuário').slice(0, 60),
+              username: (recipient.username || 'usuario').slice(0, 32),
+              avatarUrl: safeRecipientAvatar,
+            },
+          },
+          unreadCounts: { [sender.id]: 0, [recipient.id]: 1 },
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+
       const msgDocRef = doc(db, 'conversations', targetConvId, 'messages', sentMessage.id);
       await setDoc(msgDocRef, {
         id: sentMessage.id,
         conversationId: targetConvId,
         senderId: sender.id,
-        senderName: sender.displayName,
-        senderUsername: sender.username,
-        senderAvatarUrl: sender.avatarUrl,
+        senderName: (sender.displayName || sender.username || 'Usuário').slice(0, 60),
+        senderUsername: (sender.username || 'usuario').slice(0, 32),
+        senderAvatarUrl: safeSenderAvatar,
         recipientId: recipient.id,
         text: sentMessage.text,
         type: sentMessage.type,
@@ -465,18 +833,20 @@ export async function sendPrivateMessage(payload: {
         createdAt: serverTimestamp(),
       });
 
-      const convDocRef = doc(db, 'conversations', targetConvId);
+      const currentRecipientUnread = convSnap.exists()
+        ? Number(convSnap.data()?.unreadCounts?.[recipient.id] || 0)
+        : 0;
       await updateDoc(convDocRef, {
         lastMessage: {
           id: sentMessage.id,
           text: sentMessage.text,
           senderId: sender.id,
-          senderName: sender.displayName,
+          senderName: (sender.displayName || sender.username || 'Usuário').slice(0, 60),
           type: sentMessage.type,
           createdAt: serverTimestamp(),
           isRead: false,
         },
-        [`unreadCounts.${recipient.id}`]: 1,
+        [`unreadCounts.${recipient.id}`]: currentRecipientUnread + 1,
         updatedAt: serverTimestamp(),
       });
     } catch {
@@ -488,28 +858,29 @@ export async function sendPrivateMessage(payload: {
 }
 
 /**
- * Marca mensagens de uma conversa como lidas
+ * Marca mensagens de uma conversa como lidas (individual por usuário e por conversa)
  */
 export async function markConversationAsRead(convId: string, userId: string): Promise<void> {
-  try {
-    await fetch(`/api/chat/conversations/${encodeURIComponent(convId)}/read`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId }),
-    });
-  } catch {
-    // Ignora erro de rede
-  }
+  if (!convId || !userId) return;
+  activeChatSessionUserId = userId;
 
-  // Atualiza cache local
-  const cached = readCachedMessages(convId);
-  const updated = cached.map((m) =>
-    m.recipientId === userId && !m.isRead ? { ...m, isRead: true } : m
-  );
-  writeCachedMessages(convId, updated);
-  emitLocalMessagesToActiveChannels(convId, updated);
+  const readTimestamp = Date.now();
+  lastMarkedReadAtByUserAndConv.set(`${userId}::${convId}`, readTimestamp);
 
-  const convs = readCachedConversations();
+  // 1. Atualização imediata e otimista do estado local de mensagens e conversas (remove a barra roxa na hora!)
+  const cached = readCachedMessages(convId, userId);
+  const unreadIncomingIds: string[] = [];
+  const updated = cached.map((m) => {
+    if (m.recipientId === userId && !m.isRead) {
+      unreadIncomingIds.push(m.id);
+      return { ...m, isRead: true };
+    }
+    return m;
+  });
+  writeCachedMessages(convId, updated, userId);
+  emitLocalMessagesToActiveChannels(convId, userId, updated);
+
+  const convs = readCachedConversations(userId);
   const convUpdated = convs.map((c) => {
     if (c.id === convId) {
       return {
@@ -523,17 +894,41 @@ export async function markConversationAsRead(convId: string, userId: string): Pr
     }
     return c;
   });
-  writeCachedConversations(convUpdated);
+  writeCachedConversations(convUpdated, userId);
   emitLocalConversationsToActivePoller(userId, convUpdated);
+  notifyUnreadSubscribersForUser(userId, convUpdated);
 
-  // Firestore update se ativo
+  // 2. Persiste e sincroniza no backend
+  try {
+    const headers = await buildChatAuthHeaders(true);
+    await fetch(buildChatUrl(`/api/chat/conversations/${encodeURIComponent(convId)}/read`), {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ userId }),
+    });
+  } catch {
+    // Ignora erro transitório de rede
+  }
+
+  // 3. Persiste no Firestore (tanto unreadCounts quanto isRead das mensagens individuais)
   if (db && auth?.currentUser?.uid === userId) {
+    const firestoreDb = db;
     try {
-      const convDocRef = doc(db, 'conversations', convId);
+      const convDocRef = doc(firestoreDb, 'conversations', convId);
       await updateDoc(convDocRef, {
         [`unreadCounts.${userId}`]: 0,
+        [`lastReadAtByUser.${userId}`]: readTimestamp,
         updatedAt: serverTimestamp(),
       });
+      if (unreadIncomingIds.length > 0) {
+        await Promise.all(
+          unreadIncomingIds.map((msgId) =>
+            updateDoc(doc(firestoreDb, 'conversations', convId, 'messages', msgId), {
+              isRead: true,
+            }).catch(() => {})
+          )
+        );
+      }
     } catch {
       // Ignora
     }
@@ -549,11 +944,15 @@ export async function toggleMessageReaction(
   userId: string,
   emoji: string
 ): Promise<PrivateMessage> {
+  activeChatSessionUserId = userId;
+  const headers = await buildChatAuthHeaders(true);
   const res = await fetch(
-    `/api/chat/conversations/${encodeURIComponent(convId)}/messages/${encodeURIComponent(msgId)}/reaction`,
+    buildChatUrl(
+      `/api/chat/conversations/${encodeURIComponent(convId)}/messages/${encodeURIComponent(msgId)}/reaction`
+    ),
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({ userId, emoji }),
     }
   );
@@ -566,10 +965,10 @@ export async function toggleMessageReaction(
   const data = await res.json();
   const updatedMessage: PrivateMessage = data.message;
 
-  const cached = readCachedMessages(convId);
+  const cached = readCachedMessages(convId, userId);
   const updated = cached.map((m) => (m.id === msgId ? updatedMessage : m));
-  writeCachedMessages(convId, updated);
-  emitLocalMessagesToActiveChannels(convId, updated);
+  writeCachedMessages(convId, updated, userId);
+  emitLocalMessagesToActiveChannels(convId, userId, updated);
 
   return updatedMessage;
 }
@@ -583,9 +982,10 @@ export async function sendTypingIndicator(
   isTyping: boolean
 ): Promise<void> {
   try {
-    await fetch(`/api/chat/conversations/${encodeURIComponent(convId)}/typing`, {
+    const headers = await buildChatAuthHeaders(true);
+    await fetch(buildChatUrl(`/api/chat/conversations/${encodeURIComponent(convId)}/typing`), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({ userId, isTyping }),
     });
   } catch {
@@ -602,9 +1002,10 @@ export async function sendPresenceHeartbeat(
 ): Promise<void> {
   if (isDocumentHidden()) return;
   try {
-    await fetch('/api/chat/presence/heartbeat', {
+    const headers = await buildChatAuthHeaders(true);
+    await fetch(buildChatUrl('/api/chat/presence/heartbeat'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({ userId, showOnlineStatus }),
     });
   } catch {
@@ -618,16 +1019,23 @@ export async function sendPresenceHeartbeat(
 export function sendPresenceOffline(userId: string): void {
   try {
     const payload = JSON.stringify({ userId });
-    if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
+    if (
+      !chatTestTokenOverride &&
+      !auth?.currentUser &&
+      typeof navigator !== 'undefined' &&
+      navigator.sendBeacon
+    ) {
       const blob = new Blob([payload], { type: 'application/json' });
-      navigator.sendBeacon('/api/chat/presence/offline', blob);
+      navigator.sendBeacon(buildChatUrl('/api/chat/presence/offline'), blob);
     } else {
-      fetch('/api/chat/presence/offline', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: payload,
-        keepalive: true,
-      }).catch(() => {});
+      void buildChatAuthHeaders(true).then((headers) => {
+        fetch(buildChatUrl('/api/chat/presence/offline'), {
+          method: 'POST',
+          headers,
+          body: payload,
+          keepalive: true,
+        }).catch(() => {});
+      });
     }
   } catch {
     // Silencioso
@@ -724,14 +1132,25 @@ async function pollChannelOnce(channel: SharedConversationChannel): Promise<void
   }
 
   try {
+    const headers = await buildChatAuthHeaders(false);
     const res = await fetch(
-      `/api/chat/conversations/${encodeURIComponent(channel.convId)}/messages?userId=${encodeURIComponent(channel.userId)}&limit=50`
+      buildChatUrl(
+        `/api/chat/conversations/${encodeURIComponent(channel.convId)}/messages?userId=${encodeURIComponent(channel.userId)}&limit=50`
+      ),
+      { headers }
     );
     if (!res.ok || channel.listeners.size === 0) return;
 
     const data = await res.json();
-    const incomingMessages: PrivateMessage[] = Array.isArray(data.messages) ? data.messages : [];
+    const serverMessages: PrivateMessage[] = Array.isArray(data.messages) ? data.messages : [];
     const incomingTyping: string[] = Array.isArray(data.typingUsers) ? data.typingUsers : [];
+
+    const incomingMessages = mergeServerAndConfirmedLocalMessages(
+      serverMessages,
+      channel.lastKnownMessages,
+      channel.userId,
+      channel.convId
+    );
 
     const isEqual = areMessagesAndTypingEqual(
       channel.lastKnownMessages,
@@ -743,19 +1162,18 @@ async function pollChannelOnce(channel: SharedConversationChannel): Promise<void
     if (!isEqual) {
       channel.lastKnownMessages = incomingMessages;
       channel.lastKnownTyping = incomingTyping;
-      writeCachedMessages(channel.convId, incomingMessages);
+      writeCachedMessages(channel.convId, incomingMessages, channel.userId);
       const payload = { messages: incomingMessages, typingUsers: incomingTyping };
       for (const listener of channel.listeners) {
         listener(payload);
       }
     }
   } catch {
-    // Ignora erro transitório
+    // Ignora erro transitório sem apagar mensagens em exibição
   }
 }
 
 function startChannelPollTimerIfNeeded(channel: SharedConversationChannel): void {
-  // Evita rodar simultaneamente onSnapshot em tempo real e polling HTTP duplicado
   if (channel.firestoreRealtimeActive) {
     stopChannelPollTimer(channel);
     return;
@@ -800,9 +1218,13 @@ function startListPollerTimerIfNeeded(poller: SharedConversationsPoller): void {
   }, CONVERSATIONS_LIST_POLL_MS);
 }
 
-function emitLocalMessagesToActiveChannels(convId: string, messages: PrivateMessage[]): void {
+function emitLocalMessagesToActiveChannels(
+  convId: string,
+  userId: string,
+  messages: PrivateMessage[]
+): void {
   for (const channel of activeConversationChannels.values()) {
-    if (channel.convId === convId && channel.listeners.size > 0) {
+    if (channel.convId === convId && channel.userId === userId && channel.listeners.size > 0) {
       channel.lastKnownMessages = messages;
       const payload = { messages, typingUsers: channel.lastKnownTyping };
       for (const listener of channel.listeners) {
@@ -838,7 +1260,6 @@ function handleChatVisibilityChange(): void {
 
   const now = Date.now();
 
-  // Retorno ao primeiro plano: reativa somente os pollers/canais de modais realmente abertos
   for (const poller of activeConversationPollers.values()) {
     if (poller.listeners.size > 0) {
       void pollConversationsListOnce(poller);
@@ -853,7 +1274,6 @@ function handleChatVisibilityChange(): void {
     }
   }
 
-  // Atualiza contador passivo de não lidas apenas se estiver obsoleto (> 60s) e sem poller ativo
   for (const [userId, bucket] of passiveUnreadSubscribersByUser.entries()) {
     if (bucket.listeners.size === 0 || activeConversationPollers.has(userId)) continue;
     const lastFetch = lastConversationsFetchedAtByUser.get(userId) ?? 0;
@@ -883,21 +1303,21 @@ function detachChatVisibilityListenerIfIdle(): void {
 
 /**
  * Assina o contador de mensagens não lidas SEM criar polling global em segundo plano.
- * - Emite imediatamente a partir do cache.
- * - Faz 1 consulta inicial única na sessão (quando visível).
- * - Atualiza instantaneamente em eventos locais (ler/enviar/abrir chat) ou retorno ao primeiro plano após cooldown.
  */
 export function subscribeToUnreadMessagesCount(
   userId: string,
   onUnreadChange: (unreadCount: number) => void
 ): () => void {
   if (!userId) return () => {};
+  activeChatSessionUserId = userId;
 
   attachChatVisibilityListener();
 
   let bucket = passiveUnreadSubscribersByUser.get(userId);
   if (!bucket) {
-    const initialCount = computeUnreadTotalForUser(userId, readCachedConversations());
+    const scopedCached = readCachedConversations(userId);
+    const sourceConvs = scopedCached.length > 0 ? scopedCached : readCachedConversations();
+    const initialCount = computeUnreadTotalForUser(userId, sourceConvs);
     bucket = {
       listeners: new Set(),
       lastEmittedCount: initialCount,
@@ -925,16 +1345,14 @@ export function subscribeToUnreadMessagesCount(
 }
 
 /**
- * Assina atualizações em tempo real de uma conversa aberta:
- * - Mantém estritamente UMA assinatura compartilhada por (userId, convId).
- * - Se o listener onSnapshot do Firestore estiver ativo e entregando dados, desativa o polling HTTP duplicado.
- * - Pausa automaticamente qualquer polling quando a aba está oculta e limpa todos os timers ao fechar.
+ * Assina atualizações em tempo real de uma conversa aberta (isolada por userId + convId).
  */
 export function subscribeToConversation(
   convId: string,
   userId: string,
   onUpdate: ConversationUpdateListener
 ): () => void {
+  activeChatSessionUserId = userId;
   const channelKey = `${userId}::${convId}`;
   attachChatVisibilityListener();
 
@@ -950,7 +1368,7 @@ export function subscribeToConversation(
       intervalId: null,
       firestoreUnsubscribe: null,
       firestoreRealtimeActive: false,
-      lastKnownMessages: readCachedMessages(convId),
+      lastKnownMessages: readCachedMessages(convId, userId),
       lastKnownTyping: [],
     };
     activeConversationChannels.set(channelKey, channel);
@@ -958,7 +1376,6 @@ export function subscribeToConversation(
 
   channel.listeners.add(onUpdate);
 
-  // Emissão imediata do cache/estado conhecido
   if (channel.lastKnownMessages.length > 0 || channel.lastKnownTyping.length > 0) {
     onUpdate({
       messages: channel.lastKnownMessages,
@@ -967,7 +1384,6 @@ export function subscribeToConversation(
   }
 
   if (isNewChannel) {
-    // 1. Tenta conectar listener Firestore nativo se autenticado com o mesmo UID
     if (db && auth?.currentUser?.uid === userId) {
       try {
         const messagesCol = collection(db, 'conversations', convId, 'messages');
@@ -1003,21 +1419,27 @@ export function subscribeToConversation(
             });
 
             if (remoteMsgs.length > 0) {
-              // onSnapshot ativo com documentos reais: interrompe polling HTTP redundante
               activeChannel.firestoreRealtimeActive = true;
               stopChannelPollTimer(activeChannel);
 
+              const mergedMsgs = mergeServerAndConfirmedLocalMessages(
+                remoteMsgs,
+                activeChannel.lastKnownMessages,
+                userId,
+                convId
+              );
+
               const isEqual = areMessagesAndTypingEqual(
                 activeChannel.lastKnownMessages,
-                remoteMsgs,
+                mergedMsgs,
                 activeChannel.lastKnownTyping,
                 activeChannel.lastKnownTyping
               );
               if (!isEqual) {
-                activeChannel.lastKnownMessages = remoteMsgs;
-                writeCachedMessages(convId, remoteMsgs);
+                activeChannel.lastKnownMessages = mergedMsgs;
+                writeCachedMessages(convId, mergedMsgs, userId);
                 const payload = {
-                  messages: remoteMsgs,
+                  messages: mergedMsgs,
                   typingUsers: activeChannel.lastKnownTyping,
                 };
                 for (const listener of activeChannel.listeners) {
@@ -1027,7 +1449,6 @@ export function subscribeToConversation(
             }
           },
           () => {
-            // Fallback seguro para polling caso o snapshot falhe (ex: permissões/offline)
             activeChannel.firestoreRealtimeActive = false;
             startChannelPollTimerIfNeeded(activeChannel);
           }
@@ -1038,7 +1459,6 @@ export function subscribeToConversation(
       }
     }
 
-    // 2. Faz 1 sincronização inicial e inicia polling controlado apenas se necessário e aba visível
     if (!isDocumentHidden()) {
       void pollChannelOnce(channel);
     }
@@ -1062,20 +1482,18 @@ export function subscribeToConversation(
 }
 
 /**
- * Assina atualizações da lista de conversas enquanto o PrivateChatModal está aberto:
- * - Compartilha um único poller por userId.
- * - Pausa automaticamente quando document.visibilityState === 'hidden'.
- * - Encerra imediatamente o timer ao fechar o modal.
+ * Assina atualizações da lista de conversas enquanto o PrivateChatModal está aberto.
  */
 export function subscribeToConversationsList(
   userId: string,
   onUpdate: (conversations: PrivateConversation[]) => void
 ): () => void {
+  activeChatSessionUserId = userId;
   attachChatVisibilityListener();
   let poller = activeConversationPollers.get(userId);
 
   if (!poller) {
-    const cached = readCachedConversations().filter((c) => c.participants.includes(userId));
+    const cached = readCachedConversations(userId).filter((c) => c.participants.includes(userId));
     poller = {
       userId,
       listeners: new Set(),
@@ -1109,9 +1527,6 @@ export function subscribeToConversationsList(
   };
 }
 
-/**
- * Diagnósticos em tempo real para verificação automatizada da Etapa 2 (zero polling com chat fechado / aba oculta).
- */
 export function getChatServiceDiagnostics(): {
   activeListPollTimers: number;
   activeConversationPollTimers: number;

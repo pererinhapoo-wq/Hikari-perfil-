@@ -1,16 +1,17 @@
 import { Router, type Request, type Response } from 'express';
 import { INITIAL_ACTIVITIES, CURRENT_USER, OTHER_USERS } from '../data/mockData.js';
-import { isImportSyncActivity, filterActivitiesForViewer } from '../utils/activityPrivacy.js';
+import { filterActivitiesForViewer } from '../utils/activityPrivacy.js';
 import type { UserActivity, UserProfile } from '../types/index.js';
 import { getAdminFirestore } from './firebaseAdmin.js';
-import { verifyAdminToken } from './adminAuth.js';
+import { verifyRequestUser, isDemoMockUserId } from './userAuth.js';
+import { socialStore } from './socialStore.js';
 
 export const activityRouter = Router();
 
 // Store em memória de atividades para simulação e persistência local no backend
 const memoryActivitiesByUid = new Map<string, UserActivity[]>();
 
-// Inicializa o usuário atual com as atividades padrão mockadas
+// Inicializa o usuário mock de demonstração com as atividades padrão
 memoryActivitiesByUid.set(CURRENT_USER.id, [...INITIAL_ACTIVITIES]);
 
 /**
@@ -29,15 +30,19 @@ export function appendBackendUserActivity(userId: string, activity: UserActivity
 }
 
 /**
- * Obtém todas as atividades brutas de um usuário
+ * Obtém todas as atividades brutas de um usuário (socialStore -> memória -> Firestore Admin -> mock)
  */
 export async function getRawUserActivities(userId: string): Promise<UserActivity[]> {
+  const syncedRecord = socialStore.getUserRecord(userId);
+  if (syncedRecord && syncedRecord.activities.length > 0) {
+    return syncedRecord.activities;
+  }
+
   const inMemory = memoryActivitiesByUid.get(userId);
   if (inMemory) {
     return inMemory;
   }
 
-  // Tenta carregar do Firestore se disponível
   const db = getAdminFirestore();
   if (db) {
     try {
@@ -68,11 +73,14 @@ export async function getRawUserActivities(userId: string): Promise<UserActivity
         return loaded;
       }
     } catch {
-      // Falha graciosa se Firestore não estiver configurado
+      // Falha graciosa se Firestore Admin não estiver configurado
     }
   }
 
-  // Fallback padrão se for usuário mock
+  if (syncedRecord) {
+    return syncedRecord.activities;
+  }
+
   if (userId === CURRENT_USER.id) {
     return [...INITIAL_ACTIVITIES];
   }
@@ -80,40 +88,82 @@ export async function getRawUserActivities(userId: string): Promise<UserActivity
   return [];
 }
 
-/**
- * Extrai o UID autenticado da requisição a partir de:
- * 1. Header Authorization Bearer token (verificado via Firebase Admin se presente)
- * 2. Header x-client-uid (usado em requisições de desenvolvimento/sessão autenticada)
- */
-async function extractCallerUid(req: Request): Promise<string | null> {
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.slice(7).trim();
-    if (token) {
-      try {
-        const verified = await verifyAdminToken(token);
-        if (verified.uid) {
-          return verified.uid;
-        }
-      } catch {
-        // Ignora erro de verificação e tenta x-client-uid
+async function resolveTargetProfilePrivacy(targetUserId: string): Promise<{
+  found: boolean;
+  resolvedUid: string;
+  isPrivate: boolean;
+  showActivity: boolean;
+}> {
+  const synced = socialStore.getUserRecord(targetUserId);
+  if (synced) {
+    return {
+      found: true,
+      resolvedUid: synced.uid,
+      isPrivate: Boolean(synced.profile.isPrivate),
+      showActivity: synced.profile.privacySettings?.showActivity !== false,
+    };
+  }
+
+  const db = getAdminFirestore();
+  if (db) {
+    try {
+      const userSnap = await db.collection('users').doc(targetUserId).get();
+      if (userSnap.exists) {
+        const data = userSnap.data() || {};
+        return {
+          found: true,
+          resolvedUid: targetUserId,
+          isPrivate: Boolean(data.isPrivate),
+          showActivity: data.privacySettings?.showActivity !== false,
+        };
       }
+    } catch {
+      // ignore
     }
   }
 
-  const clientUid = req.headers['x-client-uid'];
-  if (typeof clientUid === 'string' && clientUid.trim()) {
-    return clientUid.trim();
+  const mockProfile: UserProfile | undefined =
+    targetUserId === CURRENT_USER.id ? CURRENT_USER : OTHER_USERS[targetUserId];
+  if (mockProfile) {
+    return {
+      found: true,
+      resolvedUid: mockProfile.id,
+      isPrivate: Boolean(mockProfile.isPrivate),
+      showActivity: mockProfile.privacySettings?.showActivity !== false,
+    };
   }
 
-  return null;
+  if (memoryActivitiesByUid.has(targetUserId)) {
+    return {
+      found: true,
+      resolvedUid: targetUserId,
+      isPrivate: false,
+      showActivity: true,
+    };
+  }
+
+  return {
+    found: false,
+    resolvedUid: targetUserId,
+    isPrivate: false,
+    showActivity: true,
+  };
 }
 
 /**
- * Handler centralizado para responder requisições de atividades com filtro estrito de privacidade
+ * Handler centralizado para responder requisições de atividades com verificação criptográfica
+ * do chamador e bloqueio real no backend para perfis privados ou com showActivity === false.
+ * Nunca aceita `x-client-uid` sem token verificado para contas reais.
  */
 async function handleGetActivities(req: Request, res: Response) {
-  const targetUserId = (req.params.userId || req.query.userId || req.headers['x-target-user-id'] || '').toString().trim();
+  const targetUserId = (
+    req.params.userId ||
+    req.query.userId ||
+    req.headers['x-target-user-id'] ||
+    ''
+  )
+    .toString()
+    .trim();
 
   if (!targetUserId) {
     res.status(400).json({
@@ -123,32 +173,67 @@ async function handleGetActivities(req: Request, res: Response) {
     return;
   }
 
-  const callerUid = await extractCallerUid(req);
-  const isOwner = Boolean(callerUid && callerUid === targetUserId);
+  const caller = await verifyRequestUser(req);
+  if (caller.hadAuthHeader && !caller.authenticated) {
+    res.status(401).json({
+      error: 'INVALID_TOKEN',
+      message: caller.reason || 'Token de autenticação inválido.',
+      activities: [],
+    });
+    return;
+  }
 
-  const rawActivities = await getRawUserActivities(targetUserId);
+  const targetMeta = await resolveTargetProfilePrivacy(targetUserId);
 
-  // Busca configurações de privacidade do usuário alvo
-  const targetProfile: UserProfile | undefined =
-    targetUserId === CURRENT_USER.id
-      ? CURRENT_USER
-      : OTHER_USERS[targetUserId];
+  // Only allow unauthenticated x-client-uid in isolated offline Demo Mode for mock IDs
+  let callerUid: string | null = caller.authenticated ? caller.uid ?? null : null;
+  if (!callerUid && !caller.hadAuthHeader && isDemoMockUserId(targetMeta.resolvedUid)) {
+    const rawDemoUid = req.headers['x-client-uid'];
+    if (typeof rawDemoUid === 'string' && isDemoMockUserId(rawDemoUid.trim())) {
+      callerUid = rawDemoUid.trim();
+    }
+  }
 
-  const privacySettings = targetProfile?.privacySettings;
-  const isProfilePrivate = Boolean(targetProfile?.isPrivate);
+  const isOwner = Boolean(callerUid && callerUid === targetMeta.resolvedUid);
 
-  // Aplica filtragem estrita no backend:
-  // - Proprietário: recebe 100% dos dados, incluindo eventos de sincronização MAL e AniList
-  // - Outros usuários / público: NUNCA recebem eventos de importação/sincronização
+  if (!isOwner && targetMeta.isPrivate) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.status(403).json({
+      success: false,
+      error: 'PRIVATE_PROFILE',
+      message: 'Este perfil é privado. As atividades não podem ser acessadas.',
+      userId: targetMeta.resolvedUid,
+      isOwner: false,
+      total: 0,
+      activities: [],
+    });
+    return;
+  }
+
+  if (!isOwner && !targetMeta.showActivity) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.status(403).json({
+      success: false,
+      error: 'ACTIVITIES_PRIVATE',
+      message: 'Este usuário ocultou suas atividades públicas.',
+      userId: targetMeta.resolvedUid,
+      isOwner: false,
+      total: 0,
+      activities: [],
+    });
+    return;
+  }
+
+  const rawActivities = await getRawUserActivities(targetMeta.resolvedUid);
   const filteredActivities = filterActivitiesForViewer(rawActivities, isOwner, {
-    showActivity: privacySettings?.showActivity,
-    isPrivate: isProfilePrivate,
+    showActivity: targetMeta.showActivity,
+    isPrivate: targetMeta.isPrivate,
   });
 
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
   res.json({
     success: true,
-    userId: targetUserId,
+    userId: targetMeta.resolvedUid,
     isOwner,
     total: filteredActivities.length,
     activities: filteredActivities,

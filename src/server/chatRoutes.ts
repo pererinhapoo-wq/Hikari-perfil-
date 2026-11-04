@@ -8,25 +8,90 @@ import {
   type UserCheckContext,
 } from './chatStore.js';
 import type { MessageType, ParticipantSummary } from '../types/index.js';
+import { verifyRequestUser, isDemoMockUserId } from './userAuth.js';
 
 export const chatRouter = express.Router();
 
 /**
- * Registra ou atualiza o contexto de privacidade do usuário no servidor
+ * Resolves and authorizes the acting user ID for private chat endpoints:
+ * - Any valid Authorization Bearer token pins `uid` to the cryptographically verified user,
+ *   rejecting cross-account `claimedUserId` spoofing with HTTP 403.
+ * - Invalid Authorization headers are rejected immediately with HTTP 401.
+ * - Unauthenticated requests are allowed ONLY for offline Demo Mode mock IDs (`usr_hikari_001`, etc.);
+ *   real user accounts strictly require a valid Bearer token (HTTP 401).
  */
-chatRouter.post('/sync-user-context', (req: Request, res: Response) => {
-  const { id, username, displayName, avatarUrl, allowDirectMessages, directMessagesFrom, followingIds, followerIds, blockedIds } = req.body;
-  if (!id || typeof id !== 'string') {
-    return res.status(400).json({ error: 'ID de usuário obrigatório.' });
+async function resolveAuthorizedChatActor(
+  req: Request,
+  res: Response,
+  claimedUserId: string | undefined | null
+): Promise<string | null> {
+  const cleanClaimed = typeof claimedUserId === 'string' ? claimedUserId.trim() : '';
+  const caller = await verifyRequestUser(req);
+
+  if (caller.hadAuthHeader && !caller.authenticated) {
+    res.status(401).json({
+      error: 'INVALID_TOKEN',
+      message: caller.reason || 'Token de autenticação inválido.',
+    });
+    return null;
   }
 
+  if (caller.authenticated && caller.uid) {
+    if (cleanClaimed && cleanClaimed !== caller.uid) {
+      res.status(403).json({
+        error: 'FORBIDDEN',
+        message: 'Acesso negado: uma conta não pode consultar ou enviar mensagens em nome de outra conta.',
+      });
+      return null;
+    }
+    return caller.uid;
+  }
+
+  // Offline Demo Mode fallback strictly limited to static mock IDs
+  if (cleanClaimed && isDemoMockUserId(cleanClaimed)) {
+    return cleanClaimed;
+  }
+
+  if (!cleanClaimed) {
+    res.status(400).json({ error: 'userId é obrigatório.' });
+    return null;
+  }
+
+  res.status(401).json({
+    error: 'UNAUTHORIZED',
+    message: 'Autenticação obrigatória para acessar mensagens privadas.',
+  });
+  return null;
+}
+
+/**
+ * Registra ou atualiza o contexto de privacidade do usuário no servidor
+ */
+chatRouter.post('/sync-user-context', async (req: Request, res: Response) => {
+  const {
+    id,
+    username,
+    displayName,
+    avatarUrl,
+    allowDirectMessages,
+    directMessagesFrom,
+    showOnlineStatus,
+    followingIds,
+    followerIds,
+    blockedIds,
+  } = req.body ?? {};
+
+  const actorUid = await resolveAuthorizedChatActor(req, res, id);
+  if (!actorUid) return;
+
   const ctx: UserCheckContext = {
-    id: id.trim(),
+    id: actorUid,
     username: username || 'usuario',
     displayName: displayName || 'Usuário Hikari',
     avatarUrl: avatarUrl || '',
     allowDirectMessages: allowDirectMessages !== false,
     directMessagesFrom: directMessagesFrom || 'everyone',
+    showOnlineStatus: showOnlineStatus !== false,
     followingIds: Array.isArray(followingIds) ? followingIds : [],
     followerIds: Array.isArray(followerIds) ? followerIds : [],
     blockedIds: Array.isArray(blockedIds) ? blockedIds : [],
@@ -39,7 +104,7 @@ chatRouter.post('/sync-user-context', (req: Request, res: Response) => {
 /**
  * Consulta se um usuário tem permissão para enviar mensagem para o destinatário
  */
-chatRouter.get('/can-message', (req: Request, res: Response) => {
+chatRouter.get('/can-message', async (req: Request, res: Response) => {
   const senderId = req.query.senderId as string;
   const recipientId = req.query.recipientId as string;
 
@@ -47,87 +112,107 @@ chatRouter.get('/can-message', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'senderId e recipientId são obrigatórios.' });
   }
 
-  const senderCtx = chatStore.getUserContext(senderId);
+  const actorUid = await resolveAuthorizedChatActor(req, res, senderId);
+  if (!actorUid) return;
+
+  const senderCtx = chatStore.getUserContext(actorUid);
   const recipientCtx = chatStore.getUserContext(recipientId);
 
-  // Se o contexto do destinatário estiver registrado, valida estritamente
   if (senderCtx && recipientCtx) {
     const check = canUserMessageRecipient(senderCtx, recipientCtx);
     return res.json(check);
   }
 
-  // Se algum contexto não foi sincronizado ainda, permite consulta com base nos dados parciais
   return res.json({ allowed: true });
 });
 
 /**
- * Lista as conversas de um usuário
+ * Lista as conversas de um usuário autenticado
  */
-chatRouter.get('/conversations', (req: Request, res: Response) => {
-  const userId = req.query.userId as string;
-  if (!userId) {
-    return res.status(400).json({ error: 'userId é obrigatório.' });
-  }
+chatRouter.get('/conversations', async (req: Request, res: Response) => {
+  const actorUid = await resolveAuthorizedChatActor(req, res, req.query.userId as string);
+  if (!actorUid) return;
 
-  const conversations = chatStore.getUserConversations(userId);
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  const conversations = chatStore.getUserConversations(actorUid);
   return res.json({ conversations });
 });
 
 /**
- * Obtém detalhes de uma conversa específica
+ * Obtém detalhes de uma conversa específica (restrito aos 2 participantes)
  */
-chatRouter.get('/conversations/:id', (req: Request, res: Response) => {
+chatRouter.get('/conversations/:id', async (req: Request, res: Response) => {
   const convId = req.params.id;
-  const userId = req.query.userId as string;
+  const actorUid = await resolveAuthorizedChatActor(req, res, req.query.userId as string);
+  if (!actorUid) return;
 
-  if (!userId) {
-    return res.status(400).json({ error: 'userId é obrigatório para validação de acesso.' });
+  const existingAny = chatStore.getConversationById(convId);
+  if (existingAny && !existingAny.participants.includes(actorUid)) {
+    return res.status(403).json({ error: 'Acesso negado: você não participa desta conversa.' });
   }
 
-  const conv = chatStore.getConversationById(convId, userId);
+  const conv = chatStore.getConversationById(convId, actorUid);
   if (!conv) {
-    return res.status(404).json({ error: 'Conversa não encontrada ou acesso não autorizado.' });
+    return res.status(404).json({ error: 'Conversa não encontrada.' });
   }
 
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
   return res.json({ conversation: conv });
 });
 
 /**
- * Lista mensagens de uma conversa com paginação progressiva
+ * Lista mensagens de uma conversa com paginação progressiva (restrito aos 2 participantes)
  */
-chatRouter.get('/conversations/:id/messages', (req: Request, res: Response) => {
+chatRouter.get('/conversations/:id/messages', async (req: Request, res: Response) => {
   const convId = req.params.id;
-  const userId = req.query.userId as string;
   const limitStr = req.query.limit as string;
   const beforeStr = req.query.before as string;
 
-  if (!userId) {
-    return res.status(400).json({ error: 'userId é obrigatório para validar autorização.' });
+  const actorUid = await resolveAuthorizedChatActor(req, res, req.query.userId as string);
+  if (!actorUid) return;
+
+  const existingAny = chatStore.getConversationById(convId);
+  if (existingAny && !existingAny.participants.includes(actorUid)) {
+    return res.status(403).json({
+      error: 'FORBIDDEN',
+      message: 'Acesso negado: esta conversa pertence a outros usuários.',
+      messages: [],
+      hasMore: false,
+    });
   }
 
-  const limit = limitStr ? parseInt(limitStr, 10) : 30;
+  const limit = limitStr ? parseInt(limitStr, 10) : 50;
   const before = beforeStr ? parseInt(beforeStr, 10) : undefined;
 
-  const result = chatStore.getConversationMessages(convId, userId, { limit, before });
-  const typingUsers = chatStore.getTypingUsers(convId, userId);
-  return res.json({ ...result, typingUsers });
+  const result = chatStore.getConversationMessages(convId, actorUid, { limit, before });
+  const typingUsers = chatStore.getTypingUsers(convId, actorUid);
+  const lastReadAt = chatStore.getLastReadAt(convId, actorUid);
+
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  return res.json({ ...result, typingUsers, lastReadAt });
 });
 
 /**
  * Abre ou cria uma conversa entre dois participantes com verificação de bloqueio e privacidade
  */
-chatRouter.post('/conversations', (req: Request, res: Response) => {
-  const { sender, recipient } = req.body as {
-    sender: ParticipantSummary;
-    recipient: ParticipantSummary;
+chatRouter.post('/conversations', async (req: Request, res: Response) => {
+  const { sender, recipient } = (req.body ?? {}) as {
+    sender?: ParticipantSummary;
+    recipient?: ParticipantSummary;
   };
 
   if (!sender || !recipient || !sender.id || !recipient.id) {
     return res.status(400).json({ error: 'Participantes remetente e destinatário são obrigatórios.' });
   }
 
-  // Verificação de autorização no servidor caso os contextos estejam registrados
-  const senderCtx = chatStore.getUserContext(sender.id);
+  const actorUid = await resolveAuthorizedChatActor(req, res, sender.id);
+  if (!actorUid) return;
+
+  if (actorUid === recipient.id) {
+    return res.status(400).json({ error: 'Não é possível iniciar conversa consigo mesmo.' });
+  }
+
+  const senderCtx = chatStore.getUserContext(actorUid);
   const recipientCtx = chatStore.getUserContext(recipient.id);
 
   if (senderCtx && recipientCtx) {
@@ -137,14 +222,15 @@ chatRouter.post('/conversations', (req: Request, res: Response) => {
     }
   }
 
-  const { conversation, isNew } = chatStore.createOrGetConversation(sender, recipient);
+  const verifiedSender: ParticipantSummary = { ...sender, id: actorUid };
+  const { conversation, isNew } = chatStore.createOrGetConversation(verifiedSender, recipient);
   return res.json({ conversation, isNew });
 });
 
 /**
  * Envia uma nova mensagem para a conversa
  */
-chatRouter.post('/messages', (req: Request, res: Response) => {
+chatRouter.post('/messages', async (req: Request, res: Response) => {
   const {
     conversationId,
     senderId,
@@ -152,24 +238,31 @@ chatRouter.post('/messages', (req: Request, res: Response) => {
     senderUsername,
     senderAvatarUrl,
     recipientId,
+    recipientSummary,
     text,
     type,
     mediaUrl,
     mediaMetadata,
     linkPreview,
     id,
-  } = req.body;
+  } = req.body ?? {};
 
   if (!senderId || !recipientId) {
     return res.status(400).json({ error: 'senderId e recipientId são obrigatórios.' });
+  }
+
+  const actorUid = await resolveAuthorizedChatActor(req, res, senderId);
+  if (!actorUid) return;
+
+  if (actorUid === recipientId) {
+    return res.status(400).json({ error: 'Não é permitido enviar mensagem para a própria conta.' });
   }
 
   if (typeof text !== 'string' && !mediaUrl) {
     return res.status(400).json({ error: 'Texto ou mídia da mensagem é obrigatório.' });
   }
 
-  // Verificação de bloqueios e permissões no servidor
-  const senderCtx = chatStore.getUserContext(senderId);
+  const senderCtx = chatStore.getUserContext(actorUid);
   const recipientCtx = chatStore.getUserContext(recipientId);
 
   if (senderCtx && recipientCtx) {
@@ -179,7 +272,6 @@ chatRouter.post('/messages', (req: Request, res: Response) => {
     }
   }
 
-  // Validação de mídia e links
   const msgType = (type || (mediaUrl ? 'image' : 'text')) as MessageType;
   const mediaValidation = validateMediaPayload(mediaUrl, msgType);
   if (!mediaValidation.valid) {
@@ -187,15 +279,16 @@ chatRouter.post('/messages', (req: Request, res: Response) => {
   }
 
   try {
-    const targetConvId = conversationId || getDeterministicConversationId(senderId, recipientId);
+    const targetConvId = conversationId || getDeterministicConversationId(actorUid, recipientId);
     const result = chatStore.addMessage({
       id,
       conversationId: targetConvId,
-      senderId,
+      senderId: actorUid,
       senderName: senderName || 'Usuário',
       senderUsername,
       senderAvatarUrl: senderAvatarUrl || '',
       recipientId,
+      recipientSummary,
       text: text || '',
       type: msgType,
       mediaUrl,
@@ -206,22 +299,27 @@ chatRouter.post('/messages', (req: Request, res: Response) => {
     return res.status(201).json(result);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Falha ao enviar mensagem.';
-    return res.status(400).json({ error: msg });
+    const status = msg.includes('não autorizado') ? 403 : 400;
+    return res.status(status).json({ error: msg });
   }
 });
 
 /**
- * Marca as mensagens de uma conversa como lidas pelo leitor
+ * Marca as mensagens de uma conversa como lidas exclusivamente pelo leitor autenticado
  */
-chatRouter.post('/conversations/:id/read', (req: Request, res: Response) => {
+chatRouter.post('/conversations/:id/read', async (req: Request, res: Response) => {
   const convId = req.params.id;
-  const { userId } = req.body;
+  const { userId } = req.body ?? {};
 
-  if (!userId) {
-    return res.status(400).json({ error: 'userId é obrigatório.' });
+  const actorUid = await resolveAuthorizedChatActor(req, res, userId);
+  if (!actorUid) return;
+
+  const existingAny = chatStore.getConversationById(convId);
+  if (existingAny && !existingAny.participants.includes(actorUid)) {
+    return res.status(403).json({ error: 'Acesso negado a esta conversa.' });
   }
 
-  const result = chatStore.markAsRead(convId, userId);
+  const result = chatStore.markAsRead(convId, actorUid);
   return res.json({ success: true, ...result });
 });
 
@@ -245,65 +343,91 @@ chatRouter.get('/preview', (req: Request, res: Response) => {
 /**
  * Atualiza o indicador de digitação na conversa
  */
-chatRouter.post('/conversations/:id/typing', (req: Request, res: Response) => {
+chatRouter.post('/conversations/:id/typing', async (req: Request, res: Response) => {
   const convId = req.params.id;
-  const { userId, isTyping } = req.body;
-  if (!userId) {
-    return res.status(400).json({ error: 'userId obrigatório.' });
+  const { userId, isTyping } = req.body ?? {};
+
+  const actorUid = await resolveAuthorizedChatActor(req, res, userId);
+  if (!actorUid) return;
+
+  const existingAny = chatStore.getConversationById(convId);
+  if (existingAny && !existingAny.participants.includes(actorUid)) {
+    return res.status(403).json({ error: 'Acesso negado a esta conversa.' });
   }
 
-  chatStore.setTyping(convId, userId, Boolean(isTyping));
-  const typingUsers = chatStore.getTypingUsers(convId, userId);
+  chatStore.setTyping(convId, actorUid, Boolean(isTyping));
+  const typingUsers = chatStore.getTypingUsers(convId, actorUid);
   return res.json({ success: true, typingUsers });
 });
 
 /**
  * Alterna ou registra reação com emoji em uma mensagem
  */
-chatRouter.post('/conversations/:id/messages/:msgId/reaction', (req: Request, res: Response) => {
+chatRouter.post('/conversations/:id/messages/:msgId/reaction', async (req: Request, res: Response) => {
   const { id: convId, msgId } = req.params;
-  const { userId, emoji } = req.body;
+  const { userId, emoji } = req.body ?? {};
 
-  if (!userId || !emoji) {
+  if (!emoji) {
     return res.status(400).json({ error: 'userId e emoji são obrigatórios para registrar reação.' });
   }
 
+  const actorUid = await resolveAuthorizedChatActor(req, res, userId);
+  if (!actorUid) return;
+
   try {
-    const result = chatStore.toggleReaction(convId, msgId, userId, emoji);
+    const result = chatStore.toggleReaction(convId, msgId, actorUid, emoji);
     return res.json(result);
   } catch (err) {
-    return res.status(400).json({ error: err instanceof Error ? err.message : 'Falha ao registrar reação.' });
+    const message = err instanceof Error ? err.message : 'Falha ao registrar reação.';
+    const status = message.includes('não autorizado') ? 403 : 400;
+    return res.status(status).json({ error: message });
   }
 });
 
 /**
  * Envia heartbeat de presença do usuário
  */
-chatRouter.post('/presence/heartbeat', (req: Request, res: Response) => {
-  const { userId, showOnlineStatus } = req.body;
-  if (!userId) {
-    return res.status(400).json({ error: 'userId obrigatório.' });
-  }
+chatRouter.post('/presence/heartbeat', async (req: Request, res: Response) => {
+  const { userId, showOnlineStatus } = req.body ?? {};
+  const actorUid = await resolveAuthorizedChatActor(req, res, userId);
+  if (!actorUid) return;
 
-  chatStore.recordPresence(userId, true, showOnlineStatus);
-  return res.json({ success: true, isOnline: chatStore.isUserOnline(userId) });
+  chatStore.recordPresence(actorUid, true, showOnlineStatus);
+  return res.json({ success: true, isOnline: chatStore.isUserOnline(actorUid) });
 });
 
 /**
- * Notifica desconexão ou fechamento de aba
+ * Notifica desconexão ou fechamento de aba (compatível com navigator.sendBeacon)
  */
-chatRouter.post('/presence/offline', (req: Request, res: Response) => {
+chatRouter.post('/presence/offline', async (req: Request, res: Response) => {
   let userId = req.body?.userId;
+  let tokenFromBody = req.body?.idToken;
   if (!userId && typeof req.body === 'string') {
     try {
       const parsed = JSON.parse(req.body);
       userId = parsed.userId;
+      tokenFromBody = parsed.idToken;
     } catch {
       // ignore
     }
   }
 
-  if (userId) {
+  const caller = await verifyRequestUser(req);
+  if (caller.authenticated && caller.uid) {
+    chatStore.recordPresence(caller.uid, false);
+    return res.json({ success: true });
+  }
+
+  if (typeof tokenFromBody === 'string' && tokenFromBody.trim()) {
+    const { verifyAuthenticatedUserToken } = await import('./userAuth.js');
+    const verified = await verifyAuthenticatedUserToken(tokenFromBody);
+    if (verified.authenticated && verified.uid) {
+      chatStore.recordPresence(verified.uid, false);
+      return res.json({ success: true });
+    }
+  }
+
+  if (typeof userId === 'string' && isDemoMockUserId(userId)) {
     chatStore.recordPresence(userId, false);
   }
   return res.json({ success: true });
@@ -326,4 +450,3 @@ chatRouter.get('/presence/users', (req: Request, res: Response) => {
 
   return res.json({ presence: presenceMap });
 });
-

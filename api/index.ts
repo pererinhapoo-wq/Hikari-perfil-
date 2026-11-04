@@ -4,6 +4,7 @@ import { chatRouter } from '../src/server/chatRoutes.js';
 import { adminRouter } from '../src/server/adminRoutes.js';
 import { blobRouter } from '../src/server/blobRoutes.js';
 import { activityRouter } from '../src/server/activityRoutes.js';
+import { socialRouter } from '../src/server/socialRoutes.js';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -42,6 +43,10 @@ app.use('/admin', adminRouter);
 // Rotas de mídia e Vercel Blob (/api/media e /media)
 app.use('/api/media', blobRouter);
 app.use('/media', blobRouter);
+
+// Rotas sociais, privacidade de perfis, seguidores e notificações (/api/users e /users)
+app.use('/api/users', socialRouter);
+app.use('/users', socialRouter);
 
 // Rotas de atividades do Hikari (/api/activities, /activities e /api/users/:userId/activities)
 app.use('/api/activities', activityRouter);

@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import type {
   PrivateConversation,
   PrivateMessage,
@@ -19,26 +21,123 @@ export {
   type UserCheckContext,
 };
 
+interface PersistedChatState {
+  version: number;
+  conversations: Record<string, PrivateConversation>;
+  messages: Record<string, PrivateMessage[]>;
+  lastReadAtByConvAndUser: Record<string, Record<string, number>>;
+}
+
 /**
- * Armazenamento em memória autoritativo do servidor para o chat do Hikari,
- * sincronizável entre chamadas e requisições REST/Vercel.
+ * Armazenamento autoritativo e persistente do servidor para o chat privado do Hikari.
+ * Garante isolamento estrito por participante, persistência em disco (.data/chat-store.json)
+ * entre reinícios/recarregamentos e sincronização individual de leitura por usuário e conversa.
  */
-class ChatStore {
+export class ChatStore {
   private conversations = new Map<string, PrivateConversation>();
   private messages = new Map<string, PrivateMessage[]>(); // conversationId -> messages (sorted ascending by createdAt)
+  private lastReadAtByConvAndUser = new Map<string, Record<string, number>>();
   private userContexts = new Map<string, UserCheckContext>();
   // Presença: userId -> { lastSeen: number, isOnline: boolean, showOnlineStatus: boolean }
   private userPresence = new Map<string, { lastSeen: number; isOnline: boolean; showOnlineStatus: boolean }>();
   // Digitando: convId -> Map(userId -> lastTypingTimestamp)
   private typingStates = new Map<string, Map<string, number>>();
+  private storageFilePath: string;
+  private persistDisabled: boolean;
 
-  constructor() {
+  constructor(options?: { storageFilePath?: string; ephemeral?: boolean }) {
+    this.storageFilePath =
+      options?.storageFilePath ?? path.resolve(process.cwd(), '.data', 'chat-store.json');
+    this.persistDisabled =
+      options?.ephemeral !== undefined
+        ? Boolean(options.ephemeral)
+        : process.env.HIKARI_EPHEMERAL_TEST_STORE === '1';
+
     this.seedInitialConversations();
+    if (!this.persistDisabled) {
+      this.loadFromDisk();
+    }
+  }
+
+  public resetForTests(ephemeral = true): void {
+    this.persistDisabled = ephemeral;
+    this.clearAll();
+    this.seedInitialConversations();
+  }
+
+  private loadFromDisk(): void {
+    try {
+      if (!fs.existsSync(this.storageFilePath)) return;
+      const raw = fs.readFileSync(this.storageFilePath, 'utf8');
+      if (!raw.trim()) return;
+      const parsed = JSON.parse(raw) as Partial<PersistedChatState>;
+      if (!parsed || typeof parsed !== 'object') return;
+
+      if (parsed.conversations && typeof parsed.conversations === 'object') {
+        for (const [convId, conv] of Object.entries(parsed.conversations)) {
+          if (conv && typeof conv === 'object' && Array.isArray(conv.participants)) {
+            this.conversations.set(convId, conv);
+          }
+        }
+      }
+
+      if (parsed.messages && typeof parsed.messages === 'object') {
+        for (const [convId, msgs] of Object.entries(parsed.messages)) {
+          if (Array.isArray(msgs)) {
+            const sorted = [...msgs].sort((a, b) => a.createdAt - b.createdAt);
+            this.messages.set(convId, sorted);
+          }
+        }
+      }
+
+      if (parsed.lastReadAtByConvAndUser && typeof parsed.lastReadAtByConvAndUser === 'object') {
+        for (const [convId, readMap] of Object.entries(parsed.lastReadAtByConvAndUser)) {
+          if (readMap && typeof readMap === 'object') {
+            this.lastReadAtByConvAndUser.set(convId, { ...readMap });
+          }
+        }
+      }
+    } catch {
+      // Ignore malformed local persistence gracefully
+    }
+  }
+
+  private saveToDisk(): void {
+    if (this.persistDisabled) return;
+    try {
+      const dir = path.dirname(this.storageFilePath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      const conversationsObj: Record<string, PrivateConversation> = {};
+      for (const [id, conv] of this.conversations.entries()) {
+        conversationsObj[id] = conv;
+      }
+      const messagesObj: Record<string, PrivateMessage[]> = {};
+      for (const [id, msgs] of this.messages.entries()) {
+        messagesObj[id] = msgs;
+      }
+      const readObj: Record<string, Record<string, number>> = {};
+      for (const [id, rMap] of this.lastReadAtByConvAndUser.entries()) {
+        readObj[id] = rMap;
+      }
+
+      const payload: PersistedChatState = {
+        version: 1,
+        conversations: conversationsObj,
+        messages: messagesObj,
+        lastReadAtByConvAndUser: readObj,
+      };
+      const tmpPath = `${this.storageFilePath}.${process.pid}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify(payload), 'utf8');
+      fs.renameSync(tmpPath, this.storageFilePath);
+    } catch {
+      // Safe fallback in read-only filesystems
+    }
   }
 
   public registerUserContext(ctx: UserCheckContext): void {
     this.userContexts.set(ctx.id, { ...ctx });
-    // Se o contexto possuir showOnlineStatus explícito, sincroniza também na presença
     if (ctx.showOnlineStatus !== undefined) {
       const existing = this.userPresence.get(ctx.id);
       if (existing) {
@@ -58,7 +157,6 @@ class ChatStore {
     const cleanId = userId.trim();
     if (!cleanId) return;
 
-    // Se showOnlineStatus não foi enviado no payload, tenta obter do UserCheckContext
     let visibility = showOnlineStatus;
     if (visibility === undefined) {
       const ctx = this.userContexts.get(cleanId);
@@ -78,16 +176,9 @@ class ChatStore {
   public isUserOnline(userId: string): boolean {
     const entry = this.userPresence.get(userId);
     if (!entry) return false;
-
-    // Se o usuário optou por ocultar seu status online, outros nunca veem online
     if (!entry.showOnlineStatus) return false;
-
-    // Se foi marcado como offline explicitamente (ex: fechamento da aba)
     if (!entry.isOnline) return false;
-
-    // Expiração automática: considera offline se não houve heartbeat nos últimos 45 segundos
-    const isRecent = Date.now() - entry.lastSeen < 45000;
-    return isRecent;
+    return Date.now() - entry.lastSeen < 45000;
   }
 
   public getUserPresenceSummary(userId: string): { isOnline: boolean; lastSeen?: number } {
@@ -128,7 +219,6 @@ class ChatStore {
 
     for (const [uid, timestamp] of convTyping.entries()) {
       if (now - timestamp > 4500) {
-        // Expirou: limpa para não deixar preso
         convTyping.delete(uid);
       } else if (!excludeUserId || uid !== excludeUserId) {
         active.push(uid);
@@ -144,7 +234,7 @@ class ChatStore {
     const oneHourAgo = now - 60 * 60 * 1000;
     const yesterday = now - 24 * 60 * 60 * 1000;
 
-    // Conversa 1: Kuroha (usr_kuroha) e Ren Amano (usr_hikari_001)
+    // Conversa 1: Kuroha (usr_kuroha) e Ren Amano (usr_hikari_001) — Modo Demonstração
     const conv1Id = getDeterministicConversationId('usr_hikari_001', 'usr_kuroha');
     const msg1: PrivateMessage = {
       id: 'msg_seed_01',
@@ -168,7 +258,7 @@ class ChatStore {
       senderUsername: 'kuroha_void',
       senderAvatarUrl: '/src/assets/images/hikari_follower_avatar_1793518826589.jpg',
       recipientId: 'usr_hikari_001',
-      text: 'Dá uma olhada no anime Frieren: Beyond Journey\'s End se ainda não terminou!',
+      text: "Dá uma olhada no anime Frieren: Beyond Journey's End se ainda não terminou!",
       type: 'link',
       linkPreview: {
         url: 'https://hikari.tv/anime/anime_frieren',
@@ -226,7 +316,7 @@ class ChatStore {
 
     this.messages.set(conv1Id, [msg1, msg1Link]);
 
-    // Conversa 2: Shinji Kazuki (usr_shinji) e Ren Amano (usr_hikari_001)
+    // Conversa 2: Shinji Kazuki (usr_shinji) e Ren Amano (usr_hikari_001) — Modo Demonstração
     const conv2Id = getDeterministicConversationId('usr_hikari_001', 'usr_shinji');
     const msg2: PrivateMessage = {
       id: 'msg_seed_03',
@@ -294,6 +384,16 @@ class ChatStore {
     this.messages.set(conv2Id, [msg2, msg3]);
   }
 
+  public isParticipant(convId: string, userId: string): boolean {
+    const conv = this.conversations.get(convId);
+    if (!conv) return false;
+    return conv.participants.includes(userId);
+  }
+
+  public getLastReadAt(convId: string, userId: string): number {
+    return this.lastReadAtByConvAndUser.get(convId)?.[userId] ?? 0;
+  }
+
   public getUserConversations(userId: string): PrivateConversation[] {
     const list: PrivateConversation[] = [];
     for (const conv of this.conversations.values()) {
@@ -301,6 +401,7 @@ class ChatStore {
         const copy: PrivateConversation = {
           ...conv,
           participantDetails: { ...conv.participantDetails },
+          unreadCounts: { ...conv.unreadCounts },
         };
         for (const pId of copy.participants) {
           if (copy.participantDetails[pId]) {
@@ -313,7 +414,6 @@ class ChatStore {
         list.push(copy);
       }
     }
-    // Ordena da mais recente para a mais antiga
     return list.sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
@@ -326,6 +426,7 @@ class ChatStore {
     const copy: PrivateConversation = {
       ...conv,
       participantDetails: { ...conv.participantDetails },
+      unreadCounts: { ...conv.unreadCounts },
     };
     for (const pId of copy.participants) {
       if (copy.participantDetails[pId]) {
@@ -350,14 +451,13 @@ class ChatStore {
 
     const all = this.messages.get(convId) || [];
     const before = options?.before;
-    const limit = options?.limit ?? 30;
+    const limit = options?.limit ?? 50;
 
     let filtered = all;
     if (before && Number.isFinite(before)) {
       filtered = all.filter((m) => m.createdAt < before);
     }
 
-    // Carregamento progressivo a partir do final (mensagens mais recentes)
     const startIndex = Math.max(0, filtered.length - limit);
     const slice = filtered.slice(startIndex);
     const hasMore = startIndex > 0;
@@ -372,10 +472,10 @@ class ChatStore {
     const convId = getDeterministicConversationId(sender.id, recipient.id);
     const existing = this.conversations.get(convId);
     if (existing) {
-      // Atualiza metadados dos participantes se mudaram
       existing.participantDetails[sender.id] = { ...sender, isOnline: this.isUserOnline(sender.id) };
       existing.participantDetails[recipient.id] = { ...recipient, isOnline: this.isUserOnline(recipient.id) };
-      return { conversation: { ...existing }, isNew: false };
+      this.saveToDisk();
+      return { conversation: { ...existing, unreadCounts: { ...existing.unreadCounts } }, isNew: false };
     }
 
     const now = Date.now();
@@ -395,20 +495,44 @@ class ChatStore {
     };
 
     this.conversations.set(convId, newConv);
-    this.messages.set(convId, []);
+    if (!this.messages.has(convId)) {
+      this.messages.set(convId, []);
+    }
+    this.saveToDisk();
 
-    return { conversation: { ...newConv }, isNew: true };
+    return { conversation: { ...newConv, unreadCounts: { ...newConv.unreadCounts } }, isNew: true };
   }
 
   public addMessage(
-    payload: Omit<PrivateMessage, 'id' | 'createdAt' | 'isRead'> & { id?: string; createdAt?: number }
+    payload: Omit<PrivateMessage, 'id' | 'createdAt' | 'isRead'> & {
+      id?: string;
+      createdAt?: number;
+      recipientSummary?: ParticipantSummary;
+    }
   ): { message: PrivateMessage; conversation: PrivateConversation } {
     const { conversationId, senderId, recipientId, text, type } = payload;
-    let conv = this.conversations.get(conversationId);
+    const deterministicId = getDeterministicConversationId(senderId, recipientId);
+    let conv = this.conversations.get(conversationId) ?? this.conversations.get(deterministicId);
 
-    if (!conv) {
-      const convId = getDeterministicConversationId(senderId, recipientId);
-      conv = this.conversations.get(convId);
+    // Auto-create conversation if sender & recipient are valid and conversation wasn't initialized yet
+    // (only when conversationId matches the deterministic pair ID, preserving Zero-Trust against arbitrary IDs)
+    if (!conv && (!conversationId || conversationId === deterministicId)) {
+      const senderCtx = this.userContexts.get(senderId);
+      const recipientCtx = this.userContexts.get(recipientId);
+      const senderSummary: ParticipantSummary = {
+        id: senderId,
+        displayName: payload.senderName || senderCtx?.displayName || 'Usuário Hikari',
+        username: payload.senderUsername || senderCtx?.username || senderId,
+        avatarUrl: payload.senderAvatarUrl || senderCtx?.avatarUrl || '',
+      };
+      const recipientSummary: ParticipantSummary = payload.recipientSummary ?? {
+        id: recipientId,
+        displayName: recipientCtx?.displayName || 'Usuário Hikari',
+        username: recipientCtx?.username || recipientId,
+        avatarUrl: recipientCtx?.avatarUrl || '',
+      };
+      conv = this.createOrGetConversation(senderSummary, recipientSummary).conversation;
+      conv = this.conversations.get(conv.id)!;
     }
 
     if (!conv) {
@@ -419,13 +543,11 @@ class ChatStore {
       throw new Error('Participante não autorizado nesta conversa.');
     }
 
-    // Validação de Mídia
     const mediaCheck = validateMediaPayload(payload.mediaUrl, type);
     if (!mediaCheck.valid) {
       throw new Error(mediaCheck.error || 'Mídia inválida.');
     }
 
-    // Extração automática de preview para links se não informado
     let linkPreview = payload.linkPreview;
     if (!linkPreview && (type === 'link' || text.includes('http') || text.includes('/anime/'))) {
       linkPreview = extractHikariLinkPreview(text);
@@ -433,6 +555,15 @@ class ChatStore {
 
     const now = payload.createdAt || Date.now();
     const msgId = payload.id || `msg_${now}_${Math.random().toString(36).slice(2, 9)}`;
+
+    const convMessages = this.messages.get(conv.id) || [];
+    const existingMsg = convMessages.find((m) => m.id === msgId);
+    if (existingMsg) {
+      return { message: { ...existingMsg }, conversation: { ...conv, unreadCounts: { ...conv.unreadCounts } } };
+    }
+
+    const recipientLastReadAt = this.getLastReadAt(conv.id, recipientId);
+    const alreadyReadByTimestamp = recipientLastReadAt > 0 && now <= recipientLastReadAt;
 
     const message: PrivateMessage = {
       id: msgId,
@@ -448,33 +579,43 @@ class ChatStore {
       mediaMetadata: payload.mediaMetadata,
       linkPreview,
       reactions: payload.reactions ? { ...payload.reactions } : {},
-      isRead: false,
+      isRead: alreadyReadByTimestamp,
       createdAt: now,
       status: 'sent',
     };
 
-    const convMessages = this.messages.get(conv.id) || [];
     convMessages.push(message);
+    convMessages.sort((a, b) => a.createdAt - b.createdAt);
     this.messages.set(conv.id, convMessages);
 
-    // Atualiza metadados da conversa
-    const currentUnread = conv.unreadCounts[recipientId] || 0;
-    conv.unreadCounts[recipientId] = currentUnread + 1;
+    // Recalculate exact unread count per user from actual unread messages so it never drifts
+    let recipientUnread = 0;
+    for (const m of convMessages) {
+      if (m.recipientId === recipientId && !m.isRead) {
+        recipientUnread++;
+      }
+    }
+    conv.unreadCounts[recipientId] = recipientUnread;
+
+    const latestMsg = convMessages[convMessages.length - 1] ?? message;
     conv.lastMessage = {
-      id: message.id,
-      text: message.text,
-      senderId: message.senderId,
-      senderName: message.senderName,
-      type: message.type,
-      createdAt: message.createdAt,
-      isRead: false,
+      id: latestMsg.id,
+      text: latestMsg.text,
+      senderId: latestMsg.senderId,
+      senderName: latestMsg.senderName,
+      type: latestMsg.type,
+      createdAt: latestMsg.createdAt,
+      isRead: latestMsg.isRead,
     };
-    conv.updatedAt = now;
+    conv.updatedAt = Math.max(conv.updatedAt, latestMsg.createdAt);
 
-    // Remove estado de digitação do remetente ao enviar a mensagem
     this.setTyping(conv.id, senderId, false);
+    this.saveToDisk();
 
-    return { message, conversation: { ...conv } };
+    return {
+      message: { ...message },
+      conversation: { ...conv, unreadCounts: { ...conv.unreadCounts } },
+    };
   }
 
   /**
@@ -512,7 +653,6 @@ class ChatStore {
     let action: 'added' | 'removed' = 'added';
 
     if (userIndex !== -1) {
-      // Já havia reagido com este emoji -> remove a reação
       const updated = currentList.filter((id) => id !== userId);
       action = 'removed';
       if (updated.length === 0) {
@@ -521,24 +661,32 @@ class ChatStore {
         targetMsg.reactions[emoji] = updated;
       }
     } else {
-      // Adiciona a reação garantindo ausência de duplicatas
       targetMsg.reactions[emoji] = [...new Set([...currentList, userId])];
       action = 'added';
     }
 
+    this.saveToDisk();
     return { message: { ...targetMsg }, action };
   }
 
-  public markAsRead(convId: string, readerUserId: string): { updatedCount: number } {
+  public markAsRead(
+    convId: string,
+    readerUserId: string
+  ): { updatedCount: number; lastReadAt: number } {
     const conv = this.conversations.get(convId);
+    const now = Date.now();
     if (!conv || !conv.participants.includes(readerUserId)) {
-      return { updatedCount: 0 };
+      return { updatedCount: 0, lastReadAt: now };
     }
 
     conv.unreadCounts[readerUserId] = 0;
     if (conv.lastMessage && conv.lastMessage.senderId !== readerUserId) {
       conv.lastMessage.isRead = true;
     }
+
+    const readMap = this.lastReadAtByConvAndUser.get(convId) ?? {};
+    readMap[readerUserId] = Math.max(readMap[readerUserId] ?? 0, now);
+    this.lastReadAtByConvAndUser.set(convId, readMap);
 
     const convMessages = this.messages.get(convId) || [];
     let updatedCount = 0;
@@ -549,12 +697,14 @@ class ChatStore {
       }
     }
 
-    return { updatedCount };
+    this.saveToDisk();
+    return { updatedCount, lastReadAt: readMap[readerUserId] };
   }
 
   public clearAll(): void {
     this.conversations.clear();
     this.messages.clear();
+    this.lastReadAtByConvAndUser.clear();
     this.userContexts.clear();
     this.userPresence.clear();
     this.typingStates.clear();

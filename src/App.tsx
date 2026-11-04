@@ -15,8 +15,21 @@ import {
   syncUserPrivacyContext,
   subscribeToUnreadMessagesCount,
   canUserMessageRecipient,
+  clearChatSessionMemoryCache,
+  setActiveChatSessionUser,
   type UserCheckContext,
 } from './services/chatService';
+import {
+  syncOwnerSocialWorkspace,
+  fetchAuthorizedUserProfileComplete,
+  followRemoteUser,
+  unfollowRemoteUser,
+  respondRemoteFollowRequest,
+  fetchOwnerNotifications,
+  markOwnerNotificationsRead,
+  type AuthorizedPublicProfilePayload,
+  type OwnerSocialNotificationsState,
+} from './services/socialService';
 
 const LazyAnimeListTab = lazy(() =>
   import('./components/tabs/AnimeListTab').then((m) => ({ default: m.AnimeListTab }))
@@ -98,9 +111,11 @@ import {
   adjustCachedPublicProfileFollowersCount,
   buildProfileFromFirebaseUser,
   createEmptyUserWorkspace,
+  flushPendingWorkspaceWrites,
   getUserWorkspaceStorageKey,
-  loadPublicProfileFromFirestore,
+  loadFullPublicProfileFromFirestore,
   loadUserWorkspaceFromFirestore,
+  purgeCachedPublicProfileProjection,
   readLocalUserWorkspace,
   readPublicProfilesMap,
   saveUserWorkspaceToFirestore,
@@ -259,6 +274,103 @@ function mergeNotificationsWithSeed(
   const persistedIds = new Set(persisted.map((n) => n.id));
   const newFromSeed = seed.filter((n) => !persistedIds.has(n.id));
   return [...newFromSeed, ...persisted];
+}
+
+function readTargetProfileFromBrowserUrl(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const pathname = window.location.pathname || '/';
+    if (pathname.startsWith('/admin')) return null;
+
+    const pathMatch = pathname.match(/^\/(?:u|perfil|profile)\/([^/?#]+)/i);
+    if (pathMatch?.[1]) {
+      const decoded = decodeURIComponent(pathMatch[1]).trim().replace(/^@+/, '');
+      if (decoded) return decoded;
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    const queryTarget = (params.get('profile') || params.get('user') || '').trim().replace(/^@+/, '');
+    return queryTarget || null;
+  } catch {
+    return null;
+  }
+}
+
+function mergeServerSocialIntoWorkspace(
+  prev: UserPersonalWorkspace,
+  social: OwnerSocialNotificationsState
+): { nextWorkspace: UserPersonalWorkspace; changed: boolean } {
+  const prevNotifById = new Map(prev.notifications.map((n) => [n.id, n]));
+  const mergedNotifs: NotificationItem[] = [];
+  const seenIds = new Set<string>();
+
+  for (const incoming of social.notifications) {
+    if (!incoming || !incoming.id || seenIds.has(incoming.id)) continue;
+    seenIds.add(incoming.id);
+    const localExisting = prevNotifById.get(incoming.id);
+    mergedNotifs.push(
+      localExisting && localExisting.isRead && !incoming.isRead
+        ? { ...incoming, isRead: true }
+        : incoming
+    );
+  }
+  for (const localOnly of prev.notifications) {
+    if (localOnly && localOnly.id && !seenIds.has(localOnly.id)) {
+      seenIds.add(localOnly.id);
+      mergedNotifs.push(localOnly);
+    }
+  }
+
+  const nextFollowers =
+    social.followers.length > 0 || prev.followers.length === 0 ? social.followers : prev.followers;
+  const nextFollowing =
+    social.following.length > 0 || prev.following.length === 0 ? social.following : prev.following;
+  const nextFollowRequests = social.followRequests;
+  const nextFollowingIds =
+    social.followingIds.length > 0 || prev.followingIds.length === 0
+      ? social.followingIds
+      : prev.followingIds;
+  const nextRequestedIds = social.requestedIds;
+
+  const nextFollowersCount = Math.max(social.followersCount, nextFollowers.length);
+  const nextFollowingCount = Math.max(social.followingCount, nextFollowingIds.length);
+
+  const prevNotifSig = prev.notifications
+    .map((n) => `${n.id}:${n.isRead ? 1 : 0}:${n.handled || ''}`)
+    .join('|');
+  const nextNotifSig = mergedNotifs
+    .map((n) => `${n.id}:${n.isRead ? 1 : 0}:${n.handled || ''}`)
+    .join('|');
+
+  const countsChanged =
+    (prev.profileOverrides.followersCount ?? 0) !== nextFollowersCount ||
+    (prev.profileOverrides.followingCount ?? 0) !== nextFollowingCount ||
+    prev.followRequests.length !== nextFollowRequests.length ||
+    prev.followers.length !== nextFollowers.length ||
+    prev.followingIds.join(',') !== nextFollowingIds.join(',') ||
+    prev.requestedIds.join(',') !== nextRequestedIds.join(',');
+
+  if (prevNotifSig === nextNotifSig && !countsChanged) {
+    return { nextWorkspace: prev, changed: false };
+  }
+
+  return {
+    changed: true,
+    nextWorkspace: {
+      ...prev,
+      notifications: mergedNotifs,
+      followers: nextFollowers,
+      following: nextFollowing,
+      followRequests: nextFollowRequests,
+      followingIds: nextFollowingIds,
+      requestedIds: nextRequestedIds,
+      profileOverrides: {
+        ...prev.profileOverrides,
+        followersCount: nextFollowersCount,
+        followingCount: nextFollowingCount,
+      },
+    },
+  };
 }
 
 function loadInitialDemoProfileData(): PersistedDemoProfileData {
@@ -438,8 +550,22 @@ export default function App() {
   const [authSession, setAuthSession] = useState<AuthSessionState | null>(null);
   const [publicProfilesRevision, setPublicProfilesRevision] = useState(0);
   const [remoteVisitedProfiles, setRemoteVisitedProfiles] = useState<Record<string, UserProfile>>({});
+  const [remoteVisitedDetails, setRemoteVisitedDetails] = useState<
+    Record<string, AuthorizedPublicProfilePayload>
+  >({});
+  const [privateBlockedProfiles, setPrivateBlockedProfiles] = useState<Record<string, UserProfile>>(
+    {}
+  );
+  const [visitingStatusByTarget, setVisitingStatusByTarget] = useState<
+    Record<string, 'loading' | 'ready' | 'private_blocked' | 'not_found'>
+  >({});
 
-  const [activeProfileId, setActiveProfileId] = useState<string>(CURRENT_USER.id);
+  const authEpochRef = useRef(0);
+  const isHydratedFullAnimesRef = useRef(false);
+
+  const [activeProfileId, setActiveProfileId] = useState<string>(
+    () => readTargetProfileFromBrowserUrl() || CURRENT_USER.id
+  );
 
   // Tab & Anime List Filter / Detail Navigation State
   const [activeTab, setActiveTab] = useState<ProfileTab>('overview');
@@ -481,7 +607,7 @@ export default function App() {
   });
   const pendingAdminReturnRef = useRef<boolean>(false);
 
-  // Sincronização da rota /admin com popstate do navegador
+  // Sincronização das rotas /admin e URL direta de perfil (/?profile=... ou /u/...) com popstate
   useEffect(() => {
     const handlePopState = () => {
       if (typeof window !== 'undefined') {
@@ -493,12 +619,18 @@ export default function App() {
           setCurrentView('admin');
         } else {
           setCurrentView('app');
+          const urlTarget = readTargetProfileFromBrowserUrl();
+          if (urlTarget) {
+            setActiveProfileId(urlTarget);
+          } else if (user?.uid) {
+            setActiveProfileId(user.uid);
+          }
         }
       }
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, []);
+  }, [user?.uid]);
 
   const handleNavigateToAdmin = useCallback(() => {
     if (typeof window !== 'undefined' && window.location.pathname !== '/admin') {
@@ -627,16 +759,27 @@ export default function App() {
   // Hydrate or wipe authenticated workspace strictly by Firebase UID on every auth change
   useEffect(() => {
     let cancelled = false;
+    authEpochRef.current += 1;
+    const currentEpoch = authEpochRef.current;
 
     if (!user?.uid) {
       hasLoadedFullAnimesRef.current = false;
+      isHydratedFullAnimesRef.current = false;
+      clearChatSessionMemoryCache();
       clearAllMemoryCache();
+      clearChunkedStorageMemoryCache();
       clearLastFetchedAniListFavorites();
       clearSessionWorkspaceCaches();
       setAuthSession(null);
       setRemoteVisitedProfiles({});
+      setRemoteVisitedDetails({});
+      setPrivateBlockedProfiles({});
+      setVisitingStatusByTarget({});
+      setUnreadMessagesCount(0);
+      setIsChatOpen(false);
+      setChatRecipientId(null);
       setHasOpenedSettings(false);
-      setActiveProfileId(CURRENT_USER.id);
+      setActiveProfileId(readTargetProfileFromBrowserUrl() || CURRENT_USER.id);
       setSelectedAnimeStatusFilter(undefined);
       setSelectedAnimeDetailId(null);
       setActiveTab('overview');
@@ -646,22 +789,34 @@ export default function App() {
     }
 
     const targetUid = user.uid;
-    hasLoadedFullAnimesRef.current = false;
+    hasLoadedFullAnimesRef.current = true;
+    isHydratedFullAnimesRef.current = false;
+    clearChatSessionMemoryCache(targetUid);
+    setActiveChatSessionUser(targetUid);
     clearAllMemoryCache();
+    clearChunkedStorageMemoryCache();
     clearLastFetchedAniListFavorites();
     clearSessionWorkspaceCaches(targetUid);
 
     const localWorkspace =
       readLocalUserWorkspace(targetUid) ?? createEmptyUserWorkspace(targetUid);
 
+    const initialUrlTarget = readTargetProfileFromBrowserUrl();
+
     setIsDemoPreview(false);
     setIsSettingsOpen(false);
     setHasOpenedSettings(false);
     setIsFollowersOpen(false);
     setIsNotifOpen(false);
+    setIsChatOpen(false);
+    setChatRecipientId(null);
+    setRemoteVisitedProfiles({});
+    setRemoteVisitedDetails({});
+    setPrivateBlockedProfiles({});
+    setVisitingStatusByTarget({});
     setSelectedAnimeStatusFilter(undefined);
     setSelectedAnimeDetailId(null);
-    setActiveProfileId(targetUid);
+    setActiveProfileId(initialUrlTarget || targetUid);
     setActiveTab('overview');
     setAuthSession({
       uid: targetUid,
@@ -683,22 +838,27 @@ export default function App() {
       setCurrentView('admin');
     }
 
-    void hydrateWorkspaceFromIndexedDb(targetUid).then((indexedWorkspace) => {
-      if (cancelled || !indexedWorkspace) return;
-      setAuthSession((prev) => {
-        if (!prev || prev.uid !== targetUid) return prev;
-        if (indexedWorkspace.animes.length >= prev.workspace.animes.length) {
-          return {
-            ...prev,
-            workspace: indexedWorkspace,
-          };
-        }
-        return prev;
-      });
-    });
+    void (async () => {
+      const indexedWorkspace = await hydrateWorkspaceFromIndexedDb(targetUid);
+      if (cancelled || authEpochRef.current !== currentEpoch) return;
 
-    void loadUserWorkspaceFromFirestore(targetUid, { loadAllAnimes: false }).then((remote) => {
-      if (cancelled) return;
+      if (indexedWorkspace) {
+        setAuthSession((prev) => {
+          if (!prev || prev.uid !== targetUid) return prev;
+          if (indexedWorkspace.animes.length >= prev.workspace.animes.length) {
+            return {
+              ...prev,
+              workspace: indexedWorkspace,
+            };
+          }
+          return prev;
+        });
+      }
+
+      const remote = await loadUserWorkspaceFromFirestore(targetUid, { loadAllAnimes: true });
+      if (cancelled || authEpochRef.current !== currentEpoch) return;
+
+      isHydratedFullAnimesRef.current = true;
       setAuthSession((prev) => {
         if (!prev || prev.uid !== targetUid) return prev;
         if (
@@ -706,7 +866,16 @@ export default function App() {
           remote.workspace.uid === targetUid &&
           remote.workspace.updatedAtMs >= prev.workspace.updatedAtMs
         ) {
-          const persisted = writeLocalUserWorkspace(targetUid, remote.workspace);
+          // Never overwrite a fuller hydrated IndexedDB anime list if remote had an unmigrated partial slice
+          const safeAnimes =
+            remote.workspace.animes.length >= prev.workspace.animes.length ||
+            remote.workspace.updatedAtMs > prev.workspace.updatedAtMs
+              ? remote.workspace.animes
+              : prev.workspace.animes;
+          const persisted = writeLocalUserWorkspace(targetUid, {
+            ...remote.workspace,
+            animes: safeAnimes,
+          });
           return {
             uid: targetUid,
             workspace: persisted,
@@ -718,22 +887,26 @@ export default function App() {
           firestoreStatus: remote.status,
         };
       });
-    });
+    })();
 
     return () => {
       cancelled = true;
     };
   }, [user?.uid]);
 
-  // On-demand chunk loading strictly when navigating to the 'animes' tab
+  // Additional safeguard when opening 'animes' tab if full chunks were not yet hydrated
   const hasLoadedFullAnimesRef = useRef(false);
   useEffect(() => {
     if (activeTab === 'animes' && isAuthenticated && user?.uid && !hasLoadedFullAnimesRef.current) {
       hasLoadedFullAnimesRef.current = true;
-      void loadUserWorkspaceFromFirestore(user.uid, { loadAllAnimes: true }).then((remote) => {
+      const uidAtRequest = user.uid;
+      const epochAtRequest = authEpochRef.current;
+      void loadUserWorkspaceFromFirestore(uidAtRequest, { loadAllAnimes: true }).then((remote) => {
+        if (authEpochRef.current !== epochAtRequest) return;
         if (remote.workspace && remote.workspace.animes.length > 0) {
           setAuthSession((prev) => {
-            if (!prev || prev.uid !== user.uid) return prev;
+            if (!prev || prev.uid !== uidAtRequest) return prev;
+            if (remote.workspace!.animes.length < prev.workspace.animes.length) return prev;
             return {
               ...prev,
               workspace: {
@@ -913,7 +1086,13 @@ export default function App() {
           updatedAtMs: Date.now(),
         });
         const resolvedProfile = buildProfileFromFirebaseUser(user, stamped.profileOverrides);
-        syncPublicProfileProjection(resolvedProfile, stamped.animes, stamped.updatedAtMs);
+        syncPublicProfileProjection(resolvedProfile, stamped.animes, stamped.updatedAtMs, {
+          favoriteCharacters: stamped.favoriteCharacters,
+          favoriteCompanies: stamped.favoriteCompanies,
+          favoritePeople: stamped.favoritePeople,
+          activities: stamped.activities,
+          comments: stamped.comments,
+        });
         setPublicProfilesRevision((r) => r + 1);
         void saveUserWorkspaceToFirestore(targetUid, resolvedProfile, stamped).then(
           (syncStatus) => {
@@ -938,15 +1117,108 @@ export default function App() {
     return buildProfileFromFirebaseUser(user, activeAuthWorkspace.profileOverrides);
   }, [isAuthenticated, user, userRevision, activeAuthWorkspace]);
 
-  // Keep sanitized public projection synced whenever authenticated profile or anime list hydrates/changes
+  // Keep sanitized public projection AND backend social store synced whenever authenticated profile or lists change
   useEffect(() => {
-    if (!isAuthenticated || !authenticatedProfile || !activeAuthWorkspace) return;
+    if (!isAuthenticated || !user?.uid || !authenticatedProfile || !activeAuthWorkspace) return;
+    const ownerUid = user.uid;
+    const epoch = authEpochRef.current;
+
     syncPublicProfileProjection(
       authenticatedProfile,
       activeAuthWorkspace.animes,
-      activeAuthWorkspace.updatedAtMs || Date.now()
+      activeAuthWorkspace.updatedAtMs || Date.now(),
+      {
+        favoriteCharacters: activeAuthWorkspace.favoriteCharacters,
+        favoriteCompanies: activeAuthWorkspace.favoriteCompanies,
+        favoritePeople: activeAuthWorkspace.favoritePeople,
+        activities: activeAuthWorkspace.activities,
+        comments: activeAuthWorkspace.comments,
+      }
     );
-  }, [isAuthenticated, authenticatedProfile, activeAuthWorkspace]);
+
+    const timer = window.setTimeout(() => {
+      if (authEpochRef.current !== epoch) return;
+      void syncOwnerSocialWorkspace(ownerUid, {
+        profile: authenticatedProfile,
+        animes: activeAuthWorkspace.animes,
+        animesComplete: isHydratedFullAnimesRef.current,
+        favoriteCharacters: activeAuthWorkspace.favoriteCharacters,
+        favoriteCompanies: activeAuthWorkspace.favoriteCompanies,
+        favoritePeople: activeAuthWorkspace.favoritePeople,
+        activities: activeAuthWorkspace.activities,
+        comments: activeAuthWorkspace.comments,
+        blockedIds: activeAuthWorkspace.blockedIds,
+        updatedAtMs: activeAuthWorkspace.updatedAtMs || Date.now(),
+      }).then((serverSocial) => {
+        if (!serverSocial || authEpochRef.current !== epoch) return;
+        setAuthSession((prev) => {
+          if (!prev || prev.uid !== ownerUid) return prev;
+          const { nextWorkspace, changed } = mergeServerSocialIntoWorkspace(
+            prev.workspace,
+            serverSocial
+          );
+          if (!changed) return prev;
+          const persisted = writeLocalUserWorkspace(ownerUid, nextWorkspace);
+          return {
+            ...prev,
+            workspace: persisted,
+          };
+        });
+      });
+    }, 200);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [isAuthenticated, user?.uid, authenticatedProfile, activeAuthWorkspace]);
+
+  // Refresh authoritative incoming follower & follow-back notifications on bell/modal open or tab focus
+  useEffect(() => {
+    if (!isAuthenticated || !user?.uid) return;
+    const ownerUid = user.uid;
+    const epoch = authEpochRef.current;
+    let lastRefreshAt = 0;
+
+    const refreshNotificationsFromServer = () => {
+      const now = Date.now();
+      if (now - lastRefreshAt < 1500) return;
+      lastRefreshAt = now;
+
+      void fetchOwnerNotifications(ownerUid).then((serverSocial) => {
+        if (!serverSocial || authEpochRef.current !== epoch) return;
+        setAuthSession((prev) => {
+          if (!prev || prev.uid !== ownerUid) return prev;
+          const { nextWorkspace, changed } = mergeServerSocialIntoWorkspace(
+            prev.workspace,
+            serverSocial
+          );
+          if (!changed) return prev;
+          const persisted = writeLocalUserWorkspace(ownerUid, nextWorkspace);
+          return {
+            ...prev,
+            workspace: persisted,
+          };
+        });
+      });
+    };
+
+    if (isNotifOpen || isFollowersOpen) {
+      refreshNotificationsFromServer();
+    }
+
+    const handleVisibilityOrFocus = () => {
+      if (typeof document === 'undefined' || document.visibilityState !== 'hidden') {
+        refreshNotificationsFromServer();
+      }
+    };
+
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+    return () => {
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+    };
+  }, [isAuthenticated, user?.uid, isNotifOpen, isFollowersOpen]);
 
   const authFollowingIds = useMemo(
     () => new Set(activeAuthWorkspace?.followingIds ?? []),
@@ -1089,72 +1361,291 @@ export default function App() {
     currentUser.id,
   ]);
 
-  // Hydrate visited profile document from Firestore when not already cached locally
+  // Resolve target profile ID or @username cleanly without ever falling back a visitor view to the owner's account
+  const resolvedActiveTargetId = useMemo(() => {
+    if (!isAuthenticated || !user?.uid) return activeProfileId;
+    const clean = activeProfileId.trim().replace(/^@+/, '').toLowerCase();
+    if (
+      activeProfileId === user.uid ||
+      (authenticatedProfile?.username && authenticatedProfile.username.toLowerCase() === clean)
+    ) {
+      return user.uid;
+    }
+    for (const prof of Object.values(authOtherProfilesMap)) {
+      if (prof.id === activeProfileId || prof.username.toLowerCase() === clean) {
+        return prof.id;
+      }
+    }
+    return activeProfileId;
+  }, [
+    isAuthenticated,
+    user?.uid,
+    activeProfileId,
+    authenticatedProfile?.username,
+    authOtherProfilesMap,
+  ]);
+
+  // Strict account isolation: isOwnProfile is TRUE if and only if resolvedActiveTargetId matches the authenticated user's UID
+  const isOwnProfile = isAuthenticated
+    ? Boolean(user?.uid && resolvedActiveTargetId === user.uid)
+    : activeProfileId === CURRENT_USER.id;
+
+  // Authoritative backend + Firestore hydration of visited profiles (full anime pagination + Zero-Trust privacy blocking)
   useEffect(() => {
-    if (!isAuthenticated || !user?.uid) return;
-    if (!activeProfileId || activeProfileId === user.uid) return;
-    if (authPublicProfilesMap[activeProfileId] || remoteVisitedProfiles[activeProfileId]) return;
+    if (!isAuthenticated || !user?.uid || isOwnProfile) return;
+    const targetRef = resolvedActiveTargetId.trim();
+    if (!targetRef) return;
 
     let cancelled = false;
-    void loadPublicProfileFromFirestore(activeProfileId).then((loaded) => {
-      if (cancelled || !loaded) return;
-      setRemoteVisitedProfiles((prev) => ({
-        ...prev,
-        [loaded.id]: loaded,
-      }));
-    });
+    const epoch = authEpochRef.current;
+
+    setVisitingStatusByTarget((prev) => ({
+      ...prev,
+      [targetRef]: 'loading',
+    }));
+
+    void (async () => {
+      const apiResult = await fetchAuthorizedUserProfileComplete(targetRef);
+      if (cancelled || authEpochRef.current !== epoch) return;
+
+      if (apiResult.status === 'private_blocked') {
+        const stub =
+          apiResult.profileStub ??
+          authOtherProfilesMap[targetRef] ?? {
+            ...NEUTRAL_LOADING_PROFILE,
+            id: targetRef,
+            username: targetRef.replace(/^@+/, ''),
+            displayName: targetRef.replace(/^@+/, ''),
+            isPrivate: true,
+          };
+        const lockedStub: UserProfile = {
+          ...stub,
+          isPrivate: true,
+          bannerUrl: '',
+          bio: '',
+          showCommentsOnProfile: false,
+          privacySettings: {
+            showAnimeList: false,
+            showFavorites: false,
+            showActivity: false,
+            showCommentsOnProfile: false,
+          },
+        };
+
+        purgeCachedPublicProfileProjection(lockedStub.id, lockedStub);
+        setPublicProfilesRevision((r) => r + 1);
+        setRemoteVisitedDetails((prev) => {
+          const next = { ...prev };
+          delete next[targetRef];
+          delete next[lockedStub.id];
+          return next;
+        });
+        setPrivateBlockedProfiles((prev) => ({
+          ...prev,
+          [targetRef]: lockedStub,
+          [lockedStub.id]: lockedStub,
+        }));
+        setRemoteVisitedProfiles((prev) => ({
+          ...prev,
+          [lockedStub.id]: lockedStub,
+        }));
+        setVisitingStatusByTarget((prev) => ({
+          ...prev,
+          [targetRef]: 'private_blocked',
+          [lockedStub.id]: 'private_blocked',
+        }));
+        if (activeProfileId !== lockedStub.id) {
+          setActiveProfileId(lockedStub.id);
+        }
+        return;
+      }
+
+      if (apiResult.status === 'ok') {
+        const loaded = apiResult.data;
+        const resolvedId = loaded.profile.id;
+        setPrivateBlockedProfiles((prev) => {
+          if (!prev[targetRef] && !prev[resolvedId]) return prev;
+          const next = { ...prev };
+          delete next[targetRef];
+          delete next[resolvedId];
+          return next;
+        });
+        setRemoteVisitedDetails((prev) => ({
+          ...prev,
+          [resolvedId]: loaded,
+        }));
+        setRemoteVisitedProfiles((prev) => ({
+          ...prev,
+          [resolvedId]: loaded.profile,
+        }));
+        setVisitingStatusByTarget((prev) => ({
+          ...prev,
+          [targetRef]: 'ready',
+          [resolvedId]: 'ready',
+        }));
+        if (activeProfileId !== resolvedId) {
+          setActiveProfileId(resolvedId);
+        }
+        return;
+      }
+
+      // Fallback to Firestore chunked public_projection if not yet in socialStore
+      const firestoreProj = await loadFullPublicProfileFromFirestore(targetRef);
+      if (cancelled || authEpochRef.current !== epoch) return;
+
+      if (firestoreProj) {
+        const resolvedId = firestoreProj.profile.id;
+        setRemoteVisitedDetails((prev) => ({
+          ...prev,
+          [resolvedId]: {
+            isOwner: false,
+            isPrivateBlocked: false,
+            profile: firestoreProj.profile,
+            animeStats: firestoreProj.animeStats,
+            totalAnimes: firestoreProj.publicAnimes.length,
+            animes: firestoreProj.publicAnimes,
+            hasMoreAnimes: false,
+            nextAnimeOffset: null,
+            favoriteCharacters: firestoreProj.favoriteCharacters ?? [],
+            favoriteCompanies: firestoreProj.favoriteCompanies ?? [],
+            favoritePeople: firestoreProj.favoritePeople ?? [],
+            activities: firestoreProj.publicActivities ?? [],
+            comments: firestoreProj.publicComments ?? [],
+            followers: [],
+            following: [],
+            updatedAtMs: firestoreProj.updatedAtMs,
+          },
+        }));
+        setRemoteVisitedProfiles((prev) => ({
+          ...prev,
+          [resolvedId]: firestoreProj.profile,
+        }));
+        setVisitingStatusByTarget((prev) => ({
+          ...prev,
+          [targetRef]: 'ready',
+          [resolvedId]: 'ready',
+        }));
+      } else {
+        setVisitingStatusByTarget((prev) => ({
+          ...prev,
+          [targetRef]: 'not_found',
+        }));
+      }
+    })();
+
     return () => {
       cancelled = true;
     };
-  }, [isAuthenticated, user?.uid, activeProfileId, authPublicProfilesMap, remoteVisitedProfiles]);
+  }, [isAuthenticated, user?.uid, isOwnProfile, resolvedActiveTargetId]);
 
-  // Strictly separate authenticated user profile from Demo Mode profiles
-  const isOwnProfile = isAuthenticated
-    ? activeProfileId === currentUser.id || !authOtherProfilesMap[activeProfileId]
-    : activeProfileId === CURRENT_USER.id;
+  const activeProfile: UserProfile = useMemo(() => {
+    if (isAuthenticated) {
+      if (isOwnProfile) {
+        return currentUser;
+      }
+      if (privateBlockedProfiles[resolvedActiveTargetId]) {
+        return privateBlockedProfiles[resolvedActiveTargetId];
+      }
+      if (remoteVisitedDetails[resolvedActiveTargetId]) {
+        return remoteVisitedDetails[resolvedActiveTargetId].profile;
+      }
+      if (authOtherProfilesMap[resolvedActiveTargetId]) {
+        return authOtherProfilesMap[resolvedActiveTargetId];
+      }
+      const cleanLabel = activeProfileId.trim().replace(/^@+/, '') || 'usuario';
+      return {
+        ...NEUTRAL_LOADING_PROFILE,
+        id: resolvedActiveTargetId,
+        username: cleanLabel,
+        displayName: cleanLabel,
+      };
+    }
 
-  const activeProfile: UserProfile = isAuthenticated
-    ? isOwnProfile
-      ? currentUser
-      : authOtherProfilesMap[activeProfileId] || currentUser
-    : isOwnProfile
-    ? demoProfile
-    : demoOtherProfiles[activeProfileId] || OTHER_USERS[activeProfileId] || demoProfile;
+    return isOwnProfile
+      ? demoProfile
+      : demoOtherProfiles[activeProfileId] || OTHER_USERS[activeProfileId] || demoProfile;
+  }, [
+    isAuthenticated,
+    isOwnProfile,
+    currentUser,
+    privateBlockedProfiles,
+    resolvedActiveTargetId,
+    remoteVisitedDetails,
+    authOtherProfilesMap,
+    activeProfileId,
+    demoProfile,
+    demoOtherProfiles,
+  ]);
 
   const isFollowingActive = followingIds.has(activeProfile.id);
   const isRequestedActive = requestedIds.has(activeProfile.id);
   const isBlockedActive = blockedIds.has(activeProfile.id);
 
-  // Check if active profile is private and locked for viewer
-  const isPrivateLocked = !isOwnProfile && activeProfile.isPrivate && !isFollowingActive;
+  // Strict privacy gate: when a profile is private, ALL non-owners (including previous followers) are blocked
+  const isPrivateLocked =
+    !isOwnProfile &&
+    (Boolean(activeProfile.isPrivate) ||
+      Boolean(privateBlockedProfiles[activeProfile.id]) ||
+      Boolean(privateBlockedProfiles[resolvedActiveTargetId]) ||
+      visitingStatusByTarget[resolvedActiveTargetId] === 'private_blocked');
 
   // Real data-level privacy gate for anime lists:
   // Owner always accesses own lists; visitors only access when profile is unlocked AND showAnimeList !== false
   const canAccessActiveProfileAnimeList =
     isOwnProfile || (!isPrivateLocked && activeProfile.privacySettings?.showAnimeList !== false);
 
-  // Aggregated numeric stats remain visible even when anime lists are private
+  const visitedAuthorizedPayload =
+    !isOwnProfile && !isPrivateLocked ? remoteVisitedDetails[activeProfile.id] ?? null : null;
+  const visitedCachedProjection =
+    !isOwnProfile && !isPrivateLocked ? authPublicProfilesMap[activeProfile.id] ?? null : null;
+
+  // Numeric stats are withheld completely when isPrivateLocked
   const activeProfileAnimeStats = useMemo(() => {
     if (isOwnProfile) {
       return computeAnimeStats(animes);
     }
+    if (isPrivateLocked || activeProfile.privacySettings?.showAnimeList === false) {
+      return EMPTY_ANIME_STATS;
+    }
     if (isAuthenticated) {
-      return authPublicProfilesMap[activeProfile.id]?.animeStats ?? EMPTY_ANIME_STATS;
+      if (visitedAuthorizedPayload) {
+        return visitedAuthorizedPayload.animeStats;
+      }
+      if (visitedCachedProjection) {
+        return visitedCachedProjection.animeStats;
+      }
+      if (activeProfile.id === AUTHORIZED_ADMIN_UID) {
+        return computeAnimeStats(AETHER_ANIMES);
+      }
+      return EMPTY_ANIME_STATS;
     }
     if (activeProfile.id === AUTHORIZED_ADMIN_UID) {
       return computeAnimeStats(AETHER_ANIMES);
     }
     return computeAnimeStats(demoAnimes);
-  }, [isOwnProfile, isAuthenticated, animes, authPublicProfilesMap, activeProfile.id, demoAnimes]);
+  }, [
+    isOwnProfile,
+    isPrivateLocked,
+    activeProfile.privacySettings?.showAnimeList,
+    activeProfile.id,
+    isAuthenticated,
+    animes,
+    visitedAuthorizedPayload,
+    visitedCachedProjection,
+    demoAnimes,
+  ]);
 
-  const activeProfileStatusCounts = useMemo<Record<AnimeStatus, number>>(() => ({
-    all: activeProfileAnimeStats.totalEntries,
-    watching: activeProfileAnimeStats.watchingCount,
-    completed: activeProfileAnimeStats.completedCount,
-    planned: activeProfileAnimeStats.plannedCount,
-    on_hold: activeProfileAnimeStats.onHoldCount,
-    dropped: activeProfileAnimeStats.droppedCount,
-  }), [activeProfileAnimeStats]);
+  const activeProfileStatusCounts = useMemo<Record<AnimeStatus, number>>(
+    () => ({
+      all: activeProfileAnimeStats.totalEntries,
+      watching: activeProfileAnimeStats.watchingCount,
+      completed: activeProfileAnimeStats.completedCount,
+      planned: activeProfileAnimeStats.plannedCount,
+      on_hold: activeProfileAnimeStats.onHoldCount,
+      dropped: activeProfileAnimeStats.droppedCount,
+    }),
+    [activeProfileAnimeStats]
+  );
 
   // Raw anime entries are strictly withheld when !canAccessActiveProfileAnimeList
   const exposedAnimes = useMemo<AnimeItem[]>(() => {
@@ -1165,7 +1656,16 @@ export default function App() {
       return animes;
     }
     if (isAuthenticated) {
-      return authPublicProfilesMap[activeProfile.id]?.publicAnimes ?? [];
+      if (visitedAuthorizedPayload) {
+        return visitedAuthorizedPayload.animes;
+      }
+      if (visitedCachedProjection) {
+        return visitedCachedProjection.publicAnimes;
+      }
+      if (activeProfile.id === AUTHORIZED_ADMIN_UID) {
+        return AETHER_ANIMES;
+      }
+      return [];
     }
     if (activeProfile.id === AUTHORIZED_ADMIN_UID) {
       return AETHER_ANIMES;
@@ -1176,45 +1676,101 @@ export default function App() {
     isOwnProfile,
     isAuthenticated,
     animes,
-    authPublicProfilesMap,
+    visitedAuthorizedPayload,
+    visitedCachedProjection,
     activeProfile.id,
     demoAnimes,
   ]);
 
   // Memoize favorites count to avoid O(N) array filtering directly inside the JSX render loop
   const exposedFavoritesCount = useMemo(() => {
+    if (!isOwnProfile && (isPrivateLocked || activeProfile.privacySettings?.showFavorites === false)) {
+      return 0;
+    }
     let count = 0;
     for (let i = 0; i < exposedAnimes.length; i++) {
       if (exposedAnimes[i].isFavorite) count++;
     }
     return count;
-  }, [exposedAnimes]);
+  }, [exposedAnimes, isOwnProfile, isPrivateLocked, activeProfile.privacySettings?.showFavorites]);
+
+  const canAccessVisitedFavorites =
+    isOwnProfile || (!isPrivateLocked && activeProfile.privacySettings?.showFavorites !== false);
+  const canAccessVisitedActivity =
+    isOwnProfile || (!isPrivateLocked && activeProfile.privacySettings?.showActivity !== false);
+  const canAccessVisitedComments =
+    isOwnProfile ||
+    (!isPrivateLocked &&
+      (activeProfile.privacySettings?.showCommentsOnProfile ?? activeProfile.showCommentsOnProfile) !==
+        false);
 
   const displayedFavoriteCharacters = isAuthenticated
     ? isOwnProfile
       ? activeAuthWorkspace?.favoriteCharacters ?? []
+      : canAccessVisitedFavorites
+      ? visitedAuthorizedPayload?.favoriteCharacters ??
+        visitedCachedProjection?.favoriteCharacters ??
+        []
       : []
     : isOwnProfile
     ? demoFavoriteCharacters
     : [];
+
   const displayedFavoriteCompanies = isAuthenticated
     ? isOwnProfile
       ? activeAuthWorkspace?.favoriteCompanies ?? []
+      : canAccessVisitedFavorites
+      ? visitedAuthorizedPayload?.favoriteCompanies ??
+        visitedCachedProjection?.favoriteCompanies ??
+        []
       : []
     : isOwnProfile
     ? demoFavoriteCompanies
     : [];
+
   const displayedFavoritePeople = isAuthenticated
     ? isOwnProfile
       ? activeAuthWorkspace?.favoritePeople ?? []
+      : canAccessVisitedFavorites
+      ? visitedAuthorizedPayload?.favoritePeople ?? visitedCachedProjection?.favoritePeople ?? []
       : []
     : isOwnProfile
     ? demoFavoritePeople
     : [];
-  const displayedComments = isAuthenticated && !isOwnProfile ? [] : comments;
-  const displayedActivities = isAuthenticated && !isOwnProfile ? [] : activities;
 
-  // Handler: Select Profile (switch view)
+  const displayedComments = isAuthenticated
+    ? isOwnProfile
+      ? comments
+      : canAccessVisitedComments
+      ? visitedAuthorizedPayload?.comments ?? visitedCachedProjection?.publicComments ?? []
+      : []
+    : isPrivateLocked
+    ? []
+    : comments;
+
+  const displayedActivities = isAuthenticated
+    ? isOwnProfile
+      ? activities
+      : canAccessVisitedActivity
+      ? visitedAuthorizedPayload?.activities ?? visitedCachedProjection?.publicActivities ?? []
+      : []
+    : isPrivateLocked
+    ? []
+    : activities;
+
+  const displayedModalFollowers = isOwnProfile
+    ? followers
+    : isPrivateLocked
+    ? []
+    : visitedAuthorizedPayload?.followers ?? [];
+
+  const displayedModalFollowing = isOwnProfile
+    ? following
+    : isPrivateLocked
+    ? []
+    : visitedAuthorizedPayload?.following ?? [];
+
+  // Handler: Select Profile (switch view + sync URL cleanly)
   const handleSelectProfile = useCallback(
     (userId: string) => {
       setSelectedAnimeStatusFilter(undefined);
@@ -1222,8 +1778,19 @@ export default function App() {
       if (isAuthenticated && user) {
         if (userId === user.uid) {
           setActiveProfileId(user.uid);
+          if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/admin')) {
+            window.history.pushState(null, '', '/');
+          }
         } else {
           setActiveProfileId(userId);
+          if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/admin')) {
+            const targetUsername = authOtherProfilesMap[userId]?.username || userId;
+            window.history.pushState(
+              null,
+              '',
+              `/?profile=${encodeURIComponent(targetUsername)}`
+            );
+          }
         }
         setActiveTab('overview');
         window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1243,7 +1810,7 @@ export default function App() {
       setActiveTab('overview');
       window.scrollTo({ top: 0, behavior: 'smooth' });
     },
-    [isAuthenticated, user, demoOtherProfiles]
+    [isAuthenticated, user, authOtherProfilesMap, demoOtherProfiles]
   );
 
   // Handler: Open filtered Anime List from clickable Anime Stats status rows
@@ -1380,80 +1947,180 @@ export default function App() {
           delta = 1;
         }
 
-        updateAuthWorkspace((prev) => {
-          const followingSet = new Set(prev.followingIds);
-          const requestedSet = new Set(prev.requestedIds);
-          let nextFollowing = prev.following;
-          let nextFollowers = prev.followers;
-
-          if (isFollowingTarget) {
-            followingSet.delete(targetId);
-            nextFollowing = prev.following.filter((u) => u.id !== targetId);
-            nextFollowers = prev.followers.map((u) =>
-              u.id === targetId ? { ...u, isFollowing: false } : u
-            );
-          } else if (isRequestedTarget) {
-            requestedSet.delete(targetId);
-          } else if (activeProfile.isPrivate) {
-            requestedSet.add(targetId);
+        // Synchronize follow/unfollow/follow-back with backend so recipient receives deduplicated notification
+        if (isFollowingTarget || isRequestedTarget) {
+          const remoteRes = await unfollowRemoteUser(targetId);
+          if (remoteRes?.callerSocialState) {
+            updateAuthWorkspace((prev) => {
+              const { nextWorkspace } = mergeServerSocialIntoWorkspace(
+                prev,
+                remoteRes.callerSocialState
+              );
+              return nextWorkspace;
+            });
           } else {
-            followingSet.add(targetId);
-            const alreadyListed = prev.following.some((u) => u.id === targetId);
-            if (!alreadyListed) {
-              nextFollowing = [
-                {
-                  id: targetId,
-                  username: activeProfile.username,
-                  displayName: activeProfile.displayName,
-                  avatarUrl: activeProfile.avatarUrl,
-                  bio: activeProfile.bio,
-                  isFollowing: true,
-                  isRequested: false,
-                  isFollower: prev.followers.some((u) => u.id === targetId),
-                  isBlocked: false,
-                  createdAt: activeProfile.createdAt,
-                },
-                ...prev.following,
-              ];
-            }
-            nextFollowers = prev.followers.map((u) =>
-              u.id === targetId ? { ...u, isFollowing: true } : u
-            );
+            updateAuthWorkspace((prev) => ({
+              ...prev,
+              followingIds: prev.followingIds.filter((id) => id !== targetId),
+              requestedIds: prev.requestedIds.filter((id) => id !== targetId),
+              following: prev.following.filter((u) => u.id !== targetId),
+              followers: prev.followers.map((u) =>
+                u.id === targetId ? { ...u, isFollowing: false } : u
+              ),
+              profileOverrides:
+                delta !== 0
+                  ? {
+                      ...prev.profileOverrides,
+                      followingCount: Math.max(
+                        0,
+                        (prev.profileOverrides.followingCount ?? prev.following.length) + delta
+                      ),
+                    }
+                  : prev.profileOverrides,
+            }));
           }
 
-          const currentFollowingCount =
-            prev.profileOverrides.followingCount ?? prev.following.length;
+          const updatedTargetFollowers =
+            remoteRes?.targetFollowersCount ??
+            Math.max(0, activeProfile.followersCount + delta);
 
-          return {
-            ...prev,
-            followingIds: Array.from(followingSet),
-            requestedIds: Array.from(requestedSet),
-            following: nextFollowing,
-            followers: nextFollowers,
-            profileOverrides:
-              delta !== 0
-                ? {
-                    ...prev.profileOverrides,
-                    followingCount: Math.max(0, currentFollowingCount + delta),
-                  }
-                : prev.profileOverrides,
-          };
-        });
-
-        if (delta !== 0) {
           setRemoteVisitedProfiles((prev) => {
             const currentTarget = prev[targetId] ?? authOtherProfilesMap[targetId] ?? activeProfile;
             return {
               ...prev,
               [targetId]: {
                 ...currentTarget,
-                followersCount: Math.max(0, currentTarget.followersCount + delta),
+                followersCount: updatedTargetFollowers,
+              },
+            };
+          });
+          setRemoteVisitedDetails((prev) => {
+            if (!prev[targetId]) return prev;
+            return {
+              ...prev,
+              [targetId]: {
+                ...prev[targetId],
+                profile: {
+                  ...prev[targetId].profile,
+                  followersCount: updatedTargetFollowers,
+                },
+              },
+            };
+          });
+          if (delta !== 0) {
+            adjustCachedPublicProfileFollowersCount(targetId, delta);
+            setPublicProfilesRevision((r) => r + 1);
+          }
+          return;
+        }
+
+        const followRes = await followRemoteUser(
+          targetId,
+          {
+            username: currentUser.username,
+            displayName: currentUser.displayName,
+            avatarUrl: currentUser.avatarUrl,
+          },
+          {
+            username: activeProfile.username,
+            displayName: activeProfile.displayName,
+            avatarUrl: activeProfile.avatarUrl,
+            isPrivate: activeProfile.isPrivate,
+          }
+        );
+
+        if (followRes?.callerSocialState) {
+          updateAuthWorkspace((prev) => {
+            const { nextWorkspace } = mergeServerSocialIntoWorkspace(
+              prev,
+              followRes.callerSocialState
+            );
+            return nextWorkspace;
+          });
+        } else {
+          updateAuthWorkspace((prev) => {
+            const followingSet = new Set(prev.followingIds);
+            const requestedSet = new Set(prev.requestedIds);
+            let nextFollowing = prev.following;
+            let nextFollowers = prev.followers;
+
+            if (activeProfile.isPrivate) {
+              requestedSet.add(targetId);
+            } else {
+              followingSet.add(targetId);
+              if (!prev.following.some((u) => u.id === targetId)) {
+                nextFollowing = [
+                  {
+                    id: targetId,
+                    username: activeProfile.username,
+                    displayName: activeProfile.displayName,
+                    avatarUrl: activeProfile.avatarUrl,
+                    bio: activeProfile.bio,
+                    isFollowing: true,
+                    isRequested: false,
+                    isFollower: prev.followers.some((u) => u.id === targetId),
+                    isBlocked: false,
+                    createdAt: activeProfile.createdAt,
+                  },
+                  ...prev.following,
+                ];
+              }
+              nextFollowers = prev.followers.map((u) =>
+                u.id === targetId ? { ...u, isFollowing: true } : u
+              );
+            }
+
+            const currentFollowingCount =
+              prev.profileOverrides.followingCount ?? prev.following.length;
+
+            return {
+              ...prev,
+              followingIds: Array.from(followingSet),
+              requestedIds: Array.from(requestedSet),
+              following: nextFollowing,
+              followers: nextFollowers,
+              profileOverrides:
+                delta !== 0
+                  ? {
+                      ...prev.profileOverrides,
+                      followingCount: Math.max(0, currentFollowingCount + delta),
+                    }
+                  : prev.profileOverrides,
+            };
+          });
+        }
+
+        if (delta !== 0 || followRes) {
+          const nextFollowersCount =
+            followRes?.targetFollowersCount ?? Math.max(0, activeProfile.followersCount + delta);
+          setRemoteVisitedProfiles((prev) => {
+            const currentTarget = prev[targetId] ?? authOtherProfilesMap[targetId] ?? activeProfile;
+            return {
+              ...prev,
+              [targetId]: {
+                ...currentTarget,
+                followersCount: nextFollowersCount,
+              },
+            };
+          });
+          setRemoteVisitedDetails((prev) => {
+            if (!prev[targetId]) return prev;
+            return {
+              ...prev,
+              [targetId]: {
+                ...prev[targetId],
+                profile: {
+                  ...prev[targetId].profile,
+                  followersCount: nextFollowersCount,
+                },
               },
             };
           });
 
-          adjustCachedPublicProfileFollowersCount(targetId, delta);
-          setPublicProfilesRevision((r) => r + 1);
+          if (delta !== 0) {
+            adjustCachedPublicProfileFollowersCount(targetId, delta);
+            setPublicProfilesRevision((r) => r + 1);
+          }
         }
         return;
       }
@@ -1577,6 +2244,7 @@ export default function App() {
   // Handler: Accept follow request
   const handleAcceptRequest = (requestId: string, notifId?: string) => {
     if (isAuthenticated) {
+      void respondRemoteFollowRequest(requestId, 'accept');
       updateAuthWorkspace((prev) => {
         const req = prev.followRequests.find((r) => r.id === requestId);
         const nextFollowRequests = prev.followRequests.filter((r) => r.id !== requestId);
@@ -1634,6 +2302,7 @@ export default function App() {
   // Handler: Reject follow request
   const handleRejectRequest = (requestId: string, notifId?: string) => {
     if (isAuthenticated) {
+      void respondRemoteFollowRequest(requestId, 'reject');
       updateAuthWorkspace((prev) => ({
         ...prev,
         followRequests: prev.followRequests.filter((r) => r.id !== requestId),
@@ -1692,6 +2361,7 @@ export default function App() {
   // Handler: Unfollow from modal
   const handleUnfollowFromModal = (userId: string) => {
     if (isAuthenticated) {
+      void unfollowRemoteUser(userId);
       updateAuthWorkspace((prev) => ({
         ...prev,
         following: prev.following.filter((u) => u.id !== userId),
@@ -2408,11 +3078,29 @@ export default function App() {
     [isAuthenticated, user?.uid, demoProfile, currentUser.id, updateAuthWorkspace]
   );
 
-  // Real Logout handler: wipes personal memory immediately, terminates Firebase Auth session and returns to login screen
+  // Real Logout handler: flushes pending legitimate writes, wipes volatile session memory, terminates Firebase Auth session and returns to login screen
   const handleLogout = useCallback(async () => {
+    authEpochRef.current += 1;
     pendingAdminReturnRef.current = false;
     hasLoadedFullAnimesRef.current = false;
+    isHydratedFullAnimesRef.current = false;
+
+    try {
+      await flushPendingWorkspaceWrites();
+    } catch {
+      // Best-effort flush before signOut
+    }
+
+    clearChatSessionMemoryCache();
     clearAllMemoryCache();
+    clearChunkedStorageMemoryCache();
+    clearLastFetchedAniListFavorites();
+    clearSessionWorkspaceCaches();
+
+    if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/admin')) {
+      window.history.pushState(null, '', '/');
+    }
+
     setAdminVerification({
       uid: null,
       authorized: false,
@@ -2423,9 +3111,16 @@ export default function App() {
     setHasOpenedSettings(false);
     setIsFollowersOpen(false);
     setIsNotifOpen(false);
+    setIsChatOpen(false);
+    setChatRecipientId(null);
+    setUnreadMessagesCount(0);
     setIsProfileSearchOpen(false);
     setIsDemoPreview(false);
     setAuthInitialMode('login');
+    setRemoteVisitedProfiles({});
+    setRemoteVisitedDetails({});
+    setPrivateBlockedProfiles({});
+    setVisitingStatusByTarget({});
     setSelectedAnimeStatusFilter(undefined);
     setSelectedAnimeDetailId(null);
     setActiveTab('overview');
@@ -2439,7 +3134,8 @@ export default function App() {
       if (ids.length === 0) return;
       const idSet = new Set(ids);
 
-      if (isAuthenticated) {
+      if (isAuthenticated && user?.uid) {
+        void markOwnerNotificationsRead(user.uid, { notificationIds: ids });
         updateAuthWorkspace((prev) => {
           let hasChanges = false;
           const next = prev.notifications.map((n) => {
@@ -2466,7 +3162,7 @@ export default function App() {
         return hasChanges ? next : prev;
       });
     },
-    [isAuthenticated, updateAuthWorkspace]
+    [isAuthenticated, user?.uid, updateAuthWorkspace]
   );
 
   const handleMarkNotificationAsRead = useCallback(
@@ -2477,7 +3173,8 @@ export default function App() {
   );
 
   const handleMarkAllNotificationsAsRead = useCallback(() => {
-    if (isAuthenticated) {
+    if (isAuthenticated && user?.uid) {
+      void markOwnerNotificationsRead(user.uid, { markAll: true });
       updateAuthWorkspace((prev) => {
         const hasUnread = prev.notifications.some((n) => !n.isRead);
         if (!hasUnread) return prev;
@@ -2496,7 +3193,7 @@ export default function App() {
       if (!hasUnread) return prev;
       return prev.map((n) => (n.isRead ? n : { ...n, isRead: true }));
     });
-  }, [isAuthenticated, updateAuthWorkspace]);
+  }, [isAuthenticated, user?.uid, updateAuthWorkspace]);
 
   // Resolve the real profile ID of a notification's actor without fabricating nonexistent users
   const resolveNotificationActorProfileId = useCallback(
@@ -2509,9 +3206,7 @@ export default function App() {
       if (isAuthenticated) {
         const explicitId = notif.actor.id || notif.contextData?.userId;
         if (explicitId) {
-          if (explicitId === currentUser.id || authOtherProfilesMap[explicitId]) {
-            return explicitId;
-          }
+          return explicitId;
         }
         if (normalizedUsername) {
           if (currentUser.username.toLowerCase() === normalizedUsername) {
@@ -2521,6 +3216,7 @@ export default function App() {
             (u) => u.username.toLowerCase() === normalizedUsername
           );
           if (matchedAuthConn) return matchedAuthConn.id;
+          return normalizedUsername;
         }
         return null;
       }
@@ -2908,10 +3604,11 @@ export default function App() {
 
         {/* Tab Content Display */}
         <div className="pt-2">
-          {isPrivateLocked && activeTab !== 'about' ? (
+          {isPrivateLocked ? (
             <PrivateProfileNotice
               profile={activeProfile}
               isRequested={isRequestedActive}
+              isFollowing={isFollowingActive}
               onRequestFollow={handleFollowToggle}
             />
           ) : (
@@ -3024,9 +3721,9 @@ export default function App() {
           <LazyFollowersModal
             isOpen={isFollowersOpen}
             initialTab={followersInitialTab}
-            followers={followers}
-            following={following}
-            requests={followRequests}
+            followers={displayedModalFollowers}
+            following={displayedModalFollowing}
+            requests={isOwnProfile ? followRequests : []}
             isOwnProfile={isOwnProfile}
             onClose={() => setIsFollowersOpen(false)}
             onUnfollow={handleUnfollowFromModal}

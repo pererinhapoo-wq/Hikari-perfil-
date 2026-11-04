@@ -21,7 +21,8 @@ export const TabsNavigation: React.FC<TabsNavigationProps> = ({
   const tabs: { id: ProfileTab; label: string; count?: number; lockedWhenPrivate?: boolean }[] = [
     {
       id: 'overview',
-      label: 'Visão geral'
+      label: 'Visão geral',
+      lockedWhenPrivate: true
     },
     {
       id: 'animes',
@@ -37,7 +38,8 @@ export const TabsNavigation: React.FC<TabsNavigationProps> = ({
     },
     {
       id: 'about',
-      label: 'Sobre'
+      label: 'Sobre',
+      lockedWhenPrivate: true
     },
     {
       id: 'activity',

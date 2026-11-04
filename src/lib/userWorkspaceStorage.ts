@@ -1,12 +1,16 @@
 import type { User as FirebaseUser } from 'firebase/auth';
 import {
+  collection,
   doc,
   getDoc,
+  getDocs,
+  setDoc,
+  deleteDoc,
   writeBatch,
   serverTimestamp,
   type Timestamp,
 } from 'firebase/firestore';
-import { db, firebaseConfigStatus } from './firebase';
+import { db, auth, firebaseConfigStatus } from './firebase';
 import type {
   UserProfile,
   PrivacySettings,
@@ -43,6 +47,7 @@ import {
   getCommentsFromIndexedDb,
 } from './indexedDbStorage';
 import { migrateAnimeListProvenance } from '../utils/animeProvenance';
+import { filterActivitiesForViewer } from '../utils/activityPrivacy';
 
 export const USER_WORKSPACE_STORAGE_PREFIX = 'hikari_user_workspace_v1:';
 export const PUBLIC_PROFILES_STORAGE_KEY = 'hikari_public_profiles_v1';
@@ -55,7 +60,21 @@ export interface PublicProfileProjection {
   profile: UserProfile;
   animeStats: AnimeStatsSummary;
   publicAnimes: AnimeItem[];
+  favoriteCharacters?: FavoriteCharacter[];
+  favoriteCompanies?: FavoriteCompany[];
+  favoritePeople?: FavoritePerson[];
+  publicActivities?: UserActivity[];
+  publicComments?: HikariComment[];
   updatedAtMs: number;
+}
+
+export interface SyncPublicProjectionOptions {
+  immediate?: boolean;
+  favoriteCharacters?: FavoriteCharacter[];
+  favoriteCompanies?: FavoriteCompany[];
+  favoritePeople?: FavoritePerson[];
+  activities?: UserActivity[];
+  comments?: HikariComment[];
 }
 
 export type FirestoreSyncStatus =
@@ -224,7 +243,26 @@ function flushPublicProfilesToLocalStorage(): void {
     publicProfilesLastRaw = serialized;
     window.localStorage.setItem(PUBLIC_PROFILES_STORAGE_KEY, serialized);
   } catch {
-    // Ignore storage quota errors while preserving in-memory state
+    // Se a projeção completa exceder a cota de 5MB do localStorage (ex: milhares de animes importados),
+    // grava metadados e estatísticas compactas no localStorage (mantendo a lista completa em memória,
+    // no backend e no Firestore) para nunca deixar estado de privacidade desatualizado no navegador.
+    try {
+      const compactMap: Record<string, unknown> = {};
+      for (const [uid, entry] of Object.entries(publicProfilesRawMapCache)) {
+        if (entry && typeof entry === 'object') {
+          const rec = entry as Record<string, unknown>;
+          compactMap[uid] = {
+            ...rec,
+            publicAnimes: Array.isArray(rec.publicAnimes) ? rec.publicAnimes.slice(0, 100) : [],
+          };
+        }
+      }
+      const fallbackSerialized = JSON.stringify(compactMap);
+      publicProfilesLastRaw = fallbackSerialized;
+      window.localStorage.setItem(PUBLIC_PROFILES_STORAGE_KEY, fallbackSerialized);
+    } catch {
+      // Ignore storage quota errors while preserving in-memory state
+    }
   }
 }
 
@@ -878,7 +916,24 @@ export async function loadUserWorkspaceFromFirestore(
         : Promise.resolve({ manifest: null, status: 'synced' as FirestoreSyncStatus }),
     ]);
 
-    const activeManifest = shouldLoadAllChunks ? chunkedResult.manifest : manifestOnlyResult.manifest;
+    let effectiveChunkedResult = chunkedResult;
+    let activeManifest = shouldLoadAllChunks ? chunkedResult.manifest : manifestOnlyResult.manifest;
+
+    // Se o manifesto indicar mais animes do que o snapshot legado de 300 itens em workspace/personal,
+    // carrega todos os blocos imediatamente para NUNCA truncar a coleção nem sobrescrever o IndexedDB com lista parcial!
+    const legacyCount = personalSnap.exists() && Array.isArray(personalSnap.data().animes)
+      ? personalSnap.data().animes.length
+      : 0;
+    if (
+      !shouldLoadAllChunks &&
+      activeManifest &&
+      activeManifest.totalAnimes > legacyCount
+    ) {
+      effectiveChunkedResult = await loadAllChunkedAnimesFromFirestore(cleanUid);
+      if (effectiveChunkedResult.manifest) {
+        activeManifest = effectiveChunkedResult.manifest;
+      }
+    }
 
     remoteDocMetaByUid.set(cleanUid, {
       userDocExists: profileSnap.exists(),
@@ -900,8 +955,8 @@ export async function loadUserWorkspaceFromFirestore(
       // Se houver animes nos blocos particionados (chunked storage), usa a lista completa
       // Se não houver blocos particionados, mantém compatibilidade com data.animes do documento legado
       const resolvedAnimes =
-        shouldLoadAllChunks && chunkedResult.status === 'synced' && chunkedResult.animes !== null
-          ? chunkedResult.animes
+        effectiveChunkedResult.status === 'synced' && effectiveChunkedResult.animes !== null
+          ? effectiveChunkedResult.animes
           : Array.isArray(data.animes)
           ? (data.animes as AnimeItem[])
           : [];
@@ -916,8 +971,12 @@ export async function loadUserWorkspaceFromFirestore(
       );
 
       if (sanitized) {
-        // Grava no IndexedDB de forma assíncrona para cache local resiliente
-        void saveAnimesToIndexedDb(cleanUid, sanitized.animes);
+        // Grava no IndexedDB de forma assíncrona apenas quando a lista não é um recorte parcial menor que o manifesto
+        const isPartialComparedToManifest =
+          Boolean(activeManifest && activeManifest.totalAnimes > sanitized.animes.length);
+        if (!isPartialComparedToManifest) {
+          void saveAnimesToIndexedDb(cleanUid, sanitized.animes);
+        }
         void saveActivitiesToIndexedDb(cleanUid, sanitized.activities);
         void saveCommentsToIndexedDb(cleanUid, sanitized.comments);
         return { workspace: sanitized, status: 'synced', manifest: activeManifest };
@@ -934,10 +993,12 @@ export async function loadUserWorkspaceFromFirestore(
           updatedAtTs && typeof updatedAtTs.toMillis === 'function'
             ? updatedAtTs.toMillis()
             : Date.now();
-        if (shouldLoadAllChunks && chunkedResult.status === 'synced' && chunkedResult.animes) {
-          base.animes = chunkedResult.animes;
+        if (effectiveChunkedResult.status === 'synced' && effectiveChunkedResult.animes) {
+          base.animes = effectiveChunkedResult.animes;
         }
-        void saveAnimesToIndexedDb(cleanUid, base.animes);
+        if (!activeManifest || base.animes.length >= activeManifest.totalAnimes) {
+          void saveAnimesToIndexedDb(cleanUid, base.animes);
+        }
         return { workspace: base, status: 'synced', manifest: activeManifest };
       }
     }
@@ -1299,39 +1360,111 @@ export function sanitizePublicAnimeItem(item: AnimeItem): AnimeItem {
   };
 }
 
+async function syncPublicProjectionToFirestore(
+  cleanUid: string,
+  projection: PublicProfileProjection
+): Promise<void> {
+  if (!firebaseConfigStatus.isInitialized || !db || auth?.currentUser?.uid !== cleanUid) {
+    return;
+  }
+
+  try {
+    const colRef = collection(db, 'users', cleanUid, 'public_projection');
+    if (projection.profile.isPrivate) {
+      const existingDocs = await getDocs(colRef);
+      await Promise.all(existingDocs.docs.map((d) => deleteDoc(d.ref)));
+      return;
+    }
+
+    const chunkSize = 300;
+    const totalChunks = Math.ceil(projection.publicAnimes.length / chunkSize);
+    const metaRef = doc(db, 'users', cleanUid, 'public_projection', 'meta');
+
+    await setDoc(
+      metaRef,
+      stripUndefinedDeep({
+        ownerUid: cleanUid,
+        updatedAtMs: projection.updatedAtMs,
+        animeStats: projection.animeStats,
+        totalAnimes: projection.publicAnimes.length,
+        totalChunks,
+        favoriteCharacters: (projection.favoriteCharacters ?? []).slice(0, 50),
+        favoriteCompanies: (projection.favoriteCompanies ?? []).slice(0, 50),
+        favoritePeople: (projection.favoritePeople ?? []).slice(0, 50),
+        publicActivities: (projection.publicActivities ?? []).slice(0, 200),
+        publicComments: (projection.publicComments ?? []).slice(0, 200),
+      })
+    );
+
+    const writes: Promise<unknown>[] = [];
+    for (let idx = 0; idx < totalChunks; idx++) {
+      const slice = projection.publicAnimes.slice(idx * chunkSize, (idx + 1) * chunkSize);
+      const chunkRef = doc(db, 'users', cleanUid, 'public_projection', `chunk_${idx}`);
+      writes.push(
+        setDoc(
+          chunkRef,
+          stripUndefinedDeep({
+            ownerUid: cleanUid,
+            chunkIndex: idx,
+            animes: slice,
+            updatedAtMs: projection.updatedAtMs,
+          })
+        )
+      );
+    }
+    if (writes.length > 0) {
+      await Promise.all(writes);
+    }
+  } catch {
+    // Non-blocking best-effort sync to Firestore public_projection
+  }
+}
+
 /**
  * Writes a sanitized public projection of an authenticated user's profile so
  * other users can visit the profile without ever having read access to private
- * workspaces or private anime lists. When showAnimeList is false (or profile is
- * private), publicAnimes is stripped to [] at write time while numeric stats remain.
+ * workspaces or private anime lists. When profile is private, all content, bio,
+ * banner, stats, favorites, activities, and anime lists are strictly wiped.
  */
 export function syncPublicProfileProjection(
   profile: UserProfile,
   animes: AnimeItem[],
   updatedAtMs: number = Date.now(),
-  options?: { immediate?: boolean }
+  options?: SyncPublicProjectionOptions
 ): void {
   const cleanUid = profile.id.trim();
   if (!cleanUid || typeof window === 'undefined') return;
 
+  const isPrivate = Boolean(profile.isPrivate);
   const canExposeAnimeItems =
-    !profile.isPrivate && profile.privacySettings?.showAnimeList !== false;
+    !isPrivate && profile.privacySettings?.showAnimeList !== false;
+  const canExposeFavorites =
+    !isPrivate && profile.privacySettings?.showFavorites !== false;
+  const canExposeActivities =
+    !isPrivate && profile.privacySettings?.showActivity !== false;
+  const canExposeComments =
+    !isPrivate &&
+    (profile.privacySettings?.showCommentsOnProfile ?? profile.showCommentsOnProfile) !== false;
 
   const normalizedUpdatedAt = Math.max(0, Math.floor(updatedAtMs));
   const profileSig = [
     profile.username,
     profile.displayName,
     profile.avatarUrl,
-    profile.bannerUrl,
-    profile.bio,
+    isPrivate ? '' : profile.bannerUrl,
+    isPrivate ? '' : profile.bio,
     profile.followersCount,
     profile.followingCount,
-    profile.isPrivate ? '1' : '0',
-    profile.showCommentsOnProfile ? '1' : '0',
-    profile.privacySettings?.showAnimeList !== false ? '1' : '0',
-    profile.privacySettings?.showFavorites !== false ? '1' : '0',
-    profile.privacySettings?.showActivity !== false ? '1' : '0',
-    profile.privacySettings?.showCommentsOnProfile ?? profile.showCommentsOnProfile ? '1' : '0',
+    isPrivate ? '1' : '0',
+    canExposeComments ? '1' : '0',
+    canExposeAnimeItems ? '1' : '0',
+    canExposeFavorites ? '1' : '0',
+    canExposeActivities ? '1' : '0',
+    (options?.favoriteCharacters ?? []).length,
+    (options?.favoriteCompanies ?? []).length,
+    (options?.favoritePeople ?? []).length,
+    (options?.activities ?? []).length,
+    (options?.comments ?? []).length,
   ].join('\u001f');
 
   const prevProj = lastProjectionSignatureByUid.get(cleanUid);
@@ -1353,40 +1486,109 @@ export function syncPublicProfileProjection(
     updatedAtMs: normalizedUpdatedAt,
   });
 
+  const sanitizedAnimes = canExposeAnimeItems
+    ? animes.map((item) => {
+        const cleanItem = sanitizePublicAnimeItem(item);
+        return canExposeFavorites ? cleanItem : { ...cleanItem, isFavorite: false };
+      })
+    : [];
+
   const projection: PublicProfileProjection = {
     profile: {
       id: cleanUid,
       username: profile.username,
       displayName: profile.displayName,
       avatarUrl: profile.avatarUrl,
-      bannerUrl: profile.bannerUrl,
-      bio: profile.bio,
+      bannerUrl: isPrivate ? '' : profile.bannerUrl,
+      bio: isPrivate ? '' : profile.bio,
       createdAt: profile.createdAt,
       createdAtTimestamp: profile.createdAtTimestamp,
       followersCount: profile.followersCount,
       followingCount: profile.followingCount,
-      isPrivate: Boolean(profile.isPrivate),
-      showCommentsOnProfile: Boolean(profile.showCommentsOnProfile),
+      isPrivate,
+      showCommentsOnProfile: canExposeComments,
       privacySettings: {
-        showAnimeList: profile.privacySettings?.showAnimeList !== false,
-        showFavorites: profile.privacySettings?.showFavorites !== false,
-        showActivity: profile.privacySettings?.showActivity !== false,
-        showCommentsOnProfile:
-          profile.privacySettings?.showCommentsOnProfile ?? profile.showCommentsOnProfile,
+        showAnimeList: canExposeAnimeItems,
+        showFavorites: canExposeFavorites,
+        showActivity: canExposeActivities,
+        showCommentsOnProfile: canExposeComments,
+        allowDirectMessages: profile.privacySettings?.allowDirectMessages ?? true,
+        directMessagesFrom: profile.privacySettings?.directMessagesFrom ?? 'everyone',
+        showOnlineStatus: isPrivate ? false : profile.privacySettings?.showOnlineStatus !== false,
       },
       externalAccounts: {
         anilist: { connected: false },
         mal: { connected: false },
       },
     },
-    animeStats: computeAnimeStats(animes),
-    publicAnimes: canExposeAnimeItems ? animes.slice(0, 2000).map(sanitizePublicAnimeItem) : [],
+    animeStats: isPrivate || !canExposeAnimeItems ? EMPTY_ANIME_STATS : computeAnimeStats(sanitizedAnimes),
+    publicAnimes: sanitizedAnimes,
+    favoriteCharacters: canExposeFavorites ? [...(options?.favoriteCharacters ?? [])] : [],
+    favoriteCompanies: canExposeFavorites ? [...(options?.favoriteCompanies ?? [])] : [],
+    favoritePeople: canExposeFavorites ? [...(options?.favoritePeople ?? [])] : [],
+    publicActivities: canExposeActivities
+      ? filterActivitiesForViewer(options?.activities ?? [], false, {
+          isPrivate: false,
+          showActivity: true,
+        })
+      : [],
+    publicComments: canExposeComments ? [...(options?.comments ?? [])] : [],
     updatedAtMs: normalizedUpdatedAt,
   };
 
   const map = getOrLoadPublicProfilesRawMap();
   map[cleanUid] = projection;
   schedulePublicProfilesWrite(Boolean(options?.immediate));
+  void syncPublicProjectionToFirestore(cleanUid, projection);
+}
+
+/**
+ * Wipes any cached content for a profile that became private so visitors never see stale data.
+ */
+export function purgeCachedPublicProfileProjection(
+  targetUid: string,
+  privateStub?: UserProfile
+): void {
+  const cleanUid = targetUid.trim();
+  if (!cleanUid) return;
+  remotePublicProfileCache.delete(cleanUid);
+  inFlightPublicProfileLoads.delete(cleanUid);
+  lastProjectionSignatureByUid.delete(cleanUid);
+
+  if (typeof window === 'undefined') return;
+  const map = getOrLoadPublicProfilesRawMap();
+  if (privateStub) {
+    map[cleanUid] = {
+      profile: {
+        ...privateStub,
+        id: cleanUid,
+        isPrivate: true,
+        bannerUrl: '',
+        bio: '',
+        showCommentsOnProfile: false,
+        privacySettings: {
+          showAnimeList: false,
+          showFavorites: false,
+          showActivity: false,
+          showCommentsOnProfile: false,
+          allowDirectMessages: privateStub.privacySettings?.allowDirectMessages ?? true,
+          directMessagesFrom: privateStub.privacySettings?.directMessagesFrom ?? 'everyone',
+          showOnlineStatus: false,
+        },
+      },
+      animeStats: EMPTY_ANIME_STATS,
+      publicAnimes: [],
+      favoriteCharacters: [],
+      favoriteCompanies: [],
+      favoritePeople: [],
+      publicActivities: [],
+      publicComments: [],
+      updatedAtMs: Date.now(),
+    } satisfies PublicProfileProjection;
+  } else {
+    delete map[cleanUid];
+  }
+  schedulePublicProfilesWrite(true);
 }
 
 /**
@@ -1468,19 +1670,53 @@ export function readPublicProfilesMap(
         },
       };
 
+      const canExposeFavorites = !isPrivate && overrides.privacySettings?.showFavorites !== false;
+      const canExposeActivity = !isPrivate && overrides.privacySettings?.showActivity !== false;
+      const canExposeComments =
+        !isPrivate &&
+        (overrides.privacySettings?.showCommentsOnProfile ?? overrides.showCommentsOnProfile) !== false;
+
       const rawPublicAnimes =
         canExpose && Array.isArray(rec.publicAnimes)
-          ? (rec.publicAnimes as AnimeItem[]).map(sanitizePublicAnimeItem)
+          ? (rec.publicAnimes as AnimeItem[]).map((a) => {
+              const sanitized = sanitizePublicAnimeItem(a);
+              return canExposeFavorites ? sanitized : { ...sanitized, isFavorite: false };
+            })
           : [];
 
-      const safeStats =
-        sanitizeAnimeStatsSummary(rec.animeStats) ??
-        (rawPublicAnimes.length > 0 ? computeAnimeStats(rawPublicAnimes) : EMPTY_ANIME_STATS);
+      const safeStats = isPrivate || !canExpose
+        ? EMPTY_ANIME_STATS
+        : sanitizeAnimeStatsSummary(rec.animeStats) ??
+          (rawPublicAnimes.length > 0 ? computeAnimeStats(rawPublicAnimes) : EMPTY_ANIME_STATS);
 
       built[uid] = {
-        profile: safeProfile,
+        profile: {
+          ...safeProfile,
+          bannerUrl: isPrivate ? '' : safeProfile.bannerUrl,
+          bio: isPrivate ? '' : safeProfile.bio,
+        },
         animeStats: safeStats,
         publicAnimes: canExpose ? rawPublicAnimes : [],
+        favoriteCharacters:
+          canExposeFavorites && Array.isArray(rec.favoriteCharacters)
+            ? (rec.favoriteCharacters as FavoriteCharacter[])
+            : [],
+        favoriteCompanies:
+          canExposeFavorites && Array.isArray(rec.favoriteCompanies)
+            ? (rec.favoriteCompanies as FavoriteCompany[])
+            : [],
+        favoritePeople:
+          canExposeFavorites && Array.isArray(rec.favoritePeople)
+            ? (rec.favoritePeople as FavoritePerson[])
+            : [],
+        publicActivities:
+          canExposeActivity && Array.isArray(rec.publicActivities)
+            ? (rec.publicActivities as UserActivity[])
+            : [],
+        publicComments:
+          canExposeComments && Array.isArray(rec.publicComments)
+            ? (rec.publicComments as HikariComment[])
+            : [],
         updatedAtMs:
           typeof rec.updatedAtMs === 'number' && Number.isFinite(rec.updatedAtMs)
             ? Math.max(0, Math.floor(rec.updatedAtMs))
@@ -1589,4 +1825,105 @@ export async function loadPublicProfileFromFirestore(
 
   inFlightPublicProfileLoads.set(cleanUid, request);
   return request;
+}
+
+/**
+ * Loads the complete public profile + chunked public_projection from Firestore when available.
+ * Automatically returns null if the profile is private or inaccessible under Firestore rules.
+ */
+export async function loadFullPublicProfileFromFirestore(
+  targetUid: string
+): Promise<PublicProfileProjection | null> {
+  const cleanUid = targetUid.trim();
+  if (!cleanUid || !firebaseConfigStatus.isInitialized || !db) {
+    return null;
+  }
+
+  try {
+    const profile = await loadPublicProfileFromFirestore(cleanUid);
+    if (!profile || profile.isPrivate) {
+      return null;
+    }
+
+    const metaRef = doc(db, 'users', cleanUid, 'public_projection', 'meta');
+    const metaSnap = await getDoc(metaRef);
+    if (!metaSnap.exists()) {
+      return {
+        profile,
+        animeStats: EMPTY_ANIME_STATS,
+        publicAnimes: [],
+        favoriteCharacters: [],
+        favoriteCompanies: [],
+        favoritePeople: [],
+        publicActivities: [],
+        publicComments: [],
+        updatedAtMs: Date.now(),
+      };
+    }
+
+    const meta = metaSnap.data();
+    const totalChunks =
+      typeof meta.totalChunks === 'number' && meta.totalChunks > 0
+        ? Math.min(200, Math.floor(meta.totalChunks))
+        : 0;
+
+    const canShowAnime = profile.privacySettings?.showAnimeList !== false;
+    const canShowFavorites = profile.privacySettings?.showFavorites !== false;
+    const canShowActivity = profile.privacySettings?.showActivity !== false;
+    const canShowComments =
+      (profile.privacySettings?.showCommentsOnProfile ?? profile.showCommentsOnProfile) !== false;
+
+    const firestoreDb = db;
+    const chunkedAnimes: AnimeItem[] = [];
+    if (canShowAnime && totalChunks > 0) {
+      const chunkSnaps = await Promise.all(
+        Array.from({ length: totalChunks }, (_, idx) =>
+          getDoc(doc(firestoreDb, 'users', cleanUid, 'public_projection', `chunk_${idx}`))
+        )
+      );
+      for (const snap of chunkSnaps) {
+        if (snap.exists() && Array.isArray(snap.data().animes)) {
+          for (const item of snap.data().animes as AnimeItem[]) {
+            const sanitized = sanitizePublicAnimeItem(item);
+            chunkedAnimes.push(canShowFavorites ? sanitized : { ...sanitized, isFavorite: false });
+          }
+        }
+      }
+    }
+
+    return {
+      profile,
+      animeStats: canShowAnime
+        ? sanitizeAnimeStatsSummary(meta.animeStats) ?? computeAnimeStats(chunkedAnimes)
+        : EMPTY_ANIME_STATS,
+      publicAnimes: canShowAnime ? chunkedAnimes : [],
+      favoriteCharacters:
+        canShowFavorites && Array.isArray(meta.favoriteCharacters)
+          ? (meta.favoriteCharacters as FavoriteCharacter[])
+          : [],
+      favoriteCompanies:
+        canShowFavorites && Array.isArray(meta.favoriteCompanies)
+          ? (meta.favoriteCompanies as FavoriteCompany[])
+          : [],
+      favoritePeople:
+        canShowFavorites && Array.isArray(meta.favoritePeople)
+          ? (meta.favoritePeople as FavoritePerson[])
+          : [],
+      publicActivities:
+        canShowActivity && Array.isArray(meta.publicActivities)
+          ? filterActivitiesForViewer(meta.publicActivities as UserActivity[], false, {
+              isPrivate: false,
+              showActivity: true,
+            })
+          : [],
+      publicComments:
+        canShowComments && Array.isArray(meta.publicComments)
+          ? (meta.publicComments as HikariComment[])
+          : [],
+      updatedAtMs:
+        typeof meta.updatedAtMs === 'number' ? Math.max(0, Math.floor(meta.updatedAtMs)) : Date.now(),
+    };
+  } catch {
+    return null;
+  }
 }

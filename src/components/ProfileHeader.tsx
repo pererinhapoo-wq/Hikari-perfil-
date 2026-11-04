@@ -106,7 +106,7 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
 
       {/* Banner Area */}
       <div className="relative h-48 w-full sm:h-64 md:h-80 bg-gradient-to-br from-purple-950 via-[#18112e] to-[#0A0713]">
-        {profile.bannerUrl ? (
+        {(isOwnProfile || !profile.isPrivate) && profile.bannerUrl ? (
           <img
             src={profile.bannerUrl}
             alt="Banner do perfil"
@@ -317,7 +317,7 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
         {/* Bio and Metrics Section */}
         <div className="mt-4 space-y-3">
           {/* Bio text */}
-          {profile.bio && (
+          {(isOwnProfile || !profile.isPrivate) && profile.bio && (
             <p className="max-w-3xl text-sm leading-relaxed text-purple-200/90 whitespace-pre-line">
               {profile.bio}
             </p>
@@ -327,8 +327,12 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
           <div className="flex flex-wrap items-center gap-2.5 pt-1">
             <button
               type="button"
-              onClick={() => onOpenFollowers('followers')}
-              className="group inline-flex items-center gap-2 rounded-xl border border-purple-900/40 bg-[#16102a]/80 hover:bg-purple-950/80 hover:border-purple-500/50 px-3.5 py-1.5 sm:py-2 transition-all duration-150 cursor-pointer shadow-sm active:scale-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-500"
+              disabled={!isOwnProfile && profile.isPrivate}
+              onClick={() => {
+                if (!isOwnProfile && profile.isPrivate) return;
+                onOpenFollowers('followers');
+              }}
+              className="group inline-flex items-center gap-2 rounded-xl border border-purple-900/40 bg-[#16102a]/80 hover:bg-purple-950/80 hover:border-purple-500/50 px-3.5 py-1.5 sm:py-2 transition-all duration-150 cursor-pointer disabled:cursor-not-allowed disabled:opacity-60 shadow-sm active:scale-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-500"
               title="Ver lista de seguidores"
             >
               <span className="font-mono text-base sm:text-lg font-bold text-white tabular-nums group-hover:text-purple-200 transition-colors">
@@ -341,8 +345,12 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
 
             <button
               type="button"
-              onClick={() => onOpenFollowers('following')}
-              className="group inline-flex items-center gap-2 rounded-xl border border-purple-900/40 bg-[#16102a]/80 hover:bg-purple-950/80 hover:border-purple-500/50 px-3.5 py-1.5 sm:py-2 transition-all duration-150 cursor-pointer shadow-sm active:scale-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-500"
+              disabled={!isOwnProfile && profile.isPrivate}
+              onClick={() => {
+                if (!isOwnProfile && profile.isPrivate) return;
+                onOpenFollowers('following');
+              }}
+              className="group inline-flex items-center gap-2 rounded-xl border border-purple-900/40 bg-[#16102a]/80 hover:bg-purple-950/80 hover:border-purple-500/50 px-3.5 py-1.5 sm:py-2 transition-all duration-150 cursor-pointer disabled:cursor-not-allowed disabled:opacity-60 shadow-sm active:scale-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-500"
               title="Ver pessoas seguidas"
             >
               <span className="font-mono text-base sm:text-lg font-bold text-white tabular-nums group-hover:text-purple-200 transition-colors">

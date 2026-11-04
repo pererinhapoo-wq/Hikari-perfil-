@@ -90,15 +90,27 @@ service cloud.firestore {
           'createdAt',
           'updatedAt'
         ])
-        && data.keys().hasOnly([
-          'id',
-          'participants',
-          'participantDetails',
-          'lastMessage',
-          'unreadCounts',
-          'createdAt',
-          'updatedAt'
-        ])
+        && (
+          data.keys().hasOnly([
+            'id',
+            'participants',
+            'participantDetails',
+            'lastMessage',
+            'unreadCounts',
+            'createdAt',
+            'updatedAt'
+          ])
+          || data.keys().hasOnly([
+            'id',
+            'participants',
+            'participantDetails',
+            'lastMessage',
+            'unreadCounts',
+            'lastReadAtByUser',
+            'createdAt',
+            'updatedAt'
+          ])
+        )
         && isValidId(data.id)
         && data.participants is list
         && data.participants.size() == 2
@@ -107,6 +119,7 @@ service cloud.firestore {
         && data.participants[0] != data.participants[1]
         && data.participantDetails is map
         && data.unreadCounts is map
+        && (!('lastReadAtByUser' in data) || data.lastReadAtByUser is map)
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -450,9 +463,24 @@ service cloud.firestore {
         allow update, delete: if false;
       }
 
-      // 6. Subcoleção de notificações do usuário (leitura e atualização apenas de isRead pelo destinatário)
+      // 6. Subcoleção de notificações do usuário (leitura exclusiva pelo destinatário; criação validada com ator autenticado)
       match /notifications/{notifId} {
         allow get, list: if isOwner(userId);
+        allow create: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(notifId)
+          && request.auth.uid != userId
+          && notifId.matches('^notif_(follow|follow_back|req|accepted)_[a-zA-Z0-9_\\-]+$')
+          && incoming().keys().hasAll(['id', 'recipientUid', 'type', 'actor', 'message', 'isRead', 'createdAtTimestamp'])
+          && incoming().id == notifId
+          && incoming().recipientUid == userId
+          && incoming().type in ['new_follower', 'follow_request', 'request_accepted']
+          && incoming().actor is map
+          && incoming().actor.id == request.auth.uid
+          && incoming().message is string
+          && incoming().message.size() <= 240
+          && incoming().isRead == false
+          && incoming().createdAtTimestamp is int;
         allow update: if isOwner(userId)
           && isValidId(userId)
           && isValidId(notifId)
@@ -460,7 +488,24 @@ service cloud.firestore {
           && incoming().recipientUid == userId
           && incoming().isRead is bool
           && incoming().diff(existing()).affectedKeys().hasOnly(['isRead', 'handled']);
-        allow create, delete: if false;
+        allow delete: if false;
+      }
+
+      // 6.1 Projeção pública sanitizada em blocos (bloqueada automaticamente no banco quando /users/{userId}.isPrivate == true)
+      match /public_projection/{projId} {
+        allow get, list: if isValidId(userId) && (
+          isOwner(userId) || (
+            isSignedIn()
+            && get(/databases/$(database)/documents/users/$(userId)).data.isPrivate == false
+          )
+        );
+        allow create, update: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(projId)
+          && incoming().ownerUid == userId
+          && incoming().updatedAtMs is int
+          && incoming().updatedAtMs >= 0;
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(projId);
       }
 
       // 7. Subcoleção de metadados e manifesto do armazenamento em blocos escaláveis (Etapa 3)
@@ -713,6 +758,7 @@ service cloud.firestore {
         && incoming().diff(existing()).affectedKeys().hasOnly([
           'lastMessage',
           'unreadCounts',
+          'lastReadAtByUser',
           'updatedAt'
         ]);
 

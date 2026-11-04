@@ -282,7 +282,21 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
     setIsLoadingMessages(true);
     isInitialLoadRef.current = true;
     setUnreadNewMessagesCount(0);
-    markConversationAsRead(activeConvId, currentUser.id);
+    setConversations((prev) =>
+      prev.map((c) =>
+        c.id === activeConvId
+          ? {
+              ...c,
+              unreadCounts: { ...c.unreadCounts, [currentUser.id]: 0 },
+              lastMessage:
+                c.lastMessage && c.lastMessage.senderId !== currentUser.id
+                  ? { ...c.lastMessage, isRead: true }
+                  : c.lastMessage,
+            }
+          : c
+      )
+    );
+    void markConversationAsRead(activeConvId, currentUser.id);
 
     const unsubscribe = subscribeToConversation(activeConvId, currentUser.id, ({ messages: newMsgs, typingUsers }) => {
       setMessages(newMsgs);
@@ -298,6 +312,36 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
       }
     };
   }, [isOpen, activeConvId, currentUser.id]);
+
+  // Keep read state synchronized whenever an unread message arrives or is displayed in the open conversation
+  useEffect(() => {
+    if (!isOpen || !activeConvId || !currentUser.id) return;
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+
+    const activeConvObj = conversations.find((c) => c.id === activeConvId);
+    const hasUnreadCounter = (activeConvObj?.unreadCounts?.[currentUser.id] ?? 0) > 0;
+    const hasUnreadMessage = messages.some(
+      (m) => m.recipientId === currentUser.id && !m.isRead
+    );
+
+    if (hasUnreadCounter || hasUnreadMessage) {
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === activeConvId && (c.unreadCounts?.[currentUser.id] ?? 0) > 0
+            ? {
+                ...c,
+                unreadCounts: { ...c.unreadCounts, [currentUser.id]: 0 },
+                lastMessage:
+                  c.lastMessage && c.lastMessage.senderId !== currentUser.id
+                    ? { ...c.lastMessage, isRead: true }
+                    : c.lastMessage,
+              }
+            : c
+        )
+      );
+      void markConversationAsRead(activeConvId, currentUser.id);
+    }
+  }, [isOpen, activeConvId, currentUser.id, messages, conversations]);
 
   // Detect scroll position to check if user is near bottom
   const handleContainerScroll = useCallback(() => {
@@ -539,8 +583,11 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
         mediaUrl: pendingMediaUrl || undefined,
       });
 
-      // Atualização imediata
-      setMessages((prev) => [...prev, sentMsg]);
+      if (!activeConvId && sentMsg.conversationId) {
+        setActiveConvId(sentMsg.conversationId);
+      }
+      // Atualização imediata com deduplicação estrita por ID
+      setMessages((prev) => (prev.some((m) => m.id === sentMsg.id) ? prev : [...prev, sentMsg]));
       setInputText('');
       setPendingMediaUrl(null);
       setPendingMediaType(null);
@@ -703,19 +750,27 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
                 const username = partnerProfile?.username || registered?.username || 'usuario';
                 const avatarUrl = partnerProfile?.avatarUrl || registered?.avatarUrl || '';
                 const unreadCount = conv.unreadCounts[currentUser.id] || 0;
+                const hasUnread = unreadCount > 0;
                 const isActive = conv.id === activeConvId;
 
                 return (
                   <button
                     key={conv.id}
                     type="button"
+                    data-conv-id={conv.id}
+                    data-has-unread={hasUnread ? 'true' : 'false'}
                     onClick={() => {
                       setActiveConvId(conv.id);
                       setMobileView('chat');
+                      if (hasUnread) {
+                        void markConversationAsRead(conv.id, currentUser.id);
+                      }
                     }}
                     className={`w-full text-left flex items-start gap-3 p-3 transition-colors cursor-pointer group active:scale-[0.99] ${
-                      isActive
-                        ? 'bg-purple-950/60 border-l-4 border-l-purple-500'
+                      hasUnread
+                        ? 'bg-purple-950/50 border-l-4 border-l-purple-500 hover:bg-purple-950/70'
+                        : isActive
+                        ? 'bg-purple-950/60 ring-1 ring-inset ring-purple-700/40'
                         : 'hover:bg-purple-950/30'
                     }`}
                   >

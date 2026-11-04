@@ -31,6 +31,7 @@
         "participantDetails": { "type": "object" },
         "lastMessage": { "type": "object" },
         "unreadCounts": { "type": "object" },
+        "lastReadAtByUser": { "type": "object" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -103,12 +104,45 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["ownerUid", "chunkId", "chunkIndex", "animes", "count", "updatedAtMs"]
+    },
+    "PublicProjectionDoc": {
+      "title": "PublicProjectionDoc",
+      "description": "Documento sanitizado da projeção pública do perfil e blocos públicos de animes",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "updatedAtMs": { "type": "integer" }
+      },
+      "required": ["ownerUid", "updatedAtMs"]
+    },
+    "UserNotification": {
+      "title": "UserNotification",
+      "description": "Notificação individual isolada por destinatário",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "recipientUid": { "type": "string", "maxLength": 128 },
+        "type": { "type": "string", "enum": ["new_follower", "follow_request", "request_accepted"] },
+        "actor": { "type": "object" },
+        "message": { "type": "string", "maxLength": 240 },
+        "isRead": { "type": "boolean" },
+        "createdAtTimestamp": { "type": "integer" }
+      },
+      "required": ["id", "recipientUid", "type", "actor", "message", "isRead", "createdAtTimestamp"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfile" },
       "description": "Perfis públicos e metadados dos usuários"
+    },
+    "/users/{userId}/public_projection/{projId}": {
+      "schema": { "$ref": "#/entities/PublicProjectionDoc" },
+      "description": "Projeção pública sanitizada e particionada (bloqueada se isPrivate == true)"
+    },
+    "/users/{userId}/notifications/{notifId}": {
+      "schema": { "$ref": "#/entities/UserNotification" },
+      "description": "Notificações privadas do destinatário"
     },
     "/users/{userId}/anime_storage/{docId}": {
       "schema": { "$ref": "#/entities/AnimeStorageManifest" },

@@ -17,6 +17,7 @@ import { UserProfile } from '../../types';
 import { HikariEternalBadge } from '../badge/HikariEternalBadge';
 import { AetherAnimatedName } from '../badge/AetherAnimatedName';
 import { readPublicProfilesMap } from '../../lib/userWorkspaceStorage';
+import { searchRemoteUserProfiles } from '../../services/socialService';
 import { OTHER_USERS } from '../../data/mockData';
 
 export interface ProfileSearchModalProps {
@@ -56,6 +57,8 @@ export const ProfileSearchModal: React.FC<ProfileSearchModalProps> = ({
   const [isDebouncing, setIsDebouncing] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState<number>(-1);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [remoteProfiles, setRemoteProfiles] = useState<UserProfile[]>([]);
+  const [isRemoteLoading, setIsRemoteLoading] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const resultsContainerRef = useRef<HTMLDivElement>(null);
@@ -69,6 +72,8 @@ export const ProfileSearchModal: React.FC<ProfileSearchModalProps> = ({
       setIsDebouncing(false);
       setSelectedIndex(-1);
       setSearchError(null);
+      setRemoteProfiles([]);
+      setIsRemoteLoading(false);
       // Slight delay to allow portal DOM mounting before focus
       const timer = window.setTimeout(() => {
         inputRef.current?.focus();
@@ -95,6 +100,36 @@ export const ProfileSearchModal: React.FC<ProfileSearchModalProps> = ({
 
     return () => window.clearTimeout(timer);
   }, [query, isOpen]);
+
+  // Query authoritative backend profile search so cross-account/cross-tab users are always discoverable
+  useEffect(() => {
+    if (!isOpen) return;
+    const term = debouncedQuery.trim();
+    if (!term) {
+      setRemoteProfiles([]);
+      setIsRemoteLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsRemoteLoading(true);
+    void searchRemoteUserProfiles(term, 12)
+      .then((found) => {
+        if (!cancelled) {
+          setRemoteProfiles(found);
+          setIsRemoteLoading(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setIsRemoteLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [debouncedQuery, isOpen]);
 
   // Independent background scroll lock protocol:
   // Freezes document.body cleanly with top offset and restores exact scroll position on close
@@ -153,6 +188,13 @@ export const ProfileSearchModal: React.FC<ProfileSearchModalProps> = ({
       profileMap.set(currentUser.id, currentUser);
     }
 
+    // 1.5 Authoritative remote search results (reflects latest cross-account profiles & privacy flags)
+    for (const remoteProf of remoteProfiles) {
+      if (remoteProf && remoteProf.id && !profileMap.has(remoteProf.id)) {
+        profileMap.set(remoteProf.id, remoteProf);
+      }
+    }
+
     // 2. Known other profiles from props
     for (const [id, prof] of Object.entries(otherProfiles)) {
       if (id && prof && !profileMap.has(id)) {
@@ -187,7 +229,7 @@ export const ProfileSearchModal: React.FC<ProfileSearchModalProps> = ({
     }
 
     return Array.from(profileMap.values());
-  }, [isOpen, currentUser, otherProfiles, searchableProfiles]);
+  }, [isOpen, currentUser, remoteProfiles, otherProfiles, searchableProfiles]);
 
   // Filter & score matching profiles
   const searchResults = useMemo<ProfileSearchResult[]>(() => {
@@ -412,7 +454,7 @@ export const ProfileSearchModal: React.FC<ProfileSearchModalProps> = ({
           )}
 
           {/* Debouncing / Searching Skeleton Feedback */}
-          {isDebouncing && debouncedQuery !== query.trim() && (
+          {(isDebouncing || (isRemoteLoading && searchResults.length === 0)) && (
             <div className="py-6 text-center space-y-2">
               <Loader2 className="h-6 w-6 animate-spin text-purple-400 mx-auto" />
               <p className="text-xs text-purple-300/60">Buscando perfis correspondentes...</p>
@@ -420,7 +462,7 @@ export const ProfileSearchModal: React.FC<ProfileSearchModalProps> = ({
           )}
 
           {/* Empty Results State */}
-          {debouncedQuery.trim() && !isDebouncing && searchResults.length === 0 && (
+          {debouncedQuery.trim() && !isDebouncing && !isRemoteLoading && searchResults.length === 0 && (
             <div className="py-8 px-4 text-center">
               <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-2xl bg-purple-950/40 border border-purple-900/40 text-purple-400/60 mb-2.5">
                 <Search className="h-5 w-5" />

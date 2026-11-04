@@ -1,5 +1,14 @@
 import { initializeApp, getApps, getApp, type FirebaseApp, type FirebaseOptions } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, type Auth } from 'firebase/auth';
+import {
+  getAuth,
+  initializeAuth,
+  setPersistence,
+  browserSessionPersistence,
+  inMemoryPersistence,
+  browserPopupRedirectResolver,
+  GoogleAuthProvider,
+  type Auth,
+} from 'firebase/auth';
 import { getFirestore, type Firestore } from 'firebase/firestore';
 
 /**
@@ -162,8 +171,24 @@ let initializationError: string | null = null;
 if (isConfigured && evaluated.options) {
   try {
     // Prevent duplicate Firebase App initialization across HMR / module reloads
-    firebaseApp = getApps().length > 0 ? getApp() : initializeApp(evaluated.options);
-    auth = getAuth(firebaseApp);
+    const alreadyInitialized = getApps().length > 0;
+    firebaseApp = alreadyInitialized ? getApp() : initializeApp(evaluated.options);
+    if (typeof window !== 'undefined') {
+      if (!alreadyInitialized) {
+        // Isolamento estrito de sessão por aba (sessionStorage):
+        // - Atualizar a página (F5) ou abrir URL direta na mesma aba preserva 100% a conta autenticada.
+        // - Criar ou entrar em uma segunda conta em outra aba NUNCA sobrescreve a conta desta aba no IndexedDB global.
+        auth = initializeAuth(firebaseApp, {
+          persistence: [browserSessionPersistence, inMemoryPersistence],
+          popupRedirectResolver: browserPopupRedirectResolver,
+        });
+      } else {
+        auth = getAuth(firebaseApp);
+        void setPersistence(auth, browserSessionPersistence).catch(() => {});
+      }
+    } else {
+      auth = getAuth(firebaseApp);
+    }
     auth.useDeviceLanguage();
     db = evaluated.firestoreDatabaseId
       ? getFirestore(firebaseApp, evaluated.firestoreDatabaseId)
