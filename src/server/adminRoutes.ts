@@ -164,14 +164,6 @@ adminRouter.get(
         message: `Conta proprietária blindada e restrita ao UID ${AUTHORIZED_ADMIN_UID.substring(0, 6)}... (Aether).`,
       },
       {
-        id: 'encryption_status',
-        type: process.env.MAL_ENCRYPTION_KEY ? 'success' : 'info',
-        title: 'Criptografia de Tokens OAuth',
-        message: process.env.MAL_ENCRYPTION_KEY
-          ? 'Módulo AES-256-GCM ativo e pronto para encriptação de credenciais.'
-          : 'Chave de criptografia opcional de ambiente (armazenamento opera em modo protegido).',
-      },
-      {
         id: 'firebase_admin_status',
         type: adminStatus.isConfigured ? 'success' : 'info',
         title: 'Firebase Admin SDK',
@@ -246,7 +238,6 @@ adminRouter.get(
       isOwner: u.id === AUTHORIZED_ADMIN_UID,
       connectedServices: {
         anilist: Boolean(u.externalAccounts?.anilist?.connected),
-        mal: Boolean(u.externalAccounts?.mal?.connected),
       },
     }));
 
@@ -329,19 +320,49 @@ adminRouter.get(
   '/moderation',
   requireAdminAuth,
   async (_req: Request, res: Response) => {
-    res.json({
-      reports: [],
-      total: 0,
-      pending: 0,
-      systemNotice: 'Nenhuma denúncia pendente registrada no momento. O ecossistema opera em conformidade.',
-      frameworkReady: true,
-      futureCapabilities: [
-        'Registro de denúncias de comentários',
-        'Suspensão temporária de contas em conformidade com termos',
-        'Auditoria de registros de moderação',
-      ],
-      automatedPunishments: 'Desativadas por política de proteção e prevenção de falsos positivos.',
-    });
+    try {
+      const snapshot = await getAdminFirestore()
+        .collection('profile_reports')
+        .orderBy('createdAtMs', 'desc')
+        .limit(100)
+        .get();
+      const reports = snapshot.docs.map((doc) => {
+        const data = doc.data();
+        return {
+          id: doc.id,
+          targetType: String(data.targetType || 'profile'),
+          targetId: String(data.targetId || ''),
+          reporterUid: String(data.reporterUid || ''),
+          reason: String(data.reason || 'Não informado'),
+          details: String(data.details || ''),
+          status: String(data.status || 'pending'),
+          createdAt: String(data.createdAt || ''),
+        };
+      });
+      const pending = reports.filter((report) => report.status === 'pending').length;
+      return res.json({
+        reports,
+        total: reports.length,
+        pending,
+        systemNotice: reports.length ? 'Denúncias reais recebidas e aguardando análise.' : 'Nenhuma denúncia pendente registrada no momento.',
+        frameworkReady: true,
+        futureCapabilities: [
+          'Análise manual de denúncias de perfis',
+          'Registro de decisões de moderação',
+        ],
+        automatedPunishments: 'Desativadas. Nenhuma punição é aplicada automaticamente.',
+      });
+    } catch (err) {
+      return res.json({
+        reports: [],
+        total: 0,
+        pending: 0,
+        systemNotice: 'O armazenamento de denúncias não está disponível. Verifique a configuração do Firebase Admin.',
+        frameworkReady: false,
+        futureCapabilities: ['Análise manual de denúncias'],
+        automatedPunishments: 'Desativadas.',
+      });
+    }
   }
 );
 
@@ -444,12 +465,6 @@ adminRouter.get(
           name: 'Regras de Isolamento no Firestore',
           status: 'Ativo',
           description: 'Regra hasOnly impede que usuários comuns injetem campos role, isAdmin ou privilégios.',
-        },
-        {
-          id: 'check_aes_encryption',
-          name: 'Criptografia AES-256-GCM',
-          status: process.env.MAL_ENCRYPTION_KEY ? 'Ativo' : 'Não Requerido (Modo Padrão)',
-          description: 'Armazenamento de tokens OAuth protegido com IVs aleatórios de 12 bytes e Auth Tags de 16 bytes.',
         },
       ],
       secretsExposed: false,

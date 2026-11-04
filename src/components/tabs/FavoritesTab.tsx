@@ -85,6 +85,7 @@ export const FavoritesTab: React.FC<FavoritesTabProps> = React.memo(({
                         alt={anime.title}
                         loading="lazy"
                         decoding="async"
+                        fetchPriority="low"
                         referrerPolicy="no-referrer"
                         onError={() => markImageFailed(`anime_${anime.id}`)}
                         className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
@@ -155,6 +156,7 @@ export const FavoritesTab: React.FC<FavoritesTabProps> = React.memo(({
                       alt={char.name}
                       loading="lazy"
                       decoding="async"
+                      fetchPriority="low"
                       referrerPolicy="no-referrer"
                       onError={() => markImageFailed(`char_${char.id}`)}
                       className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
@@ -216,6 +218,7 @@ export const FavoritesTab: React.FC<FavoritesTabProps> = React.memo(({
                       alt={company.name}
                       loading="lazy"
                       decoding="async"
+                      fetchPriority="low"
                       referrerPolicy="no-referrer"
                       onError={() => markImageFailed(`comp_${company.id}`)}
                       className="h-12 w-12 rounded-lg object-contain bg-[#17102e] p-1 border border-purple-900/40 shrink-0"

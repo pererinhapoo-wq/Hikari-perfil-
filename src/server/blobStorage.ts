@@ -23,8 +23,8 @@ export const VERCEL_BLOB_HOST_REGEX =
   /^([a-z0-9_-]+\.)?(public\.)?blob\.vercel-storage\.com$/i;
 
 export interface DetectedImageInfo {
-  ext: 'jpg' | 'png' | 'webp';
-  mime: 'image/jpeg' | 'image/png' | 'image/webp';
+  ext: 'jpg' | 'png' | 'webp' | 'gif';
+  mime: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif';
 }
 
 export interface UploadOptions {
@@ -75,7 +75,7 @@ export function getBlobStoreId(): string {
 
 /**
  * Validação profunda de assinatura mágica de bytes para garantir que o arquivo
- * é autenticamente JPEG, PNG ou WebP e não um binário executável malicioso.
+ * é autenticamente JPEG, PNG, WebP ou GIF e não um binário executável malicioso.
  */
 export function detectImageFormat(buffer: Buffer): DetectedImageInfo | null {
   if (!buffer || buffer.length < 12) {
@@ -101,7 +101,13 @@ export function detectImageFormat(buffer: Buffer): DetectedImageInfo | null {
     return { ext: 'png', mime: 'image/png' };
   }
 
-  // 3. WebP: RIFF [4 bytes tamanho] WEBP
+  // 3. GIF87a / GIF89a: preserva animações de avatar e banner.
+  const gifSignature = buffer.toString('ascii', 0, 6);
+  if (gifSignature === 'GIF87a' || gifSignature === 'GIF89a') {
+    return { ext: 'gif', mime: 'image/gif' };
+  }
+
+  // 4. WebP: RIFF [4 bytes tamanho] WEBP
   // Bytes 0-3: 0x52 0x49 0x46 0x46 ("RIFF")
   // Bytes 8-11: 0x57 0x45 0x42 0x50 ("WEBP")
   if (
@@ -235,7 +241,7 @@ export async function uploadUserMedia(options: UploadOptions): Promise<UploadRes
   const detected = detectImageFormat(buffer);
   if (!detected) {
     throw new Error(
-      'Formato de arquivo não suportado. Somente imagens autênticas nos formatos JPEG, PNG e WebP são aceitas.'
+      'Formato de arquivo não suportado. Somente imagens autênticas nos formatos JPEG, PNG, WebP e GIF são aceitas.'
     );
   }
 

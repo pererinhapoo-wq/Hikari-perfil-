@@ -49,7 +49,7 @@ const STATUS_LABEL_MAP: Record<AnimeItem['status'], string> = {
 };
 
 const COLUMNS = 3;
-const OVERSCAN_ROWS = 2; // 2 rows above + 2 rows below = 12 buffer cards
+const OVERSCAN_ROWS = 1; // Mantém apenas uma linha extra acima/abaixo para reduzir imagens fora da tela
 const DEFAULT_ROW_HEIGHT = 380;
 
 const STATUS_CATEGORIES: { id: AnimeStatus; label: string; icon: React.ReactNode }[] = [
@@ -208,6 +208,7 @@ const AnimeCard = React.memo<AnimeCardProps>(({
               alt={anime.title}
               loading="lazy"
               decoding="async"
+              fetchPriority="low"
               referrerPolicy="no-referrer"
               onError={() => onPosterError(anime.id)}
               className="h-full w-full object-cover transition-transform duration-300 group-hover/cover:scale-105"

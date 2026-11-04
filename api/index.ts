@@ -1,5 +1,4 @@
 import express from 'express';
-import { malRouter } from '../src/server/malRoutes.js';
 import { chatRouter } from '../src/server/chatRoutes.js';
 import { adminRouter } from '../src/server/adminRoutes.js';
 import { blobRouter } from '../src/server/blobRoutes.js';
@@ -28,9 +27,6 @@ app.use((req, _res, next) => {
   next();
 });
 
-// Suporte para ambos os formatos de encaminhamento da Vercel (/api/mal e /mal)
-app.use('/api/mal', malRouter);
-app.use('/mal', malRouter);
 
 // Rotas de chat privado (/api/chat e /chat)
 app.use('/api/chat', chatRouter);
@@ -57,7 +53,7 @@ app.use('/api/users', activityRouter);
 app.get(['/api', '/api/health'], (_req, res) => {
   res.json({
     status: 'ok',
-    service: 'Hikari Profiles MAL API',
+    service: 'Hikari Perfil API',
     timestamp: Date.now(),
   });
 });

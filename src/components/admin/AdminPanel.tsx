@@ -627,7 +627,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onReturnToApp, idToken }
                       </div>
 
                       <div className="rounded-xl border border-purple-900/40 bg-purple-950/20 p-3 text-[11px] text-purple-300/70">
-                        Contas externas sincronizadas: AniList ({selectedUser.connectedServices.anilist ? 'Sim' : 'Não'}) · MAL ({selectedUser.connectedServices.mal ? 'Sim' : 'Não'})
+                        Conta externa sincronizada: AniList ({selectedUser.connectedServices.anilist ? 'Sim' : 'Não'})
                       </div>
                     </div>
 
@@ -746,17 +746,31 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onReturnToApp, idToken }
                 </p>
               </div>
 
-              {/* Status Real da Fila de Denúncias */}
-              <div className="rounded-2xl border border-purple-900/40 bg-[#120B22] p-6 text-center space-y-3">
-                <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-950/40 border border-emerald-700/40 text-emerald-400">
-                  <CheckCircle2 className="h-6 w-6" />
+              {moderation?.reports?.length ? (
+                <div className="space-y-3">
+                  {moderation.reports.map((report) => (
+                    <article key={report.id} className="rounded-xl border border-purple-900/40 bg-[#120B22] p-4 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-sm font-semibold text-white">Denúncia de perfil · {report.reason}</span>
+                        <span className="rounded-md border border-amber-600/30 bg-amber-950/30 px-2 py-1 text-[10px] font-semibold text-amber-200">{report.status || 'pending'}</span>
+                      </div>
+                      <p className="text-xs text-purple-200/80">Perfil denunciado: <span className="font-mono">{report.targetId || 'Não informado'}</span></p>
+                      {report.details && <p className="text-xs leading-relaxed text-purple-300/80">{report.details}</p>}
+                      <p className="text-[10px] text-purple-400/60">Denunciante: {report.reporterUid || 'Não informado'} · {report.createdAt || 'Data indisponível'}</p>
+                    </article>
+                  ))}
                 </div>
-                <h3 className="text-base font-bold text-white">Nenhuma Denúncia Pendente</h3>
-                <p className="text-xs text-purple-300/70 max-w-md mx-auto leading-relaxed">
-                  {moderation?.systemNotice ||
-                    'Nenhuma denúncia pendente registrada no momento. O ecossistema está operando em conformidade integral.'}
-                </p>
-              </div>
+              ) : (
+                <div className="rounded-2xl border border-purple-900/40 bg-[#120B22] p-6 text-center space-y-3">
+                  <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-950/40 border border-emerald-700/40 text-emerald-400">
+                    <CheckCircle2 className="h-6 w-6" />
+                  </div>
+                  <h3 className="text-base font-bold text-white">Nenhuma Denúncia Pendente</h3>
+                  <p className="text-xs text-purple-300/70 max-w-md mx-auto leading-relaxed">
+                    {moderation?.systemNotice || 'Nenhuma denúncia pendente registrada no momento.'}
+                  </p>
+                </div>
+              )}
 
               {/* Diretriz de Não-Punição Automática */}
               <div className="rounded-2xl border border-purple-900/40 bg-[#120B22] p-5 space-y-3 text-xs">

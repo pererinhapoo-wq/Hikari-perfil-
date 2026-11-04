@@ -66,6 +66,7 @@ export const ActivityPosterThumb: React.FC<ActivityPosterThumbProps> = React.mem
           alt={animeTitle}
           loading="lazy"
           decoding="async"
+          fetchPriority="low"
           referrerPolicy="no-referrer"
           onError={() => setErroredUrl(posterUrl)}
           className="h-full w-full object-cover object-center transition-transform duration-300 group-hover/poster:scale-105"

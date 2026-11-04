@@ -1,8 +1,62 @@
 import { Router, type Request, type Response } from 'express';
 import { socialStore } from './socialStore.js';
 import { verifyRequestUser } from './userAuth.js';
+import { getAdminFirestore } from './firebaseAdmin.js';
 
 export const socialRouter = Router();
+
+/**
+ * POST /api/users/:targetId/report
+ * Registra denúncia de perfil no Firestore (persistente entre instâncias serverless).
+ */
+socialRouter.post('/:targetId/report', async (req: Request, res: Response) => {
+  const caller = await verifyRequestUser(req);
+  if (!caller.authenticated || !caller.uid) {
+    return res.status(401).json({ ok: false, message: 'Entre na sua conta para denunciar um perfil.' });
+  }
+
+  const targetId = String(req.params.targetId || '').trim();
+  const reason = String(req.body?.reason || '').trim();
+  const details = String(req.body?.details || '').trim().slice(0, 600);
+  const allowedReasons = new Set(['assédio ou bullying', 'spam ou golpe', 'conteúdo impróprio', 'falsidade ideológica', 'outro']);
+
+  if (!targetId || targetId.length > 160 || targetId === caller.uid) {
+    return res.status(400).json({ ok: false, message: 'Perfil selecionado para denúncia inválido.' });
+  }
+  if (!allowedReasons.has(reason.toLowerCase())) {
+    return res.status(400).json({ ok: false, message: 'Selecione um motivo válido para a denúncia.' });
+  }
+
+  try {
+    const db = getAdminFirestore();
+    const recentReports = await db.collection('profile_reports')
+      .where('reporterUid', '==', caller.uid)
+      .limit(100)
+      .get();
+    const duplicate = recentReports.docs.some((doc) => {
+      const data = doc.data();
+      return data.targetId === targetId && data.status === 'pending';
+    });
+    if (duplicate) {
+      return res.json({ ok: true, duplicate: true, message: 'Você já enviou uma denúncia pendente para este perfil.' });
+    }
+
+    await db.collection('profile_reports').add({
+      targetId,
+      reporterUid: caller.uid,
+      reason,
+      details,
+      targetType: 'profile',
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+      createdAtMs: Date.now(),
+    });
+    return res.status(201).json({ ok: true, message: 'Denúncia enviada para análise.' });
+  } catch (err) {
+    console.error('[social] Não foi possível registrar denúncia de perfil:', err);
+    return res.status(503).json({ ok: false, message: 'O serviço de denúncias está indisponível no momento. Tente novamente mais tarde.' });
+  }
+});
 
 /**
  * GET /api/users/search?q=<term>&limit=10
@@ -161,7 +215,7 @@ socialRouter.get('/:idOrUsername/animes', async (req: Request, res: Response) =>
     { offset, limit }
   );
 
-  if (!view || view.isPrivateBlocked) {
+  if (!view || !('animes' in view)) {
     return res.status(403).json({
       error: 'PRIVATE_PROFILE',
       animes: [],

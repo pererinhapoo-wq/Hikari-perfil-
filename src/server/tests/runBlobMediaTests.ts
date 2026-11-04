@@ -76,6 +76,16 @@ async function main() {
     }
   }
 
+  // GIF deve ser aceito sem conversão para preservar quadros e animação.
+  await runTest('GIF87a e GIF89a são reconhecidos como image/gif', () => {
+    const gif87 = Buffer.alloc(16);
+    gif87.write('GIF87a', 0, 'ascii');
+    const gif89 = Buffer.alloc(16);
+    gif89.write('GIF89a', 0, 'ascii');
+    assert.deepStrictEqual(detectImageFormat(gif87), { ext: 'gif', mime: 'image/gif' });
+    assert.deepStrictEqual(detectImageFormat(gif89), { ext: 'gif', mime: 'image/gif' });
+  });
+
   // ==========================================================================
   // GRUPO 1: FIREBASE AUTH VIA FIREBASE ADMIN COM CHECK REVOKED
   // ==========================================================================

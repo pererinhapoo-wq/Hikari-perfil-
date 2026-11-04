@@ -59,40 +59,17 @@ export const AboutTab: React.FC<AboutTabProps> = ({ profile }) => {
             </div>
           </div>
 
-          {/* External Connected Accounts */}
-          {(profile.externalAccounts?.mal?.connected || profile.externalAccounts?.anilist?.connected) && (
+          {/* Conta externa atualmente suportada */}
+          {profile.externalAccounts?.anilist?.connected && (
             <div className="border-t border-purple-900/30 pt-3 space-y-3">
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-purple-400 block">
-                Contas Externas Vinculadas
-              </span>
-
-              {profile.externalAccounts.mal.connected && (
-                <div className="flex items-start gap-3">
-                  <div className="flex h-5 w-5 items-center justify-center rounded bg-[#2E51A2]/30 text-[#6d94e8] text-[9px] font-bold shrink-0 mt-0.5 border border-[#2E51A2]/40">
-                    MAL
-                  </div>
-                  <div>
-                    <span className="text-[11px] text-purple-300/60 block">MyAnimeList (@{profile.externalAccounts.mal.username})</span>
-                    <span className="text-xs font-semibold text-white">
-                      Criação da conta: {profile.externalAccounts.mal.accountCreatedAt || 'Informação indisponível'}
-                    </span>
-                  </div>
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-purple-400 block">Conta externa vinculada</span>
+              <div className="flex items-start gap-3">
+                <div className="flex h-5 w-5 items-center justify-center rounded bg-[#02A9FF]/20 text-[#02A9FF] text-[9px] font-bold shrink-0 mt-0.5 border border-[#02A9FF]/30">AL</div>
+                <div>
+                  <span className="text-[11px] text-purple-300/60 block">AniList (@{profile.externalAccounts.anilist.username})</span>
+                  <span className="text-xs font-semibold text-purple-300/80">Criação da conta: Não disponibilizada pela plataforma</span>
                 </div>
-              )}
-
-              {profile.externalAccounts.anilist.connected && (
-                <div className="flex items-start gap-3">
-                  <div className="flex h-5 w-5 items-center justify-center rounded bg-[#02A9FF]/20 text-[#02A9FF] text-[9px] font-bold shrink-0 mt-0.5 border border-[#02A9FF]/30">
-                    AL
-                  </div>
-                  <div>
-                    <span className="text-[11px] text-purple-300/60 block">AniList (@{profile.externalAccounts.anilist.username})</span>
-                    <span className="text-xs font-semibold text-purple-300/80">
-                      Criação da conta: Não disponibilizada pela plataforma
-                    </span>
-                  </div>
-                </div>
-              )}
+              </div>
             </div>
           )}
         </div>

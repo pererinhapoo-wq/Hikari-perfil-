@@ -25,6 +25,7 @@ import {
   fetchAuthorizedUserProfileComplete,
   followRemoteUser,
   unfollowRemoteUser,
+  submitRemoteProfileReport,
   respondRemoteFollowRequest,
   fetchOwnerNotifications,
   markOwnerNotificationsRead,
@@ -108,6 +109,7 @@ import {
   normalizeTitle,
 } from './utils/animeSyncHelpers';
 import { useAuth } from './contexts/AuthContext';
+import { uploadProfileMedia } from './services/profileMediaService';
 import {
   PUBLIC_PROFILES_STORAGE_KEY,
   adjustCachedPublicProfileFollowersCount,
@@ -1253,6 +1255,32 @@ export default function App() {
   const requestedIds = isAuthenticated ? authRequestedIds : demoRequestedIds;
   const blockedIds = isAuthenticated ? authBlockedIds : demoBlockedIds;
 
+  // Referência sincronizada para mutações rápidas de um item sem clonar listas antigas.
+  const latestAnimeMutationStateRef = useRef({ animes });
+  useEffect(() => {
+    latestAnimeMutationStateRef.current = { animes };
+  }, [animes]);
+
+  const persistAndApply = useCallback(
+    (nextAnimes: AnimeItem[], activity: UserActivity | null) => {
+      latestAnimeMutationStateRef.current = { animes: nextAnimes };
+      if (isAuthenticated && user?.uid) {
+        const uid = user.uid;
+        updateAuthWorkspace((prev) => ({
+          ...prev,
+          animes: nextAnimes,
+          activities: activity ? [activity, ...prev.activities] : prev.activities,
+        }));
+        void saveAllAnimesToChunkedFirestore(uid, nextAnimes);
+        void saveAnimesToIndexedDb(uid, nextAnimes);
+      } else {
+        setDemoAnimes(nextAnimes);
+        if (activity) setDemoActivities((prev) => [activity, ...prev]);
+      }
+    },
+    [isAuthenticated, user?.uid, updateAuthWorkspace]
+  );
+
   const applyProfilePatch = useCallback(
     (patch: UserProfileOverrides) => {
       if (isAuthenticated) {
@@ -1957,35 +1985,38 @@ export default function App() {
         // Synchronize follow/unfollow/follow-back with backend so recipient receives deduplicated notification
         if (isFollowingTarget || isRequestedTarget) {
           const remoteRes = await unfollowRemoteUser(targetId);
-          if (remoteRes?.callerSocialState) {
-            updateAuthWorkspace((prev) => {
-              const { nextWorkspace } = mergeServerSocialIntoWorkspace(
-                prev,
-                remoteRes.callerSocialState
-              );
-              return nextWorkspace;
-            });
-          } else {
-            updateAuthWorkspace((prev) => ({
-              ...prev,
-              followingIds: prev.followingIds.filter((id) => id !== targetId),
-              requestedIds: prev.requestedIds.filter((id) => id !== targetId),
-              following: prev.following.filter((u) => u.id !== targetId),
-              followers: prev.followers.map((u) =>
+          if (!remoteRes?.ok || !remoteRes.callerSocialState) {
+            throw new Error('Não foi possível confirmar a remoção do vínculo no servidor. Tente novamente.');
+          }
+
+          // A resposta do backend pode conter arrays vazios legítimos. Não use merge que
+          // restaure arrays antigos do cache: remova o alvo explicitamente após a confirmação.
+          updateAuthWorkspace((prev) => {
+            const { nextWorkspace } = mergeServerSocialIntoWorkspace(
+              prev,
+              remoteRes.callerSocialState
+            );
+            const nextFollowingIds = nextWorkspace.followingIds.filter((id) => id !== targetId);
+            const nextRequestedIds = nextWorkspace.requestedIds.filter((id) => id !== targetId);
+            const nextFollowing = nextWorkspace.following.filter((u) => u.id !== targetId);
+            const wasInFollowing = prev.followingIds.includes(targetId);
+            return {
+              ...nextWorkspace,
+              followingIds: nextFollowingIds,
+              requestedIds: nextRequestedIds,
+              following: nextFollowing,
+              followers: nextWorkspace.followers.map((u) =>
                 u.id === targetId ? { ...u, isFollowing: false } : u
               ),
-              profileOverrides:
-                delta !== 0
-                  ? {
-                      ...prev.profileOverrides,
-                      followingCount: Math.max(
-                        0,
-                        (prev.profileOverrides.followingCount ?? prev.following.length) + delta
-                      ),
-                    }
-                  : prev.profileOverrides,
-            }));
-          }
+              profileOverrides: {
+                ...nextWorkspace.profileOverrides,
+                followingCount: Math.max(
+                  0,
+                  (prev.profileOverrides.followingCount ?? prev.followingIds.length) - (wasInFollowing ? 1 : 0)
+                ),
+              },
+            };
+          });
 
           const updatedTargetFollowers =
             remoteRes?.targetFollowersCount ??
@@ -2365,31 +2396,31 @@ export default function App() {
     }));
   };
 
-  // Handler: Unfollow from modal
-  const handleUnfollowFromModal = (userId: string) => {
+  // Handler: Unfollow from modal — só atualiza a interface após confirmação do servidor.
+  const handleUnfollowFromModal = async (userId: string) => {
     if (isAuthenticated) {
-      void unfollowRemoteUser(userId);
-      updateAuthWorkspace((prev) => ({
-        ...prev,
-        following: prev.following.filter((u) => u.id !== userId),
-        followingIds: prev.followingIds.filter((id) => id !== userId),
-        profileOverrides: {
-          ...prev.profileOverrides,
-          followingCount: Math.max(0, (prev.profileOverrides.followingCount ?? prev.following.length) - 1),
-        },
-      }));
-
-      setRemoteVisitedProfiles((prev) => {
-        if (!prev[userId]) return prev;
+      const remoteRes = await unfollowRemoteUser(userId);
+      if (!remoteRes?.ok || !remoteRes.callerSocialState) return;
+      updateAuthWorkspace((prev) => {
+        const { nextWorkspace } = mergeServerSocialIntoWorkspace(prev, remoteRes.callerSocialState);
         return {
-          ...prev,
-          [userId]: {
-            ...prev[userId],
-            followersCount: Math.max(0, prev[userId].followersCount - 1),
+          ...nextWorkspace,
+          following: nextWorkspace.following.filter((u) => u.id !== userId),
+          followingIds: nextWorkspace.followingIds.filter((id) => id !== userId),
+          requestedIds: nextWorkspace.requestedIds.filter((id) => id !== userId),
+          profileOverrides: {
+            ...nextWorkspace.profileOverrides,
+            followingCount: Math.max(
+              0,
+              (prev.profileOverrides.followingCount ?? prev.followingIds.length) - (prev.followingIds.includes(userId) ? 1 : 0)
+            ),
           },
         };
       });
-
+      setRemoteVisitedProfiles((prev) => {
+        if (!prev[userId]) return prev;
+        return { ...prev, [userId]: { ...prev[userId], followersCount: remoteRes.targetFollowersCount } };
+      });
       adjustCachedPublicProfileFollowersCount(userId, -1);
       setPublicProfilesRevision((r) => r + 1);
       return;
@@ -2401,66 +2432,12 @@ export default function App() {
       next.delete(userId);
       return next;
     });
-    setDemoProfile((prev) => ({
-      ...prev,
-      followingCount: Math.max(0, prev.followingCount - 1),
-    }));
+    setDemoProfile((prev) => ({ ...prev, followingCount: Math.max(0, prev.followingCount - 1) }));
     setDemoOtherProfiles((prev) => {
       if (!prev[userId]) return prev;
-      return {
-        ...prev,
-        [userId]: {
-          ...prev[userId],
-          followersCount: Math.max(0, prev[userId].followersCount - 1),
-        },
-      };
+      return { ...prev, [userId]: { ...prev[userId], followersCount: Math.max(0, prev[userId].followersCount - 1) } };
     });
   };
-
-  // Ref to latest list state so anime mutation handlers remain referentially stable across renders
-  const latestAnimeMutationStateRef = useRef({
-    animes,
-    comments,
-    demoComments,
-  });
-  latestAnimeMutationStateRef.current = {
-    animes,
-    comments,
-    demoComments,
-  };
-
-  const persistAndApply = useCallback(
-    (
-      nextAnimes: AnimeItem[],
-      newActivity: UserActivity | null,
-      nextComments?: HikariComment[]
-    ) => {
-      const { comments: currComments, demoComments: currDemoComments } =
-        latestAnimeMutationStateRef.current;
-
-      if (isAuthenticated) {
-        updateAuthWorkspace((prev) => ({
-          ...prev,
-          animes: nextAnimes,
-          comments:
-            nextComments !== undefined && nextComments !== currComments
-              ? nextComments
-              : prev.comments,
-          activities: newActivity ? [newActivity, ...prev.activities] : prev.activities,
-        }));
-        return;
-      }
-
-      setDemoAnimes(nextAnimes);
-      if (nextComments !== undefined && nextComments !== currDemoComments) {
-        setDemoComments(nextComments);
-      }
-      if (newActivity) {
-        setDemoActivities((prev) => [newActivity, ...prev]);
-      }
-    },
-    [isAuthenticated, updateAuthWorkspace]
-  );
 
   // Handler: Update episode progress (single-slot update without full-list map cloning)
   const handleUpdateEpisode = useCallback(
@@ -2734,13 +2711,37 @@ export default function App() {
     [currentUser.id, persistAndApply]
   );
 
-  // Image updates
+  // Image updates: arquivos locais precisam ir para o Blob persistente antes
+  // de gravar a URL no workspace; Data URLs não sobrevivem de forma confiável
+  // à sincronização/recarga e podem exceder os limites do Firestore.
   const handleUpdateAvatar = (url: string) => {
-    applyProfilePatch({ avatarUrl: url });
+    if (!url.startsWith('data:image/')) {
+      applyProfilePatch({ avatarUrl: url });
+      return;
+    }
+    void uploadProfileMedia(url, 'avatar')
+      .then((storedUrl) => applyProfilePatch({ avatarUrl: storedUrl }))
+      .catch((error) => {
+        console.error('[profile-media] Falha ao salvar avatar:', error);
+        if (typeof window !== 'undefined') {
+          window.alert(error instanceof Error ? error.message : 'Não foi possível salvar a foto do perfil.');
+        }
+      });
   };
 
   const handleUpdateBanner = (url: string) => {
-    applyProfilePatch({ bannerUrl: url });
+    if (!url.startsWith('data:image/')) {
+      applyProfilePatch({ bannerUrl: url });
+      return;
+    }
+    void uploadProfileMedia(url, 'banner')
+      .then((storedUrl) => applyProfilePatch({ bannerUrl: storedUrl }))
+      .catch((error) => {
+        console.error('[profile-media] Falha ao salvar banner:', error);
+        if (typeof window !== 'undefined') {
+          window.alert(error instanceof Error ? error.message : 'Não foi possível salvar o banner.');
+        }
+      });
   };
 
   const handleRemoveAvatar = () => {
@@ -2889,74 +2890,6 @@ export default function App() {
     ]
   );
 
-  // Handler: Sync imported anime list from MyAnimeList
-  // Observação: Conforme verificação da API oficial v2 do MyAnimeList, a plataforma externa
-  // não expõe favoritos de animes ou personagens. Todos os favoritos manuais existentes
-  // no perfil são rigorosamente preservados sem qualquer alteração.
-  const handleSyncMAL = useCallback(
-    (
-      mergedAnimes: AnimeItem[],
-      malPatch: UserProfile['externalAccounts']['mal']
-    ) => {
-      const actionNow = Date.now();
-      const syncActivity: UserActivity = {
-        id: `act_${actionNow}_mal_sync`,
-        type: 'added_anime',
-        title: `Sincronizou a lista com o MyAnimeList (@${malPatch.username || ''})`,
-        description: `Lista atualizada com ${mergedAnimes.length} animes no perfil`,
-        timestamp: 'Agora',
-        createdAtTimestamp: actionNow,
-      };
-
-      if (isAuthenticated) {
-        updateAuthWorkspace((prev) => {
-          const prevAccounts = prev.profileOverrides.externalAccounts ?? {
-            anilist: { connected: false },
-            mal: { connected: false },
-          };
-          const nextExternalAccounts: UserProfile['externalAccounts'] = {
-            ...prevAccounts,
-            mal: malPatch,
-          };
-          const nextProfileOverrides = {
-            ...prev.profileOverrides,
-            externalAccounts: nextExternalAccounts,
-          };
-          return {
-            ...prev,
-            animes: mergedAnimes,
-            // Preserva 100% dos personagens favoritos já cadastrados no perfil do usuário
-            favoriteCharacters: prev.favoriteCharacters,
-            profileOverrides: nextProfileOverrides,
-            activities: [syncActivity, ...prev.activities],
-          };
-        });
-        invalidateAllAnimeCategories(currentUser.id);
-        invalidateActivitiesCache(currentUser.id);
-        return;
-      }
-
-      // Modo demonstração (persistido via debounce unificado)
-      const prevDemoAccounts = demoProfile.externalAccounts ?? {
-        anilist: { connected: false },
-        mal: { connected: false },
-      };
-      const nextDemoProfile: UserProfile = {
-        ...demoProfile,
-        externalAccounts: {
-          ...prevDemoAccounts,
-          mal: malPatch,
-        },
-      };
-      invalidateAllAnimeCategories(currentUser.id);
-      invalidateActivitiesCache(currentUser.id);
-      setDemoProfile(nextDemoProfile);
-      setDemoAnimes(mergedAnimes);
-      setDemoActivities((prev) => [syncActivity, ...prev]);
-    },
-    [isAuthenticated, currentUser.id, demoProfile, updateAuthWorkspace]
-  );
-
   // Handler: Desconectar AniList e remover animes importados exclusivamente da conta
   const handleDisconnectAniList = useCallback(
     (prunedAnimes: AnimeItem[], audit: DisconnectPruneResult) => {
@@ -3021,70 +2954,6 @@ export default function App() {
       setDemoFavoriteCharacters((prev) => pruneAniListFavoritesOnDisconnect(prev, 'char_al_'));
       setDemoFavoriteCompanies((prev) => pruneAniListFavoritesOnDisconnect(prev, 'comp_al_'));
       setDemoFavoritePeople((prev) => pruneAniListFavoritesOnDisconnect(prev, 'person_al_'));
-      void saveAnimesToIndexedDb(CURRENT_USER.id, prunedAnimes);
-      setDemoActivities((prev) => [disconnectActivity, ...prev]);
-    },
-    [isAuthenticated, user?.uid, demoProfile, currentUser.id, updateAuthWorkspace]
-  );
-
-  // Handler: Desconectar MyAnimeList e remover animes importados exclusivamente da conta
-  const handleDisconnectMAL = useCallback(
-    (prunedAnimes: AnimeItem[], audit: DisconnectPruneResult) => {
-      const actionNow = Date.now();
-      const disconnectActivity: UserActivity = {
-        id: `act_${actionNow}_mal_disconnect`,
-        type: 'status_changed',
-        title: 'Desconectou a conta do MyAnimeList',
-        description: `${audit.removedCount} animes importados foram removidos da coleção`,
-        timestamp: 'Agora',
-        createdAtTimestamp: actionNow,
-      };
-
-      if (isAuthenticated && user?.uid) {
-        const uid = user.uid;
-        updateAuthWorkspace((prev) => {
-          const prevAccounts = prev.profileOverrides.externalAccounts ?? {
-            anilist: { connected: false },
-            mal: { connected: false },
-          };
-          const nextExternalAccounts: UserProfile['externalAccounts'] = {
-            ...prevAccounts,
-            mal: { connected: false },
-          };
-          return {
-            ...prev,
-            animes: prunedAnimes,
-            profileOverrides: {
-              ...prev.profileOverrides,
-              externalAccounts: nextExternalAccounts,
-            },
-            activities: [disconnectActivity, ...prev.activities],
-          };
-        });
-        void saveAllAnimesToChunkedFirestore(uid, prunedAnimes);
-        void saveAnimesToIndexedDb(uid, prunedAnimes);
-        clearChunkedStorageMemoryCache(uid);
-        invalidateAllAnimeCategories(uid);
-        invalidateActivitiesCache(uid);
-        return;
-      }
-
-      // Modo demonstração
-      const prevDemoAccounts = demoProfile.externalAccounts ?? {
-        anilist: { connected: false },
-        mal: { connected: false },
-      };
-      const nextDemoProfile: UserProfile = {
-        ...demoProfile,
-        externalAccounts: {
-          ...prevDemoAccounts,
-          mal: { connected: false },
-        },
-      };
-      invalidateAllAnimeCategories(currentUser.id);
-      invalidateActivitiesCache(currentUser.id);
-      setDemoProfile(nextDemoProfile);
-      setDemoAnimes(prunedAnimes);
       void saveAnimesToIndexedDb(CURRENT_USER.id, prunedAnimes);
       setDemoActivities((prev) => [disconnectActivity, ...prev]);
     },
@@ -3581,6 +3450,10 @@ export default function App() {
 
       {/* Main Container */}
       <main className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+        {isPrivateLocked ? (
+          <PrivateProfileNotice />
+        ) : (
+          <>
         {/* Profile Hero Header */}
         <ProfileHeader
           profile={activeProfile}
@@ -3589,6 +3462,8 @@ export default function App() {
           isRequested={isRequestedActive}
           isBlocked={isBlockedActive}
           isFollowPending={isFollowPending}
+          canReportProfile={isAuthenticated && !isOwnProfile}
+          onSubmitProfileReport={(reason, details) => submitRemoteProfileReport(activeProfile.id, reason, details)}
           canDirectMessage={activeProfileDirectMessageCheck.allowed}
           directMessageDisabledReason={activeProfileDirectMessageCheck.reason}
           onFollowToggle={handleFollowToggle}
@@ -3617,15 +3492,7 @@ export default function App() {
 
         {/* Tab Content Display */}
         <div className="pt-2">
-          {isPrivateLocked ? (
-            <PrivateProfileNotice
-              profile={activeProfile}
-              isRequested={isRequestedActive}
-              isFollowing={isFollowingActive}
-              onRequestFollow={handleFollowToggle}
-            />
-          ) : (
-            <>
+          <>
               {(activeTab === 'overview' || activeTab === 'favorites') && (
                 <OverviewTab
                   profile={activeProfile}
@@ -3723,9 +3590,10 @@ export default function App() {
                   </Suspense>
                 )
               )}
-            </>
-          )}
+          </>
         </div>
+          </>
+        )}
       </main>
 
       {/* Social Followers & Following Modal — downloaded & mounted strictly when opened */}
@@ -3783,9 +3651,7 @@ export default function App() {
             otherProfiles={authOtherProfilesMap}
             onUnblockUser={handleBlockToggle}
             onSyncAniList={handleSyncAniList}
-            onSyncMAL={handleSyncMAL}
             onDisconnectAniList={handleDisconnectAniList}
-            onDisconnectMAL={handleDisconnectMAL}
             onClose={handleCloseSettings}
             onSaveProfile={handleSaveProfile}
             onUpdateAvatar={handleUpdateAvatar}

@@ -344,22 +344,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
-  // Check MAL server status lazily only when the Connected Accounts tab is opened
-  useEffect(() => {
-    if (!isOpen || activeTab !== 'connected' || malStatus !== null) {
-      return;
-    }
-    let isMounted = true;
-    fetchMALServerStatus()
-      .then((status) => {
-        if (isMounted) setMalStatus(status);
-      })
-      .catch(() => {});
-    return () => {
-      isMounted = false;
-    };
-  }, [isOpen, activeTab, malStatus]);
-
   // Escuta estrita e segura do callback OAuth do MyAnimeList via postMessage
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
@@ -632,7 +616,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       });
 
       if (!outcome.executed) {
-        if (outcome.reason === 'in_flight') {
+        if ('reason' in outcome && outcome.reason === 'in_flight') {
           setMalListError('Uma consulta ao MyAnimeList já está em andamento para esta conta.');
         }
         return;
@@ -805,13 +789,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           lastSync: anilistConnected ? anilistLastSync : undefined,
           accountCreatedAt: anilistConnected ? (anilistAccountCreatedAt || undefined) : undefined
         },
-        mal: { 
-          connected: malConnected, 
-          username: malConnected ? malUsername : undefined,
-          avatarUrl: malConnected ? malAvatarUrl : undefined,
-          lastSync: malConnected ? malLastSync : undefined,
-          accountCreatedAt: malConnected ? (malAccountCreatedAt || undefined) : undefined
-        }
+        mal: { connected: false }
       }
     });
     setSaveSuccess(true);
@@ -1087,20 +1065,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                                 className="h-5 w-5 rounded-full object-cover"
                               />
                               <span>Usar foto do AniList</span>
-                            </button>
-                          )}
-                          {profile.externalAccounts.mal.connected && profile.externalAccounts.mal.avatarUrl && (
-                            <button
-                              type="button"
-                              onClick={() => onUpdateAvatar(profile.externalAccounts.mal.avatarUrl!)}
-                              className="rounded-lg bg-purple-950/70 hover:bg-purple-900 border border-purple-800/40 px-2.5 py-1 text-xs text-purple-200 flex items-center gap-2 transition-colors cursor-pointer"
-                            >
-                              <img 
-                                src={profile.externalAccounts.mal.avatarUrl} 
-                                alt="MAL Avatar" 
-                                className="h-5 w-5 rounded-full object-cover"
-                              />
-                              <span>Usar foto do MyAnimeList</span>
                             </button>
                           )}
                         </div>
@@ -1671,7 +1635,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             Desconectar @{anilistUsername}?
                           </p>
                           <p className="text-[11px] text-amber-200/80 mt-0.5">
-                            Os animes importados exclusivamente do AniList serão removidos da sua lista. Animes manuais e animes também vinculados ao MyAnimeList serão preservados.
+                            Os animes importados exclusivamente do AniList serão removidos da sua lista. Animes manuais e animes vinculados a outras origens serão preservados.
                           </p>
                         </div>
                       </div>
@@ -1818,7 +1782,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                                   () => fetchAniListAnimeList(anilistUsername)
                                 );
                                 if (!outcome.executed) {
-                                  if (outcome.reason === 'in_flight') {
+                                  if ('reason' in outcome && outcome.reason === 'in_flight') {
                                     setCollectionError(
                                       'Uma consulta ao AniList já está em andamento para esta conta.'
                                     );
@@ -2330,482 +2294,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   )}
                 </div>
 
-                {/* MyAnimeList Section */}
-                <div className="space-y-4 rounded-xl border border-purple-900/40 bg-[#0A0713] p-4">
-                  {/* Top Header Row */}
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div className="flex items-center gap-3">
-                      <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#2E51A2]/20 text-[#4e74ca] border border-[#2E51A2]/40 font-bold shrink-0 text-base shadow-sm">
-                        MAL
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-bold text-white">MyAnimeList</span>
-                          {malConnected ? (
-                            <span className="rounded bg-emerald-950/80 border border-emerald-500/40 px-2 py-0.5 text-[10px] text-emerald-300 font-semibold flex items-center gap-1">
-                              <CheckCircle2 className="h-3 w-3" />
-                              Conectado
-                            </span>
-                          ) : (
-                            <span className="rounded bg-purple-950/70 border border-purple-800/40 px-1.5 py-0.2 text-[10px] text-purple-300/70 font-medium">
-                              OAuth 2.0 PKCE
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-[11px] text-purple-300/60 mt-0.5">
-                          {malConnected
-                            ? `Sincronizado com @${malUsername}`
-                            : 'Conecte sua conta MyAnimeList oficial via autorização segura OAuth 2.0 com PKCE.'}
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* Disconnect button in header if connected */}
-                    {malConnected && (
-                      <button
-                        type="button"
-                        onClick={() => setIsConfirmingDisconnectMAL(true)}
-                        className="rounded-lg border border-purple-800/40 bg-purple-950/40 hover:bg-rose-950/50 hover:border-rose-700/60 hover:text-rose-200 px-3 py-1.5 text-xs font-medium text-purple-300 transition-colors cursor-pointer self-start sm:self-auto"
-                      >
-                        Desconectar
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Disconnect Confirmation Alert */}
-                  {malConnected && isConfirmingDisconnectMAL && (
-                    <div className="rounded-xl border border-amber-500/40 bg-amber-950/30 p-3.5 space-y-2.5">
-                      <div className="flex items-start gap-2 text-amber-200 text-xs">
-                        <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400 mt-0.5" />
-                        <div>
-                          <p className="font-semibold text-white">
-                            Desconectar @{malUsername} do MyAnimeList?
-                          </p>
-                          <p className="text-[11px] text-amber-200/80 mt-0.5">
-                            Os animes importados exclusivamente do MyAnimeList serão removidos da sua lista. Animes manuais e animes também vinculados ao AniList serão preservados.
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2 justify-end pt-1">
-                        <button
-                          type="button"
-                          onClick={() => setIsConfirmingDisconnectMAL(false)}
-                          className="rounded-lg px-3 py-1.5 text-xs font-medium text-purple-300 hover:text-white transition-colors cursor-pointer"
-                        >
-                          Cancelar
-                        </button>
-                        <button
-                          type="button"
-                          onClick={handleDisconnectMAL}
-                          className="rounded-lg bg-rose-700 hover:bg-rose-600 px-3.5 py-1.5 text-xs font-semibold text-white transition-colors cursor-pointer"
-                        >
-                          Confirmar Desconexão
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Connected Account Details & Primary Actions */}
-                  {malConnected && (
-                    <div className="rounded-xl border border-purple-900/30 bg-[#120d22] p-3.5 space-y-3">
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div className="flex items-center gap-3">
-                          {malAvatarUrl ? (
-                            <img
-                              src={malAvatarUrl}
-                              alt={`Avatar MyAnimeList de ${malUsername}`}
-                              className="h-10 w-10 rounded-full object-cover border border-[#2E51A2]/50 shrink-0"
-                            />
-                          ) : (
-                            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#1b2b52] border border-[#2E51A2] text-xs font-bold text-white shrink-0">
-                              {malUsername.charAt(0).toUpperCase()}
-                            </div>
-                          )}
-                          <div>
-                            <div className="flex items-center gap-1.5">
-                              <span className="text-xs font-bold text-white">@{malUsername}</span>
-                              <a
-                                href={`https://myanimelist.net/profile/${encodeURIComponent(malUsername)}`}
-                                target="_blank"
-                                rel="noreferrer noopener"
-                                className="text-purple-400 hover:text-purple-200 transition-colors"
-                                title="Abrir perfil no MyAnimeList"
-                              >
-                                <ExternalLink className="h-3 w-3" />
-                              </a>
-                            </div>
-                            <div className="mt-1 space-y-0.5 text-[11px]">
-                              <div className="flex items-center gap-1.5 text-purple-300/80">
-                                <Calendar className="h-3.5 w-3.5 text-blue-400 shrink-0" />
-                                <span>
-                                  Criação da conta:{' '}
-                                  <strong className="text-purple-200/90 font-medium">
-                                    {malAccountCreatedAt || 'Informação indisponível'}
-                                  </strong>
-                                </span>
-                              </div>
-                              <span className="text-purple-400/70 block">
-                                {malLastSync
-                                  ? `Última sincronização: ${malLastSync}`
-                                  : 'Nenhuma importação realizada ainda nesta sessão.'}
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Action Buttons: Import & Sync Avatar */}
-                        <div className="flex flex-wrap items-center gap-2">
-                          {malAvatarUrl && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                onUpdateAvatar(malAvatarUrl);
-                                setMalSuccessMsg('Foto de perfil do Hikari atualizada com o avatar do MyAnimeList!');
-                              }}
-                              className="inline-flex items-center gap-1.5 rounded-lg border border-[#2E51A2]/40 bg-[#16213f]/60 hover:bg-[#1f2e56]/60 px-3 py-1.5 text-xs font-medium text-blue-200 transition-colors cursor-pointer"
-                              title="Aplicar avatar do MyAnimeList como sua foto de perfil no Hikari"
-                            >
-                              <Camera className="h-3.5 w-3.5 text-blue-400" />
-                              <span>Usar como foto de perfil</span>
-                            </button>
-                          )}
-
-                          <button
-                            type="button"
-                            disabled={isFetchingMALList || isImportingMAL}
-                            onClick={handleFetchMALList}
-                            className="inline-flex items-center gap-1.5 rounded-lg bg-[#2E51A2] hover:bg-[#254388] disabled:opacity-50 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors cursor-pointer disabled:cursor-not-allowed"
-                          >
-                            {isFetchingMALList ? (
-                              <>
-                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                <span>Buscando lista MAL...</span>
-                              </>
-                            ) : (
-                              <>
-                                <Download className="h-3.5 w-3.5" />
-                                <span>Prévia e Importar</span>
-                              </>
-                            )}
-                          </button>
-
-                          <button
-                            type="button"
-                            disabled={malCheckpoint?.status === 'in_progress'}
-                            onClick={handleStartMALIncremental}
-                            className="inline-flex items-center gap-1.5 rounded-lg bg-[#2E51A2] hover:bg-[#254388] disabled:opacity-50 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors cursor-pointer disabled:cursor-not-allowed"
-                            title="Importa toda a biblioteca do MyAnimeList sem limites artificiais de página em lotes incrementais com checkpoint retomável"
-                          >
-                            <RefreshCw className={`h-3.5 w-3.5 ${malCheckpoint?.status === 'in_progress' ? 'animate-spin' : ''}`} />
-                            <span>
-                              {malCheckpoint?.status === 'paused'
-                                ? 'Retomar Importação'
-                                : malCheckpoint?.status === 'error'
-                                ? 'Tentar Novamente'
-                                : 'Sincronização Completa'}
-                            </span>
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Error Banner when fetching MAL list */}
-                      {malListError && (
-                        <div
-                          role="alert"
-                          className="flex items-start gap-2.5 rounded-xl border border-rose-500/40 bg-rose-950/40 p-3 text-xs text-rose-200"
-                        >
-                          <AlertCircle className="h-4 w-4 shrink-0 text-rose-400 mt-0.5" />
-                          <div className="flex-1">
-                            <span className="leading-relaxed">{malListError}</span>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Stage 5: MAL Resumable Incremental Progress Card */}
-                      {malCheckpoint && malCheckpoint.status !== 'idle' && (
-                        <div className="pt-2">
-                          <ImportProgressCard
-                            checkpoint={malCheckpoint}
-                            onPause={() => pauseImport(profile.id, 'mal', malUsername || profile.id)}
-                            onResume={handleStartMALIncremental}
-                            onCancel={() => cancelImport(profile.id, 'mal', malUsername || profile.id)}
-                            onRetry={handleStartMALIncremental}
-                            onDismiss={() => setMalCheckpoint(null)}
-                          />
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Disconnected State: Connect via OAuth PKCE or show missing config guidance */}
-                  {!malConnected && (
-                    <div className="space-y-3 pt-1">
-                      {/* Configuration notice if server configuration is incomplete */}
-                      {malStatus && !malStatus.configured && (
-                        <div className="rounded-xl border border-amber-500/40 bg-amber-950/30 p-3.5 space-y-2">
-                          <div className="flex items-start gap-2 text-xs text-amber-200">
-                            <AlertCircle className="h-4 w-4 shrink-0 text-amber-400 mt-0.5" />
-                            <div>
-                              <p className="font-semibold text-white">
-                                {!malStatus.clientIdConfigured
-                                  ? 'Configuração necessária para MyAnimeList OAuth 2.0 PKCE'
-                                  : 'Armazenamento seguro do MyAnimeList indisponível'}
-                              </p>
-                              {!malStatus.clientIdConfigured ? (
-                                <p className="text-[11px] text-amber-200/80 mt-1 leading-relaxed">
-                                  Para autenticar contas reais via MyAnimeList API v2 oficial, defina a credencial <code className="bg-black/50 px-1 py-0.5 rounded text-amber-300 font-mono">MAL_CLIENT_ID</code> no arquivo de ambiente do servidor.
-                                </p>
-                              ) : (
-                                <p className="text-[11px] text-amber-200/80 mt-1 leading-relaxed">
-                                  O Client ID está configurado, mas o armazenamento seguro no backend encontrou uma falha de inicialização: <span className="text-amber-100 font-mono block mt-1 bg-black/40 p-1.5 rounded text-[10px] break-all">{malStatus.storageError || 'Falha ao inicializar credenciais da Service Account do Firebase Admin.'}</span>
-                                </p>
-                              )}
-                              <div className="mt-2 text-[11px] text-amber-200/90 space-y-1">
-                                <div><strong>URI de Redirecionamento oficial a cadastrar no MAL:</strong></div>
-                                <code className="block bg-black/60 border border-amber-500/30 px-2.5 py-1.5 rounded text-purple-200 break-all select-all font-mono text-[11px]">
-                                  {malStatus.redirectUri || `${typeof window !== 'undefined' ? window.location.origin : ''}/api/mal/callback`}
-                                </code>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Connect button */}
-                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
-                        <p className="text-xs text-purple-300/80">
-                          {malStatus?.configured
-                            ? 'Clique abaixo para abrir a janela oficial de autorização do MyAnimeList.'
-                            : 'O fluxo OAuth 2.0 PKCE com code_verifier/code_challenge seguro e rotas de backend estão totalmente implementados.'}
-                        </p>
-                        <button
-                          type="button"
-                          disabled={isStartingMALAuth}
-                          onClick={handleConnectMAL}
-                          className="flex items-center justify-center gap-2 rounded-xl bg-[#2E51A2] hover:bg-[#254388] disabled:opacity-50 px-4 py-2 text-xs font-semibold text-white shadow-sm transition-colors whitespace-nowrap cursor-pointer disabled:cursor-not-allowed shrink-0"
-                        >
-                          {isStartingMALAuth ? (
-                            <>
-                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                              <span>Conectando...</span>
-                            </>
-                          ) : (
-                            <>
-                              <ExternalLink className="h-3.5 w-3.5" />
-                              <span>Conectar com MyAnimeList</span>
-                            </>
-                          )}
-                        </button>
-                      </div>
-
-                      {/* Error feedback */}
-                      {malAuthError && (
-                        <div
-                          role="alert"
-                          className="flex items-start gap-2.5 rounded-xl border border-rose-500/40 bg-rose-950/40 p-3 text-xs text-rose-200"
-                        >
-                          <AlertCircle className="h-4 w-4 shrink-0 text-rose-400 mt-0.5" />
-                          <span className="leading-relaxed">{malAuthError}</span>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* MAL PREVIEW & CONFIRMATION PANEL */}
-                  {malPreview && rawMALEntries && (
-                    <div className="rounded-xl border border-[#2E51A2]/60 bg-[#111628] p-4 space-y-4 animate-in fade-in">
-                      <div className="flex items-center justify-between border-b border-[#2E51A2]/30 pb-3">
-                        <div>
-                          <h4 className="text-xs font-bold uppercase tracking-wider text-blue-300 flex items-center gap-1.5">
-                            <Layers className="h-4 w-4 text-blue-400" />
-                            <span>Prévia de Importação: @{malPreview.username} (MyAnimeList)</span>
-                          </h4>
-                          <p className="text-[11px] text-blue-200/70 mt-0.5">
-                            Revise os dados antes de confirmar a importação para o seu perfil.
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => setMalPreview(null)}
-                          className="rounded-lg p-1 text-purple-400 hover:bg-purple-900/40 hover:text-white transition-colors cursor-pointer"
-                        >
-                          <X className="h-4 w-4" />
-                        </button>
-                      </div>
-
-                      {/* Summary Metrics Pills */}
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                        <div className="rounded-lg bg-[#0a0d17] border border-[#2E51A2]/30 p-2.5 text-center">
-                          <span className="text-base font-bold text-white block">
-                            {malPreview.totalIncoming}
-                          </span>
-                          <span className="text-[10px] text-blue-300/60 uppercase font-medium">
-                            Total no MAL
-                          </span>
-                        </div>
-
-                        <div className="rounded-lg bg-emerald-950/40 border border-emerald-500/30 p-2.5 text-center">
-                          <span className="text-base font-bold text-emerald-300 block">
-                            +{malPreview.newItems.length}
-                          </span>
-                          <span className="text-[10px] text-emerald-400/80 uppercase font-medium">
-                            Novos para adicionar
-                          </span>
-                        </div>
-
-                        <div className="rounded-lg bg-purple-950/60 border border-purple-700/40 p-2.5 text-center">
-                          <span className="text-base font-bold text-purple-200 block">
-                            {malPreview.matchedItems.length}
-                          </span>
-                          <span className="text-[10px] text-purple-300/70 uppercase font-medium">
-                            Já no seu perfil
-                          </span>
-                        </div>
-
-                        <div className="rounded-lg bg-indigo-950/40 border border-indigo-500/30 p-2.5 text-center">
-                          <span className="text-base font-bold text-indigo-300 block">
-                            {malPreview.itemsWithUpdates.length}
-                          </span>
-                          <span className="text-[10px] text-indigo-300/70 uppercase font-medium">
-                            Com atualizações
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* Merge Preferences Toggle */}
-                      <div className="rounded-xl border border-[#2E51A2]/30 bg-[#0a0d17] p-3 space-y-2">
-                        <label className="flex items-start gap-2.5 cursor-pointer select-none">
-                          <input
-                            type="checkbox"
-                            checked={updateExistingProgressMAL}
-                            onChange={(e) => setUpdateExistingProgressMAL(e.target.checked)}
-                            className="mt-0.5 h-4 w-4 rounded border-purple-700 text-[#2E51A2] focus:ring-[#2E51A2] focus:ring-offset-0 bg-[#120d22] cursor-pointer"
-                          />
-                          <div className="text-xs">
-                            <span className="font-semibold text-white block">
-                              Atualizar progresso e notas dos animes já existentes
-                            </span>
-                            <span className="text-[11px] text-purple-300/70 block mt-0.5">
-                              Seus animes favoritos e registros manuais do Hikari nunca serão removidos ou desmarcados.
-                            </span>
-                          </div>
-                        </label>
-                      </div>
-
-                      {/* Scrollable Sample Preview of Incoming MAL Items */}
-                      <div className="space-y-2">
-                        <span className="text-[11px] font-semibold text-blue-300 uppercase tracking-wider block">
-                          Amostra da Lista a ser Importada ({rawMALEntries.length} animes):
-                        </span>
-                        <div className="max-h-52 overflow-y-auto space-y-1.5 pr-1 divide-y border-t border-b border-[#2E51A2]/20 divide-[#2E51A2]/20">
-                          {rawMALEntries.slice(0, 30).map((entry) => {
-                            const isNew = !malPreview.matchedItems.some(
-                              (m) => m.incoming.malId === entry.malId
-                            );
-                            const matched = malPreview.matchedItems.find(
-                              (m) => m.incoming.malId === entry.malId
-                            );
-                            const hasChanges = Boolean(matched && matched.hasChanges);
-
-                            return (
-                              <div
-                                key={entry.malId}
-                                className="flex items-center justify-between gap-3 py-1.5 text-xs"
-                              >
-                                <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                                  {entry.posterUrl ? (
-                                    <img
-                                      src={entry.posterUrl}
-                                      alt={entry.title}
-                                      className="h-9 w-6 rounded object-cover border border-[#2E51A2]/50 shrink-0"
-                                    />
-                                  ) : (
-                                    <div className="h-9 w-6 rounded bg-[#101931] border border-[#2E51A2]/40 shrink-0" />
-                                  )}
-                                  <div className="min-w-0 flex-1">
-                                    <div className="truncate font-medium text-white">{entry.title}</div>
-                                    <div className="text-[10px] text-blue-200/70 truncate">
-                                      {MAL_STATUS_LABELS_PT[entry.status]} · Ep. {entry.currentEpisode}/{entry.totalEpisodes || '?'}
-                                      {entry.rating > 0 && ` · Nota ${entry.rating}/10`}
-                                    </div>
-                                  </div>
-                                </div>
-
-                                <div className="shrink-0 text-right">
-                                  {isNew ? (
-                                    <span className="rounded bg-emerald-950/80 border border-emerald-500/40 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
-                                      Novo
-                                    </span>
-                                  ) : hasChanges ? (
-                                    <span className="rounded bg-indigo-950/80 border border-indigo-500/40 px-2 py-0.5 text-[10px] font-semibold text-indigo-300">
-                                      Atualizar
-                                    </span>
-                                  ) : (
-                                    <span className="rounded bg-neutral-900 border border-neutral-700/40 px-2 py-0.5 text-[10px] text-neutral-400">
-                                      Sem alterações
-                                    </span>
-                                  )}
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                        {rawMALEntries.length > 30 && (
-                          <div className="text-[10px] text-blue-300/60 text-center pt-1">
-                            ... e mais {rawMALEntries.length - 30} animes na lista.
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Confirmation Action Bar */}
-                      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2 border-t border-[#2E51A2]/30">
-                        <span className="text-[11px] text-blue-200/80">
-                          {malPreview.newItems.length} novos animes serão adicionados
-                          {updateExistingProgressMAL &&
-                            malPreview.itemsWithUpdates.length > 0 &&
-                            ` e ${malPreview.itemsWithUpdates.length} animes atualizados`}
-                          .
-                        </span>
-
-                        <div className="flex items-center gap-2 self-end sm:self-auto">
-                          <button
-                            type="button"
-                            disabled={isImportingMAL}
-                            onClick={() => setMalPreview(null)}
-                            className="rounded-lg px-3 py-1.5 text-xs font-semibold text-purple-300 hover:text-white transition-colors cursor-pointer"
-                          >
-                            Cancelar
-                          </button>
-
-                          <button
-                            type="button"
-                            disabled={isImportingMAL}
-                            onClick={handleConfirmMALImport}
-                            className="flex items-center gap-1.5 rounded-lg bg-[#2E51A2] hover:bg-[#254388] disabled:opacity-50 px-4 py-2 text-xs font-semibold text-white shadow-md transition-all cursor-pointer"
-                          >
-                            {isImportingMAL ? (
-                              <>
-                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                <span>Gravando animes...</span>
-                              </>
-                            ) : (
-                              <>
-                                <Check className="h-3.5 w-3.5" />
-                                <span>Confirmar e Importar</span>
-                              </>
-                            )}
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
                 {/* Privacy & Security Footnote */}
                 <div className="flex items-start gap-2.5 rounded-xl bg-purple-950/40 p-3.5 text-[11px] text-purple-300/80 border border-purple-900/30">
                   <ShieldCheck className="h-4 w-4 shrink-0 text-purple-400 mt-0.5" />
                   <span>
-                    <strong>Segurança e Privacidade:</strong> As integrações com o AniList e o MyAnimeList utilizam as APIs oficiais (GraphQL e OAuth 2.0 com PKCE). Não solicitamos senhas nem expomos credenciais externas ou tokens no frontend.
+                    <strong>Segurança e Privacidade:</strong> A integração com o AniList utiliza a API oficial GraphQL. Não solicitamos senhas nem expomos credenciais externas ou tokens no frontend.
                   </span>
                 </div>
               </div>

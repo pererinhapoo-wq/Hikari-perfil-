@@ -252,6 +252,30 @@ export async function fetchAuthorizedUserProfileComplete(
   }
 }
 
+
+export async function submitRemoteProfileReport(
+  targetId: string,
+  reason: string,
+  details = ''
+): Promise<{ ok: boolean; duplicate?: boolean; message?: string } | null> {
+  const cleanTarget = targetId.trim();
+  if (!cleanTarget) return null;
+  try {
+    const headers = await buildAuthorizedHeaders(true);
+    if (!headers.Authorization) return { ok: false, message: 'Entre na sua conta para denunciar um perfil.' };
+    const res = await fetch(buildApiUrl(`/api/users/${encodeURIComponent(cleanTarget)}/report`), {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ reason, details }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return { ok: false, message: typeof data?.message === 'string' ? data.message : 'Não foi possível enviar a denúncia.' };
+    return { ok: Boolean(data?.ok), duplicate: Boolean(data?.duplicate), message: data?.message };
+  } catch {
+    return { ok: false, message: 'Falha de conexão ao enviar a denúncia.' };
+  }
+}
+
 export async function followRemoteUser(
   targetId: string,
   followerSummary?: Partial<Pick<UserProfile, 'username' | 'displayName' | 'avatarUrl'>>,

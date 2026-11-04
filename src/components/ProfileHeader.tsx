@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
 import { 
   Camera, 
   Trash2, 
@@ -8,6 +8,9 @@ import {
   Clock, 
   Settings, 
   ShieldAlert,
+  Flag,
+  X,
+  CheckCircle2,
   UserX,
   Loader2,
   MessageSquare
@@ -24,6 +27,8 @@ interface ProfileHeaderProps {
   isRequested: boolean;
   isBlocked: boolean;
   isFollowPending?: boolean;
+  canReportProfile?: boolean;
+  onSubmitProfileReport?: (reason: string, details: string) => Promise<{ ok: boolean; duplicate?: boolean; message?: string } | null>;
   canDirectMessage?: boolean;
   directMessageDisabledReason?: string;
   onFollowToggle: () => void;
@@ -44,6 +49,8 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
   isRequested,
   isBlocked,
   isFollowPending = false,
+  canReportProfile = false,
+  onSubmitProfileReport,
   canDirectMessage = true,
   directMessageDisabledReason,
   onFollowToggle,
@@ -58,6 +65,33 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
 }) => {
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const bannerInputRef = useRef<HTMLInputElement>(null);
+  const [isReportOpen, setIsReportOpen] = useState(false);
+  const [reportReason, setReportReason] = useState('assédio ou bullying');
+  const [reportDetails, setReportDetails] = useState('');
+  const [isSubmittingReport, setIsSubmittingReport] = useState(false);
+  const [reportFeedback, setReportFeedback] = useState<string | null>(null);
+  const [reportSucceeded, setReportSucceeded] = useState(false);
+
+  const submitReport = async () => {
+    if (!onSubmitProfileReport || isSubmittingReport) return;
+    setIsSubmittingReport(true);
+    setReportFeedback(null);
+    try {
+      const result = await onSubmitProfileReport(reportReason, reportDetails);
+      if (result?.ok) {
+        setReportSucceeded(true);
+        setReportFeedback(result.message || 'Denúncia enviada para análise.');
+      } else {
+        setReportSucceeded(false);
+        setReportFeedback(result?.message || 'Não foi possível enviar a denúncia.');
+      }
+    } catch {
+      setReportSucceeded(false);
+      setReportFeedback('Não foi possível enviar a denúncia. Tente novamente.');
+    } finally {
+      setIsSubmittingReport(false);
+    }
+  };
 
   const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -88,6 +122,7 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
   };
 
   return (
+    <>
     <div className="relative w-full overflow-hidden rounded-2xl border border-purple-900/30 bg-[#130E24] shadow-2xl">
       {/* Hidden File Inputs for Device Image Upload */}
       <input
@@ -297,6 +332,18 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
                   <span>Mensagem</span>
                 </button>}
 
+                {canReportProfile && (
+                  <button
+                    type="button"
+                    onClick={() => { setIsReportOpen(true); setReportFeedback(null); setReportSucceeded(false); }}
+                    className="inline-flex items-center gap-2 rounded-xl border border-rose-500/30 bg-rose-950/20 px-3.5 py-2 text-xs sm:text-sm font-semibold text-rose-200 transition-colors hover:border-rose-400/60 hover:bg-rose-950/50"
+                    title="Denunciar este perfil"
+                  >
+                    <Flag className="h-4 w-4" />
+                    <span>Denunciar</span>
+                  </button>
+                )}
+
                 {/* Block / Unblock toggle */}
                 <button
                   onClick={onBlockToggle}
@@ -365,5 +412,46 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
         </div>
       </div>
     </div>
+      {isReportOpen && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="report-profile-title">
+          <div className="w-full max-w-md rounded-2xl border border-purple-800/50 bg-[#130E24] p-5 shadow-2xl">
+            <div className="flex items-center justify-between gap-3">
+              <h2 id="report-profile-title" className="text-base font-bold text-white">Denunciar perfil</h2>
+              <button type="button" onClick={() => setIsReportOpen(false)} className="rounded-lg p-2 text-purple-300 hover:bg-purple-900/40" aria-label="Fechar"><X className="h-4 w-4" /></button>
+            </div>
+            {reportFeedback ? (
+              <div className="mt-5 space-y-4 text-center">
+                {reportSucceeded && <CheckCircle2 className="mx-auto h-8 w-8 text-emerald-400" />}
+                <p className="text-sm text-purple-100">{reportFeedback}</p>
+                <button type="button" onClick={() => setIsReportOpen(false)} className="rounded-lg bg-purple-600 px-4 py-2 text-sm font-semibold text-white">Fechar</button>
+              </div>
+            ) : (
+              <div className="mt-4 space-y-4">
+                <p className="text-xs text-purple-200/70">Selecione o motivo. A denúncia será enviada para análise e não causará punição automática.</p>
+                <label className="block space-y-1.5">
+                  <span className="text-xs font-semibold text-purple-200">Motivo</span>
+                  <select value={reportReason} onChange={(e) => setReportReason(e.target.value)} className="w-full rounded-lg border border-purple-800/50 bg-[#0A0713] px-3 py-2.5 text-sm text-white outline-none focus:border-purple-500">
+                    <option value="assédio ou bullying">Assédio ou bullying</option>
+                    <option value="spam ou golpe">Spam ou golpe</option>
+                    <option value="conteúdo impróprio">Conteúdo impróprio</option>
+                    <option value="falsidade ideológica">Falsidade ideológica</option>
+                    <option value="outro">Outro</option>
+                  </select>
+                </label>
+                <label className="block space-y-1.5">
+                  <span className="text-xs font-semibold text-purple-200">Detalhes (opcional)</span>
+                  <textarea value={reportDetails} onChange={(e) => setReportDetails(e.target.value.slice(0, 600))} rows={3} maxLength={600} placeholder="Explique brevemente o que aconteceu..." className="w-full resize-none rounded-lg border border-purple-800/50 bg-[#0A0713] px-3 py-2.5 text-sm text-white outline-none placeholder:text-purple-400/40 focus:border-purple-500" />
+                  <span className="block text-right text-[10px] text-purple-400/60">{reportDetails.length}/600</span>
+                </label>
+                <div className="flex justify-end gap-2">
+                  <button type="button" onClick={() => setIsReportOpen(false)} className="rounded-lg border border-purple-800/50 px-4 py-2 text-sm text-purple-200">Cancelar</button>
+                  <button type="button" disabled={isSubmittingReport} onClick={submitReport} className="rounded-lg bg-rose-700 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-600 disabled:opacity-60">{isSubmittingReport ? 'Enviando...' : 'Enviar denúncia'}</button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </>
   );
 };

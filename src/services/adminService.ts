@@ -45,7 +45,6 @@ export interface AdminUserData {
   isOwner: boolean;
   connectedServices: {
     anilist: boolean;
-    mal: boolean;
   };
 }
 
@@ -65,7 +64,11 @@ export interface AdminModerationData {
   reports: Array<{
     id: string;
     targetType: string;
+    targetId?: string;
+    reporterUid?: string;
     reason: string;
+    details?: string;
+    status?: string;
     createdAt: string;
   }>;
   total: number;
