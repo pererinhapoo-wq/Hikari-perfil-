@@ -298,10 +298,13 @@ export const PrivateChatModal: React.FC<PrivateChatModalProps> = ({
     );
     void markConversationAsRead(activeConvId, currentUser.id);
 
-    const unsubscribe = subscribeToConversation(activeConvId, currentUser.id, ({ messages: newMsgs, typingUsers }) => {
+    const unsubscribe = subscribeToConversation(activeConvId, currentUser.id, ({ messages: newMsgs, typingUsers, error }) => {
       setMessages(newMsgs);
       setTypingUserIds(typingUsers);
       setIsLoadingMessages(false);
+      if (error) {
+        setErrorMessage(error);
+      }
     });
 
     return () => {

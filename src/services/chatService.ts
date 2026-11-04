@@ -508,6 +508,30 @@ function notifyAllUnreadSubscribersFromCache(): void {
 }
 
 /**
+ * Valida a estrutura mínima e a integridade de uma conversa privada em cache ou memória:
+ * - O ID deve ser válido e ter o prefixo padrão ("conv_")
+ * - Deve conter exatamente 2 participantes válidos
+ * - O usuário especificado deve ser um dos participantes
+ * - O outro participante deve ser um ID não vazio
+ * - participantDetails e unreadCounts devem ser objetos válidos
+ */
+export function isValidLegitimateConversation(
+  conv: unknown,
+  currentUserId: string
+): conv is PrivateConversation {
+  if (!conv || typeof conv !== 'object') return false;
+  const c = conv as Partial<PrivateConversation>;
+  if (typeof c.id !== 'string' || !c.id.startsWith('conv_')) return false;
+  if (!Array.isArray(c.participants) || c.participants.length !== 2) return false;
+  if (!c.participants.includes(currentUserId)) return false;
+  const otherId = c.participants.find((p) => p !== currentUserId);
+  if (!otherId || typeof otherId !== 'string' || !otherId.trim()) return false;
+  if (!c.participantDetails || typeof c.participantDetails !== 'object') return false;
+  if (!c.unreadCounts || typeof c.unreadCounts !== 'object') return false;
+  return true;
+}
+
+/**
  * Consulta conversas do usuário atual (com deduplicação de requisições concorrentes)
  */
 export async function fetchUserConversations(userId: string): Promise<PrivateConversation[]> {
@@ -520,6 +544,9 @@ export async function fetchUserConversations(userId: string): Promise<PrivateCon
   }
 
   const request = (async (): Promise<PrivateConversation[]> => {
+    let firestoreSucceeded = false;
+    let firestoreConvs: PrivateConversation[] = [];
+
     // 1. Direct Firestore query when authenticated with Firebase
     if (db && auth?.currentUser?.uid === userId) {
       try {
@@ -528,99 +555,95 @@ export async function fetchUserConversations(userId: string): Promise<PrivateCon
           where('participants', 'array-contains', userId)
         );
         const snap = await getDocs(q);
-        if (!snap.empty) {
-          const firestoreConvs: PrivateConversation[] = [];
-          snap.forEach((docSnap) => {
-            const data = docSnap.data();
-            const createdAtMs = data.createdAt?.toMillis ? data.createdAt.toMillis() : Date.now();
-            const updatedAtMs = data.updatedAt?.toMillis ? data.updatedAt.toMillis() : Date.now();
-            const lastMsgRaw = data.lastMessage;
-            firestoreConvs.push({
-              id: docSnap.id,
-              participants: data.participants || [],
-              participantDetails: data.participantDetails || {},
-              lastMessage: lastMsgRaw
-                ? {
-                    ...lastMsgRaw,
-                    createdAt: lastMsgRaw.createdAt?.toMillis
-                      ? lastMsgRaw.createdAt.toMillis()
-                      : (lastMsgRaw.createdAt || Date.now()),
-                  }
-                : undefined,
-              unreadCounts: data.unreadCounts || {},
-              createdAt: createdAtMs,
-              updatedAt: updatedAtMs,
-            });
+        firestoreSucceeded = true;
+
+        snap.forEach((docSnap) => {
+          const data = docSnap.data();
+          const createdAtMs = data.createdAt?.toMillis ? data.createdAt.toMillis() : Date.now();
+          const updatedAtMs = data.updatedAt?.toMillis ? data.updatedAt.toMillis() : Date.now();
+          const lastMsgRaw = data.lastMessage;
+          firestoreConvs.push({
+            id: docSnap.id,
+            participants: data.participants || [],
+            participantDetails: data.participantDetails || {},
+            lastMessage: lastMsgRaw
+              ? {
+                  ...lastMsgRaw,
+                  createdAt: lastMsgRaw.createdAt?.toMillis
+                    ? lastMsgRaw.createdAt.toMillis()
+                    : (lastMsgRaw.createdAt || Date.now()),
+                }
+              : undefined,
+            unreadCounts: data.unreadCounts || {},
+            createdAt: createdAtMs,
+            updatedAt: updatedAtMs,
           });
+        });
 
-          const serverConvs = firestoreConvs
-            .filter((c) => Array.isArray(c.participants) && c.participants.includes(userId))
-            .map((c) => applyClientReadFloorToConversation(userId, c));
+        const serverConvs = firestoreConvs
+          .filter((c) => Array.isArray(c.participants) && c.participants.includes(userId))
+          .map((c) => applyClientReadFloorToConversation(userId, c));
 
-          // Preserve any optimistic/local conversation created recently not yet in remote
-          const cached = readCachedConversations(userId);
-          const serverIds = new Set(serverConvs.map((c) => c.id));
-          const now = Date.now();
-          for (const localConv of cached) {
-            if (
-              !serverIds.has(localConv.id) &&
-              localConv.participants.includes(userId) &&
-              now - localConv.updatedAt < 60_000
-            ) {
-              serverConvs.push(localConv);
-            }
+        // Preserva conversas legítimas locais/pendentes de sincronização sem prazo arbitrário de 60s
+        const cached = readCachedConversations(userId);
+        const serverIds = new Set(serverConvs.map((c) => c.id));
+        for (const localConv of cached) {
+          if (!serverIds.has(localConv.id) && isValidLegitimateConversation(localConv, userId)) {
+            serverConvs.push(localConv);
           }
-          serverConvs.sort((a, b) => b.updatedAt - a.updatedAt);
-
-          lastConversationsFetchedAtByUser.set(userId, Date.now());
-          writeCachedConversations(serverConvs, userId);
-          notifyUnreadSubscribersForUser(userId, serverConvs);
-          return serverConvs;
         }
+        serverConvs.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+        lastConversationsFetchedAtByUser.set(userId, Date.now());
+        writeCachedConversations(serverConvs, userId);
+        notifyUnreadSubscribersForUser(userId, serverConvs);
+        return serverConvs;
       } catch (fsErr) {
         console.warn('[Hikari Chat] Direct Firestore conversations query fallback:', fsErr);
+        firestoreSucceeded = false;
       }
     }
 
-    // 2. Fallback to Express backend
-    try {
-      const headers = await buildChatAuthHeaders(false);
-      const res = await fetch(
-        buildChatUrl(`/api/chat/conversations?userId=${encodeURIComponent(userId)}`),
-        { headers }
-      );
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.conversations)) {
-          const serverConvs = (data.conversations as PrivateConversation[])
-            .filter((c) => Array.isArray(c.participants) && c.participants.includes(userId))
-            .map((c) => applyClientReadFloorToConversation(userId, c));
+    // 2. Fallback to Express backend (apenas se Firestore falhar com erro de rede ou não estiver configurado)
+    if (!firestoreSucceeded) {
+      try {
+        const headers = await buildChatAuthHeaders(false);
+        const res = await fetch(
+          buildChatUrl(`/api/chat/conversations?userId=${encodeURIComponent(userId)}`),
+          { headers }
+        );
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.conversations)) {
+            const serverConvs = (data.conversations as PrivateConversation[])
+              .filter((c) => Array.isArray(c.participants) && c.participants.includes(userId))
+              .map((c) => applyClientReadFloorToConversation(userId, c));
 
-          // Preserve any optimistic/local conversation created moments ago not yet in a stale poll
-          const cached = readCachedConversations(userId);
-          const serverIds = new Set(serverConvs.map((c) => c.id));
-          const now = Date.now();
-          for (const localConv of cached) {
-            if (
-              !serverIds.has(localConv.id) &&
-              localConv.participants.includes(userId) &&
-              now - localConv.updatedAt < 60_000
-            ) {
-              serverConvs.push(localConv);
+            const cached = readCachedConversations(userId);
+            const serverIds = new Set(serverConvs.map((c) => c.id));
+            for (const localConv of cached) {
+              if (!serverIds.has(localConv.id) && isValidLegitimateConversation(localConv, userId)) {
+                serverConvs.push(localConv);
+              }
             }
-          }
-          serverConvs.sort((a, b) => b.updatedAt - a.updatedAt);
+            serverConvs.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 
-          lastConversationsFetchedAtByUser.set(userId, Date.now());
-          writeCachedConversations(serverConvs, userId);
-          notifyUnreadSubscribersForUser(userId, serverConvs);
-          return serverConvs;
+            // Não sobrescrever cache com array vazio se Express não tem dados e cache local possui conversas legítimas
+            if (serverConvs.length > 0 || cached.length === 0) {
+              lastConversationsFetchedAtByUser.set(userId, Date.now());
+              writeCachedConversations(serverConvs, userId);
+            }
+            notifyUnreadSubscribersForUser(userId, serverConvs.length > 0 ? serverConvs : cached);
+            return serverConvs.length > 0 ? serverConvs : cached;
+          }
         }
+      } catch {
+        // Fallback para cache local isolado por UID
       }
-    } catch {
-      // Fallback para cache local isolado por UID
     }
-    const fallback = readCachedConversations(userId).filter((c) => c.participants.includes(userId));
+
+    // 3. Fallback final preservando conversas legítimas do cache local
+    const fallback = readCachedConversations(userId).filter((c) => isValidLegitimateConversation(c, userId));
     notifyUnreadSubscribersForUser(userId, fallback);
     return fallback;
   })();
@@ -1373,10 +1396,13 @@ function areMessagesAndTypingEqual(
 // Deduplicated Active Conversation Channel & Visibility-Aware Pollers
 // ============================================================================
 
-type ConversationUpdateListener = (payload: {
+export interface ConversationUpdatePayload {
   messages: PrivateMessage[];
   typingUsers: string[];
-}) => void;
+  error?: string | null;
+}
+
+export type ConversationUpdateListener = (payload: ConversationUpdatePayload) => void;
 
 interface SharedConversationChannel {
   key: string;
@@ -1386,6 +1412,7 @@ interface SharedConversationChannel {
   intervalId: ReturnType<typeof setInterval> | null;
   firestoreUnsubscribe: (() => void) | null;
   firestoreRealtimeActive: boolean;
+  hasResolvedInitial: boolean;
   lastKnownMessages: PrivateMessage[];
   lastKnownTyping: string[];
 }
@@ -1434,7 +1461,23 @@ async function pollChannelOnce(channel: SharedConversationChannel): Promise<void
       ),
       { headers }
     );
-    if (!res.ok || channel.listeners.size === 0) return;
+    if (!res.ok) {
+      // Se a resposta for erro e ainda não houve resolução inicial, notifica erro explícito
+      if (!channel.hasResolvedInitial && channel.listeners.size > 0 && channel.lastKnownMessages.length === 0) {
+        const errorMsg = res.status === 403
+          ? 'Acesso não autorizado às mensagens desta conversa.'
+          : 'Não foi possível carregar mensagens do servidor.';
+        for (const listener of channel.listeners) {
+          listener({
+            messages: channel.lastKnownMessages,
+            typingUsers: channel.lastKnownTyping,
+            error: errorMsg,
+          });
+        }
+      }
+      return;
+    }
+    if (channel.listeners.size === 0) return;
 
     const data = await res.json();
     const serverMessages: PrivateMessage[] = Array.isArray(data.messages) ? data.messages : [];
@@ -1447,6 +1490,9 @@ async function pollChannelOnce(channel: SharedConversationChannel): Promise<void
       channel.convId
     );
 
+    const isInitial = !channel.hasResolvedInitial;
+    channel.hasResolvedInitial = true;
+
     const isEqual = areMessagesAndTypingEqual(
       channel.lastKnownMessages,
       incomingMessages,
@@ -1454,17 +1500,30 @@ async function pollChannelOnce(channel: SharedConversationChannel): Promise<void
       incomingTyping
     );
 
-    if (!isEqual) {
+    if (!isEqual || isInitial) {
       channel.lastKnownMessages = incomingMessages;
       channel.lastKnownTyping = incomingTyping;
       writeCachedMessages(channel.convId, incomingMessages, channel.userId);
-      const payload = { messages: incomingMessages, typingUsers: incomingTyping };
+      const payload: ConversationUpdatePayload = {
+        messages: incomingMessages,
+        typingUsers: incomingTyping,
+        error: null,
+      };
       for (const listener of channel.listeners) {
         listener(payload);
       }
     }
   } catch {
-    // Ignora erro transitório sem apagar mensagens em exibição
+    // Falha de rede: se ainda não emitiu resolução inicial e não há mensagens em cache, notifica erro explícito
+    if (!channel.hasResolvedInitial && channel.listeners.size > 0 && channel.lastKnownMessages.length === 0) {
+      for (const listener of channel.listeners) {
+        listener({
+          messages: channel.lastKnownMessages,
+          typingUsers: channel.lastKnownTyping,
+          error: 'Falha de conexão ao carregar histórico.',
+        });
+      }
+    }
   }
 }
 
@@ -1663,6 +1722,7 @@ export function subscribeToConversation(
       intervalId: null,
       firestoreUnsubscribe: null,
       firestoreRealtimeActive: false,
+      hasResolvedInitial: false,
       lastKnownMessages: readCachedMessages(convId, userId),
       lastKnownTyping: [],
     };
@@ -1671,10 +1731,12 @@ export function subscribeToConversation(
 
   channel.listeners.add(onUpdate);
 
-  if (channel.lastKnownMessages.length > 0 || channel.lastKnownTyping.length > 0) {
+  // Se o canal já tem mensagens em cache OU se já concluiu resolução remota inicial (mesmo com 0 mensagens)
+  if (channel.hasResolvedInitial || channel.lastKnownMessages.length > 0 || channel.lastKnownTyping.length > 0) {
     onUpdate({
       messages: channel.lastKnownMessages,
       typingUsers: channel.lastKnownTyping,
+      error: null,
     });
   }
 
@@ -1723,18 +1785,24 @@ export function subscribeToConversation(
               convId
             );
 
+            const isInitial = !activeChannel.hasResolvedInitial;
+            activeChannel.hasResolvedInitial = true;
+
             const isEqual = areMessagesAndTypingEqual(
               activeChannel.lastKnownMessages,
               mergedMsgs,
               activeChannel.lastKnownTyping,
               activeChannel.lastKnownTyping
             );
-            if (!isEqual) {
+
+            // Emite obrigatoriamente se houve alteração OU se for a primeira resolução do canal (mesmo vazia!)
+            if (!isEqual || isInitial) {
               activeChannel.lastKnownMessages = mergedMsgs;
               writeCachedMessages(convId, mergedMsgs, userId);
-              const payload = {
+              const payload: ConversationUpdatePayload = {
                 messages: mergedMsgs,
                 typingUsers: activeChannel.lastKnownTyping,
+                error: null,
               };
               for (const listener of activeChannel.listeners) {
                 listener(payload);
@@ -1744,6 +1812,16 @@ export function subscribeToConversation(
           (snapshotErr) => {
             console.warn('[Hikari Chat] Realtime conversation snapshot error, using polling fallback:', snapshotErr);
             activeChannel.firestoreRealtimeActive = false;
+            // Se o snapshot falhar e não há mensagens em cache, notifica os listeners com erro sem fingir vazio
+            if (!activeChannel.hasResolvedInitial && activeChannel.lastKnownMessages.length === 0) {
+              for (const listener of activeChannel.listeners) {
+                listener({
+                  messages: activeChannel.lastKnownMessages,
+                  typingUsers: activeChannel.lastKnownTyping,
+                  error: 'Falha ao sincronizar com Firestore. Tentando fallback...',
+                });
+              }
+            }
             startChannelPollTimerIfNeeded(activeChannel);
           }
         );

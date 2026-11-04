@@ -1,0 +1,5 @@
+{
+  "summary": "Checkpoint da Etapa 1.5 documentando as correções cirúrgicas aplicadas no serviço de mensagens privadas (chatService.ts e PrivateChatModal.tsx), eliminando o carregamento infinito do histórico e a perda de conversas legítimas por expiração de cache.",
+  "updatedAt": "2026-11-04T02:53:35.007765575Z",
+  "userFacing": true
+}
