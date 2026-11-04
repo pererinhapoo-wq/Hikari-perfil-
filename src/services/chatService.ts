@@ -57,6 +57,7 @@ export interface ChatTestFirestoreHooks {
     onNext: (snap: any) => void,
     onError: (err: any) => void
   ) => () => void;
+  writeBatch?: (db: any) => any;
   authUid?: string | null;
   dbPresent?: boolean;
 }
@@ -163,6 +164,34 @@ const memoryMessagesCache = new Map<
 // Tracks explicit per-user, per-conversation read timestamps so stale in-flight polls
 // never revert a viewed conversation back to unread ("barra roxa").
 const lastMarkedReadAtByUserAndConv = new Map<string, number>();
+
+// Conjunto em memória de conversas cuja existência no Firestore já foi confirmada
+// durante a sessão atual (via getConversations, getMessages, listener ou batch.commit anterior)
+const confirmedFirestoreConversations = new Set<string>();
+
+export function isConversationConfirmedInFirestore(convId: string, userId?: string): boolean {
+  if (!convId) return false;
+  if (confirmedFirestoreConversations.has(convId)) {
+    return true;
+  }
+  if (userId) {
+    const channelKey = `${userId}::${convId}`;
+    const channel = activeConversationChannels.get(channelKey);
+    if (channel && channel.parentDocChecked && channel.parentDocExists) {
+      return true;
+    }
+    if (channel && (channel.firestoreRealtimeActive || channel.firestoreUnsubscribe !== null)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function markConversationConfirmedInFirestore(convId: string): void {
+  if (convId) {
+    confirmedFirestoreConversations.add(convId);
+  }
+}
 
 let chatStorageListenerAttached = false;
 
@@ -332,6 +361,7 @@ export function clearChatSessionMemoryCache(keepUid?: string): void {
   if (!cleanKeep) {
     lastSyncedPrivacySignatureByUserId.clear();
     lastMarkedReadAtByUserAndConv.clear();
+    confirmedFirestoreConversations.clear();
   }
   detachChatVisibilityListenerIfIdle();
 }
@@ -577,6 +607,7 @@ export async function fetchUserConversations(userId: string): Promise<PrivateCon
         firestoreSucceeded = true;
 
         snap.forEach((docSnap) => {
+          confirmedFirestoreConversations.add(docSnap.id);
           const data = docSnap.data();
           const createdAtMs = data.createdAt?.toMillis ? data.createdAt.toMillis() : Date.now();
           const updatedAtMs = data.updatedAt?.toMillis ? data.updatedAt.toMillis() : Date.now();
@@ -685,9 +716,13 @@ export async function startOrGetConversation(
   const rawSenderId = sender.id ? sender.id.trim() : '';
   const isDemoSender = isDemoMockUserId(rawSenderId);
 
+  const effectiveAuthUid = chatTestFirestoreHooks?.authUid !== undefined
+    ? chatTestFirestoreHooks.authUid
+    : auth?.currentUser?.uid;
+
   let effectiveSenderId: string;
-  if (auth?.currentUser) {
-    effectiveSenderId = auth.currentUser.uid;
+  if (effectiveAuthUid) {
+    effectiveSenderId = effectiveAuthUid;
     if (rawSenderId && rawSenderId !== effectiveSenderId && !isDemoSender) {
       throw new Error('Usuário autenticado não corresponde ao remetente da conversa.');
     }
@@ -764,6 +799,7 @@ export async function startOrGetConversation(
             updatedAt: serverTimestamp(),
           });
         }
+        confirmedFirestoreConversations.add(convId);
         activateConversationRealtimeListener(convId, effectiveSenderId);
       } catch (firestoreErr) {
         console.warn('[Hikari Chat] Failed to ensure conversation document in Firestore:', firestoreErr);
@@ -815,6 +851,7 @@ export async function fetchConversationMessages(
       const convDocRef = doc(db, 'conversations', convId);
       const convSnap = await getDoc(convDocRef);
       if (convSnap.exists()) {
+        confirmedFirestoreConversations.add(convId);
         const messagesCol = collection(db, 'conversations', convId, 'messages');
         const q = query(
           messagesCol,
@@ -937,9 +974,13 @@ export async function sendPrivateMessage(payload: {
   const rawSenderId = sender.id ? sender.id.trim() : '';
   const isDemoSender = isDemoMockUserId(rawSenderId);
 
+  const effectiveAuthUid = chatTestFirestoreHooks?.authUid !== undefined
+    ? chatTestFirestoreHooks.authUid
+    : auth?.currentUser?.uid;
+
   let effectiveSenderId: string;
-  if (auth?.currentUser) {
-    effectiveSenderId = auth.currentUser.uid;
+  if (effectiveAuthUid) {
+    effectiveSenderId = effectiveAuthUid;
     if (rawSenderId && rawSenderId !== effectiveSenderId && !isDemoSender) {
       throw new Error('Usuário autenticado não corresponde ao remetente da mensagem.');
     }
@@ -1096,17 +1137,33 @@ export async function sendPrivateMessage(payload: {
     console.warn('[Hikari Chat] Network error contacting chat backend:', netErr);
   }
 
-  // 4. Persistência atômica no Firestore via writeBatch (cria doc pai e mensagem de uma só vez)
+  // 4. Persistência atômica no Firestore via writeBatch (cria doc pai e mensagem de uma só vez sem getDoc prévio)
   let firestorePersisted = false;
-  if (db && auth?.currentUser?.uid === effectiveSenderId) {
+  const effectiveDb = chatTestFirestoreHooks?.dbPresent !== undefined
+    ? (chatTestFirestoreHooks.dbPresent ? (db || true) : null)
+    : db;
+  const effectiveUid = chatTestFirestoreHooks?.authUid !== undefined
+    ? chatTestFirestoreHooks.authUid
+    : auth?.currentUser?.uid;
+
+  if (effectiveDb && effectiveUid === effectiveSenderId) {
     try {
-      const convDocRef = doc(db, 'conversations', targetConvId);
-      const msgDocRef = doc(db, 'conversations', targetConvId, 'messages', msgId);
-      const convSnap = await getDoc(convDocRef);
+      const convDocRef = db
+        ? doc(db, 'conversations', targetConvId)
+        : ({ id: targetConvId, path: `conversations/${targetConvId}` } as any);
+      const msgDocRef = db
+        ? doc(db, 'conversations', targetConvId, 'messages', msgId)
+        : ({ id: msgId, path: `conversations/${targetConvId}/messages/${msgId}` } as any);
 
-      const batch = writeBatch(db);
+      // Etapa 1.10: Identificação segura do estado da conversa SEM getDoc prévio
+      const isExisting = isConversationConfirmedInFirestore(targetConvId, effectiveSenderId);
 
-      if (!convSnap.exists()) {
+      const batch = chatTestFirestoreHooks?.writeBatch
+        ? chatTestFirestoreHooks.writeBatch(db)
+        : writeBatch(db as any);
+
+      if (!isExisting) {
+        // Caso B: Criação atômica da conversa pai e primeira mensagem no mesmo writeBatch
         batch.set(convDocRef, {
           id: targetConvId,
           participants: [effectiveSenderId, safeRecipient.id],
@@ -1141,6 +1198,7 @@ export async function sendPrivateMessage(payload: {
           updatedAt: serverTimestamp(),
         });
       } else {
+        // Operação 1: Atualização em conversa existente (preserva rigorosamente participants, contadores e lastReadAtByUser)
         batch.update(convDocRef, {
           lastMessage: {
             id: msgId,
@@ -1176,10 +1234,34 @@ export async function sendPrivateMessage(payload: {
       await batch.commit();
       firestorePersisted = true;
 
-      // Etapa 1.7: Reativa ou inicia o listener do Firestore em tempo real imediatamente após a confirmação do batch.commit()
+      // Confirma que a conversa existe no Firestore
+      confirmedFirestoreConversations.add(targetConvId);
+      const activeChannel = activeConversationChannels.get(`${effectiveSenderId}::${targetConvId}`);
+      if (activeChannel) {
+        activeChannel.parentDocExists = true;
+        activeChannel.parentDocChecked = true;
+      }
+
+      // Etapa 1.10: Reativa ou inicia o listener do Firestore em tempo real SOMENTE após a confirmação do batch.commit()
       activateConversationRealtimeListener(targetConvId, effectiveSenderId);
-    } catch (fsErr) {
-      console.error('[Hikari Chat] Failed to persist message batch in Firestore:', fsErr);
+    } catch (fsErr: any) {
+      const fsErrCode = fsErr?.code;
+      if (fsErrCode === 'permission-denied') {
+        // Segurança: Erro real de permissão. NUNCA tentar criação alternativa nem contornar regras.
+        console.error('[Hikari Chat] Security permission-denied persisting message batch in Firestore:', {
+          convId: targetConvId,
+          senderId: effectiveSenderId,
+          code: fsErrCode,
+          message: fsErr?.message,
+        });
+      } else {
+        console.warn('[Hikari Chat] Non-fatal error persisting message batch in Firestore (fallback active):', {
+          convId: targetConvId,
+          senderId: effectiveSenderId,
+          code: fsErrCode,
+          message: fsErr?.message,
+        });
+      }
     }
   }
 
@@ -1888,6 +1970,9 @@ function startFirestoreMessagesListener(channel: SharedConversationChannel): voi
  * de gravação atômica do documento pai e primeira mensagem via batch.commit() ou startOrGetConversation.
  */
 export function activateConversationRealtimeListener(convId: string, userId: string): void {
+  if (convId) {
+    confirmedFirestoreConversations.add(convId);
+  }
   const channelKey = `${userId}::${convId}`;
   const activeChannel = activeConversationChannels.get(channelKey);
   if (activeChannel && activeChannel.listeners.size > 0) {
@@ -1996,6 +2081,7 @@ async function attachFirestoreListenerIfParentExists(channel: SharedConversation
     }
 
     channel.parentDocExists = true;
+    confirmedFirestoreConversations.add(channel.convId);
 
     const convData = typeof convSnap.data === 'function' ? convSnap.data() : convSnap.data;
     if (convData && Array.isArray(convData.participants)) {

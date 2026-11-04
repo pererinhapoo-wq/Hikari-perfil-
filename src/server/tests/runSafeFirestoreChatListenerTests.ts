@@ -138,12 +138,13 @@ async function runAllTests() {
     assert.strictEqual(parentDocGetCount, 1, 'Deve ter verificado getDoc do documento pai');
     assert.strictEqual(messagesSnapshotStarted, false, 'NÃO deve iniciar listener onSnapshot na subcoleção');
     assert.ok(receivedPayload, 'Deve ter emitido atualização inicial via fallback Express');
+    const payload = receivedPayload as ConversationUpdatePayload;
     assert.strictEqual(
-      receivedPayload.error,
+      payload.error,
       null,
       'NÃO deve apresentar aviso de falha ao sincronizar com Firestore'
     );
-    assert.deepStrictEqual(receivedPayload.messages, [], 'Mensagens devem ser lista vazia');
+    assert.deepStrictEqual(payload.messages, [], 'Mensagens devem ser lista vazia');
 
     unsub();
   });
@@ -211,8 +212,9 @@ async function runAllTests() {
 
     await new Promise((r) => setTimeout(r, 60));
     assert.strictEqual(snapshotCount, 1, 'Listener onSnapshot deve ter sido iniciado após criação do pai');
-    assert.ok(lastPayload && lastPayload.messages.length > 0, 'Deve ter recebido a mensagem em tempo real');
-    assert.strictEqual(lastPayload.messages[0].text, 'Primeira mensagem!');
+    const pl2 = lastPayload as ConversationUpdatePayload | null;
+    assert.ok(pl2 && pl2.messages.length > 0, 'Deve ter recebido a mensagem em tempo real');
+    assert.strictEqual(pl2.messages[0].text, 'Primeira mensagem!');
 
     unsub();
   });
@@ -264,9 +266,11 @@ async function runAllTests() {
     await new Promise((r) => setTimeout(r, 60));
 
     assert.strictEqual(snapshotStarted, true, 'Deve ter iniciado o listener onSnapshot');
-    assert.ok(receivedPayload && receivedPayload.messages.length === 1);
-    assert.strictEqual(receivedPayload.messages[0].text, 'Olá Alice!');
-    assert.strictEqual(receivedPayload.error, null);
+    assert.ok(receivedPayload);
+    const pl3 = receivedPayload as ConversationUpdatePayload;
+    assert.strictEqual(pl3.messages.length, 1);
+    assert.strictEqual(pl3.messages[0].text, 'Olá Alice!');
+    assert.strictEqual(pl3.error, null);
 
     unsub();
   });
@@ -329,9 +333,11 @@ async function runAllTests() {
     await new Promise((r) => setTimeout(r, 60));
 
     assert.strictEqual(subcollectionQueried, false, 'Não deve abrir onSnapshot na subcoleção');
-    assert.ok(receivedPayload && receivedPayload.messages.length === 1);
-    assert.strictEqual(receivedPayload.messages[0].text, 'Mensagem antiga do servidor Express');
-    assert.strictEqual(receivedPayload.error, null, 'Nenhum erro falso deve ser emitido');
+    assert.ok(receivedPayload);
+    const pl4 = receivedPayload as ConversationUpdatePayload;
+    assert.strictEqual(pl4.messages.length, 1);
+    assert.strictEqual(pl4.messages[0].text, 'Mensagem antiga do servidor Express');
+    assert.strictEqual(pl4.error, null, 'Nenhum erro falso deve ser emitido');
 
     unsub();
   });
@@ -445,8 +451,9 @@ async function runAllTests() {
     await new Promise((r) => setTimeout(r, 60));
 
     assert.ok(receivedPayload);
+    const pl7 = receivedPayload as ConversationUpdatePayload;
     assert.ok(
-      receivedPayload.error && receivedPayload.error.includes('Acesso negado'),
+      pl7.error && pl7.error.includes('Acesso negado'),
       'Deve acusar explicitamente acesso negado para falha de segurança real'
     );
 
@@ -506,12 +513,13 @@ async function runAllTests() {
     await new Promise((r) => setTimeout(r, 60));
 
     assert.ok(receivedPayload);
-    assert.strictEqual(receivedPayload.messages.length, 1);
+    const pl8 = receivedPayload as ConversationUpdatePayload;
+    assert.strictEqual(pl8.messages.length, 1);
     assert.strictEqual(
-      receivedPayload.messages[0].text,
+      pl8.messages[0].text,
       'Mensagem via fallback Express funcionando perfeitamente'
     );
-    assert.strictEqual(receivedPayload.error, null);
+    assert.strictEqual(pl8.error, null);
 
     unsub();
   });
